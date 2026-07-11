@@ -979,6 +979,16 @@ public class ConnectionsManager extends BaseController {
     public static native void native_setUserId(int currentAccount, long id);
     public static native void native_init(int currentAccount, int version, int layer, int apiId, String deviceModel, String systemVersion, String appVersion, String langCode, String systemLangCode, String configPath, String logPath, String regId, String cFingerprint, String installer, String packageId, int timezoneOffset, long userId, boolean userPremium, boolean enablePushConnection, boolean hasNetwork, int networkType, int performanceClass);
     public static native void native_setProxySettings(int currentAccount, String address, int port, String username, String password, String secret);
+    public static native void native_setTlsFragmentConfig(boolean enabled, int minBytes, int maxBytes);
+    public static native void native_setTlsFingerprintProfile(int profile, int rotationIntervalSec);
+
+    public static void setTlsFragmentConfig(boolean enabled, int minBytes, int maxBytes) {
+        native_setTlsFragmentConfig(enabled, minBytes, maxBytes);
+    }
+
+    public static void setTlsFingerprintProfile(int profile, int rotationIntervalSec) {
+        native_setTlsFingerprintProfile(profile, rotationIntervalSec);
+    }
     public static native void native_setLangCode(int currentAccount, String langCode);
     public static native void native_setRegId(int currentAccount, String regId);
     public static native void native_setSystemLangCode(int currentAccount, String langCode);
