@@ -1,0 +1,216 @@
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
+index 5e5e6934c..b807df3b8 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
+@@ -108,6 +108,23 @@ public class ProxySettingsActivity extends BaseFragment {
+ 
+     private ClipboardManager clipboardManager;
+ 
++    // TLS Fragmentation UI
++    private LinearLayout fragmentContainer;
++    private android.widget.Switch fragmentSwitch;
++    private EditTextBoldCursor fragmentMinField;
++    private EditTextBoldCursor fragmentMaxField;
++
++    // TLS Fingerprint profile UI
++    private TextSettingsCell fingerprintProfileCell;
++    private int currentFingerprintProfile = 0;
++    private int currentRotationInterval = 0;
++    private FrameLayout rotationIntervalContainer;
++    private EditTextBoldCursor rotationIntervalField;
++    private static final String[] FINGERPRINT_PROFILE_NAMES = {
++        "Chrome 120+ (default)", "Firefox 121+", "Safari 17", "Edge 120+", "Random"
++    };
++
++
+     private boolean addingNewProxy;
+ 
+     private SharedConfig.ProxyInfo currentProxyInfo;
+@@ -198,7 +215,7 @@ public class ProxySettingsActivity extends BaseFragment {
+         actionBar.setTitle(LocaleController.getString(R.string.ProxyDetails));
+         actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+         actionBar.setAllowOverlayTitle(false);
+-        if (parentLayout != null && parentLayout.isLayersLayout()) {
++        if (AndroidUtilities.isTablet()) {
+             actionBar.setOccupyStatusBar(false);
+         }
+ 
+@@ -243,6 +260,27 @@ public class ProxySettingsActivity extends BaseFragment {
+                         editor.putString("proxy_secret", currentProxyInfo.secret);
+                         ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret);
+                     }
++                    // Save and apply TLS fingerprint profile
++                    if (rotationIntervalField != null) {
++                        currentRotationInterval = Utilities.parseInt(rotationIntervalField.getText().toString());
++                        if (currentRotationInterval < 30 && currentRotationInterval != 0) currentRotationInterval = 30;
++                        if (currentRotationInterval > 240) currentRotationInterval = 240;
++                    }
++                    editor.putInt("tls_fingerprint_profile", currentFingerprintProfile);
++                    editor.putInt("tls_rotation_interval", currentRotationInterval);
++                    ConnectionsManager.setTlsFingerprintProfile(currentFingerprintProfile, currentRotationInterval);
++                    // Save and apply TLS fragment settings
++                    if (fragmentContainer != null) {
++                        boolean fragEnabled = fragmentSwitch.isChecked();
++                        int fragMin = Utilities.parseInt(fragmentMinField.getText().toString());
++                        int fragMax = Utilities.parseInt(fragmentMaxField.getText().toString());
++                        if (fragMin < 1) fragMin = 1;
++                        if (fragMax < fragMin) fragMax = fragMin;
++                        editor.putBoolean("tls_fragment_enabled", fragEnabled);
++                        editor.putInt("tls_fragment_min", fragMin);
++                        editor.putInt("tls_fragment_max", fragMax);
++                        ConnectionsManager.setTlsFragmentConfig(fragEnabled, fragMin, fragMax);
++                    }
+                     editor.commit();
+ 
+                     NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
+@@ -448,6 +486,135 @@ public class ProxySettingsActivity extends BaseFragment {
+             linearLayout2.addView(bottomCells[i], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+         }
+ 
++        // TLS Fingerprint + Fragmentation section (MTProto only)
++        SharedPreferences fragPrefs = MessagesController.getGlobalMainSettings();
++        boolean savedFragEnabled = fragPrefs.getBoolean("tls_fragment_enabled", false);
++        int savedFragMin = fragPrefs.getInt("tls_fragment_min", 1);
++        int savedFragMax = fragPrefs.getInt("tls_fragment_max", 3);
++        currentFingerprintProfile = fragPrefs.getInt("tls_fingerprint_profile", 0);
++        currentRotationInterval = fragPrefs.getInt("tls_rotation_interval", 0);
++        ConnectionsManager.setTlsFragmentConfig(savedFragEnabled, savedFragMin, savedFragMax);
++        ConnectionsManager.setTlsFingerprintProfile(currentFingerprintProfile, currentRotationInterval);
++
++        fragmentContainer = new LinearLayout(context);
++        fragmentContainer.setOrientation(LinearLayout.VERTICAL);
++        fragmentContainer.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
++        linearLayout2.addView(fragmentContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++        fragmentContainer.setVisibility(View.GONE);
++
++        // TLS Fingerprint profile section
++        HeaderCell fpHeader = new HeaderCell(context);
++        fpHeader.setText("TLS Fingerprint");
++        fragmentContainer.addView(fpHeader, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
++        fingerprintProfileCell = new TextSettingsCell(context);
++        fingerprintProfileCell.setBackground(Theme.getSelectorDrawable(true));
++        fingerprintProfileCell.setTextAndValue("Browser profile", FINGERPRINT_PROFILE_NAMES[currentFingerprintProfile], false);
++        fingerprintProfileCell.setOnClickListener(v -> {
++            if (getParentActivity() == null) return;
++            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
++            builder.setTitle("TLS Fingerprint Profile");
++            builder.setSingleChoiceItems(FINGERPRINT_PROFILE_NAMES, currentFingerprintProfile, (dialog, which) -> {
++                currentFingerprintProfile = which;
++                fingerprintProfileCell.setTextAndValue("Browser profile", FINGERPRINT_PROFILE_NAMES[which], false);
++                // show/hide rotation interval for Random profile (index 4)
++                if (rotationIntervalContainer != null) {
++                    rotationIntervalContainer.setVisibility(which == 4 ? View.VISIBLE : View.GONE);
++                }
++                dialog.dismiss();
++            });
++            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
++            showDialog(builder.create());
++        });
++        fragmentContainer.addView(fingerprintProfileCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
++        // Rotation interval field (visible only when Random profile is selected)
++        rotationIntervalContainer = new FrameLayout(context);
++        rotationIntervalContainer.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
++        rotationIntervalField = new EditTextBoldCursor(context);
++        rotationIntervalField.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
++        rotationIntervalField.setHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
++        rotationIntervalField.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        rotationIntervalField.setBackground(null);
++        rotationIntervalField.setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        rotationIntervalField.setInputType(InputType.TYPE_CLASS_NUMBER);
++        rotationIntervalField.setSingleLine(true);
++        rotationIntervalField.setGravity((LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
++        rotationIntervalField.setHeaderHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader));
++        rotationIntervalField.setTransformHintToHeader(true);
++        rotationIntervalField.setLineColors(Theme.getColor(Theme.key_windowBackgroundWhiteInputField), Theme.getColor(Theme.key_windowBackgroundWhiteInputFieldActivated), Theme.getColor(Theme.key_text_RedRegular));
++        rotationIntervalField.setHintText("Rotation interval, sec (30–240, 0=per connection)");
++        rotationIntervalField.setText(currentRotationInterval > 0 ? String.valueOf(currentRotationInterval) : "");
++        rotationIntervalField.setPadding(AndroidUtilities.dp(LocaleController.isRTL ? 0 : 21), 0, AndroidUtilities.dp(LocaleController.isRTL ? 21 : 0), 0);
++        rotationIntervalContainer.addView(rotationIntervalField, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 64, Gravity.CENTER_VERTICAL));
++        fragmentContainer.addView(rotationIntervalContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 64));
++        rotationIntervalContainer.setVisibility(currentFingerprintProfile == 4 ? View.VISIBLE : View.GONE);
++
++        // Section header
++        HeaderCell fragHeader = new HeaderCell(context);
++        fragHeader.setText("TLS Fragmentation");
++        fragmentContainer.addView(fragHeader, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
++        // Toggle row
++        FrameLayout switchRow = new FrameLayout(context);
++        switchRow.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
++        TextView switchLabel = new TextView(context);
++        switchLabel.setText("Fragment ClientHello");
++        switchLabel.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
++        switchLabel.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        switchRow.addView(switchLabel, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL | (LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT), LocaleController.isRTL ? 0 : 21, 0, LocaleController.isRTL ? 21 : 0, 0));
++        fragmentSwitch = new android.widget.Switch(context);
++        fragmentSwitch.setChecked(savedFragEnabled);
++        switchRow.addView(fragmentSwitch, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL | (LocaleController.isRTL ? Gravity.LEFT : Gravity.RIGHT), 21, 0, 21, 0));
++        fragmentContainer.addView(switchRow, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 50));
++
++        // Min field
++        FrameLayout minContainer = new FrameLayout(context);
++        minContainer.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
++        fragmentMinField = new EditTextBoldCursor(context);
++        fragmentMinField.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
++        fragmentMinField.setHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
++        fragmentMinField.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        fragmentMinField.setBackground(null);
++        fragmentMinField.setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        fragmentMinField.setInputType(InputType.TYPE_CLASS_NUMBER);
++        fragmentMinField.setSingleLine(true);
++        fragmentMinField.setGravity((LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
++        fragmentMinField.setHeaderHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader));
++        fragmentMinField.setTransformHintToHeader(true);
++        fragmentMinField.setLineColors(Theme.getColor(Theme.key_windowBackgroundWhiteInputField), Theme.getColor(Theme.key_windowBackgroundWhiteInputFieldActivated), Theme.getColor(Theme.key_text_RedRegular));
++        fragmentMinField.setHintText("Min bytes (default: 1)");
++        fragmentMinField.setText(String.valueOf(savedFragMin));
++        fragmentMinField.setPadding(AndroidUtilities.dp(LocaleController.isRTL ? 0 : 21), 0, AndroidUtilities.dp(LocaleController.isRTL ? 21 : 0), 0);
++        minContainer.addView(fragmentMinField, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 64, Gravity.CENTER_VERTICAL));
++        fragmentContainer.addView(minContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 64));
++
++        // Max field
++        FrameLayout maxContainer = new FrameLayout(context);
++        maxContainer.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
++        fragmentMaxField = new EditTextBoldCursor(context);
++        fragmentMaxField.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
++        fragmentMaxField.setHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
++        fragmentMaxField.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        fragmentMaxField.setBackground(null);
++        fragmentMaxField.setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        fragmentMaxField.setInputType(InputType.TYPE_CLASS_NUMBER);
++        fragmentMaxField.setSingleLine(true);
++        fragmentMaxField.setGravity((LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
++        fragmentMaxField.setHeaderHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader));
++        fragmentMaxField.setTransformHintToHeader(true);
++        fragmentMaxField.setLineColors(Theme.getColor(Theme.key_windowBackgroundWhiteInputField), Theme.getColor(Theme.key_windowBackgroundWhiteInputFieldActivated), Theme.getColor(Theme.key_text_RedRegular));
++        fragmentMaxField.setHintText("Max bytes (default: 3)");
++        fragmentMaxField.setText(String.valueOf(savedFragMax));
++        fragmentMaxField.setPadding(AndroidUtilities.dp(LocaleController.isRTL ? 0 : 21), 0, AndroidUtilities.dp(LocaleController.isRTL ? 21 : 0), 0);
++        maxContainer.addView(fragmentMaxField, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 64, Gravity.CENTER_VERTICAL));
++        fragmentContainer.addView(maxContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 64));
++
++        // Divider
++        ShadowSectionCell fragDivider = new ShadowSectionCell(context);
++        fragDivider.setBackground(Theme.getThemedDrawableByKey(context, R.drawable.greydivider_bottom, Theme.key_windowBackgroundGrayShadow));
++        linearLayout2.addView(fragDivider, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
+         pasteCell = new TextSettingsCell(fragmentView.getContext());
+         pasteCell.setBackground(Theme.getSelectorDrawable(true));
+         pasteCell.setText(LocaleController.getString(R.string.PasteFromClipboard), false);
+@@ -746,12 +913,14 @@ public class ProxySettingsActivity extends BaseFragment {
+                 ((View) inputFields[FIELD_SECRET].getParent()).setVisibility(View.GONE);
+                 ((View) inputFields[FIELD_PASSWORD].getParent()).setVisibility(View.VISIBLE);
+                 ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.VISIBLE);
++                if (fragmentContainer != null) fragmentContainer.setVisibility(View.GONE);
+             } else if (currentType == 1) {
+                 bottomCells[0].setVisibility(View.GONE);
+                 bottomCells[1].setVisibility(View.VISIBLE);
+                 ((View) inputFields[FIELD_SECRET].getParent()).setVisibility(View.VISIBLE);
+                 ((View) inputFields[FIELD_PASSWORD].getParent()).setVisibility(View.GONE);
+                 ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.GONE);
++                if (fragmentContainer != null) fragmentContainer.setVisibility(View.VISIBLE);
+             }
+             typeCell[0].setChecked(currentType == 0, animated);
+             typeCell[1].setChecked(currentType == 1, animated);

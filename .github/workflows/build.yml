@@ -71,6 +71,7 @@ jobs:
         run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
+        id: release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
@@ -94,3 +95,34 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Send APK via Telegram
+        run: |
+          APK_PATH="TMessagesProj_App/build/outputs/apk/afat/release/app.apk"
+          APK_SIZE=$(stat -c%s "$APK_PATH" 2>/dev/null || echo 0)
+          MAX_SIZE=$((50 * 1024 * 1024))  # 50 MB
+
+          if [ "$APK_SIZE" -le "$MAX_SIZE" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+              -F "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -F "document=@$APK_PATH" \
+              -F "caption=✅ *TGX DPI Bypass ${{ steps.tag.outputs.tag }}* готов!%0A%0A• TLS ECH 0xfe0d%0A• Fingerprint: Chrome/Firefox/Safari/Edge/Random%0A• Фрагментация ClientHello" \
+              -F "parse_mode=Markdown"
+          else
+            RELEASE_URL="${{ steps.release.outputs.url }}"
+            SIZE_MB=$(echo "scale=1; $APK_SIZE / 1048576" | bc)
+            TEXT="✅ *TGX DPI Bypass ${{ steps.tag.outputs.tag }}* готов!%0A%0AAPK слишком большой для прямой отправки (${SIZE_MB} МБ).%0A%0A📥 [Скачать с GitHub Release]($RELEASE_URL)"
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -d "text=$TEXT" \
+              -d "parse_mode=Markdown"
+          fi
+
+      - name: Notify build failure via Telegram
+        if: failure()
+        run: |
+          TEXT="❌ *Сборка упала* — ${{ steps.tag.outputs.tag }}%0A%0AПосмотри логи:%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=$TEXT" \
+            -d "parse_mode=Markdown"
