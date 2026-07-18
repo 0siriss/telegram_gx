@@ -17,8 +17,8 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=🔨 *Сборка начата* — ${TAG}%0A%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            -d "parse_mode=Markdown"
+            -d "text=🔨 <b>Сборка начата</b> — ${TAG}%0A%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -d "parse_mode=HTML"
 
       - name: Free disk space
         run: |
@@ -116,23 +116,23 @@ jobs:
             curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
               -F "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
               -F "document=@$APK_PATH" \
-              -F "caption=✅ *TGX DPI Bypass ${{ steps.tag.outputs.tag }}* готов!%0A%0A• TLS ECH 0xfe0d%0A• Fingerprint: Chrome/Firefox/Safari/Edge/Random%0A• Фрагментация ClientHello" \
-              -F "parse_mode=Markdown"
+              -F "caption=✅ <b>TGX DPI Bypass ${{ steps.tag.outputs.tag }}</b> готов!%0A%0A• TLS ECH 0xfe0d%0A• Fingerprint: Chrome/Firefox/Safari/Edge/Random%0A• Фрагментация ClientHello" \
+              -F "parse_mode=HTML"
           else
             RELEASE_URL="${{ steps.release.outputs.url }}"
             SIZE_MB=$(echo "scale=1; $APK_SIZE / 1048576" | bc)
-            TEXT="✅ *TGX DPI Bypass ${{ steps.tag.outputs.tag }}* готов!%0A%0AAPK слишком большой для прямой отправки (${SIZE_MB} МБ).%0A%0A📥 [Скачать с GitHub Release]($RELEASE_URL)"
+            TEXT="✅ <b>TGX DPI Bypass ${{ steps.tag.outputs.tag }}</b> готов!%0A%0AAPK слишком большой для прямой отправки (${SIZE_MB} МБ).%0A%0A📥 <a href=\"$RELEASE_URL\">Скачать с GitHub Release</a>"
             curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
               -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
               -d "text=$TEXT" \
-              -d "parse_mode=Markdown"
+              -d "parse_mode=HTML"
           fi
 
       - name: Notify build failure via Telegram
         if: failure()
         run: |
-          TEXT="❌ *Сборка упала* — ${{ steps.tag.outputs.tag }}%0A%0AПосмотри логи:%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          TEXT="❌ <b>Сборка упала</b> — ${{ steps.tag.outputs.tag }}%0A%0AПосмотри логи:%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d "text=$TEXT" \
-            -d "parse_mode=Markdown"
+            -d "parse_mode=HTML"

@@ -12,5 +12,5 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=🔨 *Сборка начата* — ${TAG}%0A%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            -d "parse_mode=Markdown"
+            -d "text=🔨 <b>Сборка начата</b> — ${TAG}%0A%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -d "parse_mode=HTML"
