@@ -1,0 +1,2353 @@
+diff --git a/TMessagesProj/jni/TgNetWrapper.cpp b/TMessagesProj/jni/TgNetWrapper.cpp
+index 0f8bc556d..264b632e0 100644
+--- a/TMessagesProj/jni/TgNetWrapper.cpp
++++ b/TMessagesProj/jni/TgNetWrapper.cpp
+@@ -12,6 +12,17 @@
+ #include <openssl/bn.h>
+ #include <openssl/pem.h>
+ #include <openssl/aes.h>
++#include <atomic>
++
++// TLS config — accessed by ConnectionSocket.cpp
++std::atomic<bool>    gTlsFragmentEnabled{false};
++std::atomic<int>     gTlsFragmentMin{1};
++std::atomic<int>     gTlsFragmentMax{3};
++std::atomic<int>     gTlsFingerprintProfile{0}; // 0=Chrome,1=Firefox,2=Safari,3=Edge,4=Random
++std::atomic<int>     gTlsRotationIntervalSec{0};
++std::atomic<int>     gTlsCurrentRandomProfile{0};
++std::atomic<int64_t> gTlsLastRotationSec{0};
++std::atomic<int>     gTlsEchExtensionId{0xfe0d};
+ 
+ JavaVM *java;
+ 
+@@ -223,6 +234,24 @@ void applyDatacenterAddress(JNIEnv *env, jclass c, jint instanceNum, jint datace
+     }
+ }
+ 
++void setTlsFragmentConfig(JNIEnv *env, jclass c, jboolean enabled, jint minBytes, jint maxBytes) {
++    gTlsFragmentEnabled = (bool) enabled;
++    gTlsFragmentMin = (int) minBytes;
++    gTlsFragmentMax = (int) maxBytes;
++}
++
++void setTlsFingerprintProfile(JNIEnv *env, jclass c, jint profile, jint rotationIntervalSec) {
++    gTlsFingerprintProfile = (int) profile;
++    gTlsRotationIntervalSec = (int) rotationIntervalSec;
++    // reset rotation timer so next connection picks immediately
++    gTlsLastRotationSec = 0;
++    gTlsCurrentRandomProfile = rand() % 4;
++}
++
++void setTlsEchExtensionId(JNIEnv *env, jclass c, jint extensionId) {
++    gTlsEchExtensionId = (int) extensionId & 0xffff;
++}
++
+ void setProxySettings(JNIEnv *env, jclass c, jint instanceNum, jstring address, jint port, jstring username, jstring password, jstring secret) {
+     const char *addressStr = env->GetStringUTFChars(address, 0);
+     const char *usernameStr = env->GetStringUTFChars(username, 0);
+@@ -537,6 +566,9 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
+         {"native_bindRequestToGuid", "(III)V", (void *) bindRequestToGuid},
+         {"native_applyDatacenterAddress", "(IILjava/lang/String;I)V", (void *) applyDatacenterAddress},
+         {"native_setProxySettings", "(ILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void *) setProxySettings},
++        {"native_setTlsFragmentConfig", "(ZII)V", (void *) setTlsFragmentConfig},
++        {"native_setTlsFingerprintProfile", "(II)V", (void *) setTlsFingerprintProfile},
++        {"native_setTlsEchExtensionId", "(I)V", (void *) setTlsEchExtensionId},
+         {"native_getConnectionState", "(I)I", (void *) getConnectionState},
+         {"native_setUserId", "(IJ)V", (void *) setUserId},
+         {"native_init", "(IIIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IJZZZII)V", (void *) init},
+diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
+index 4605c2fc5..3659ca23c 100644
+--- a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
++++ b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
+@@ -31,6 +31,8 @@
+ #include "BuffersStorage.h"
+ #include "Connection.h"
+ #include <random>
++#include <atomic>
++#include <chrono>
+ 
+ #ifndef EPOLLRDHUP
+ #define EPOLLRDHUP 0x2000
+@@ -38,6 +40,17 @@
+ 
+ #define MAX_GREASE 8
+ 
++// TLS config — set via JNI from Java
++extern std::atomic<bool> gTlsFragmentEnabled;
++extern std::atomic<int>  gTlsFragmentMin;
++extern std::atomic<int>  gTlsFragmentMax;
++// 0=Chrome, 1=Firefox, 2=Safari, 3=Edge, 4=Random
++extern std::atomic<int>  gTlsFingerprintProfile;
++extern std::atomic<int>  gTlsRotationIntervalSec; // 0=per-connection, 30-240=timed
++extern std::atomic<int>  gTlsCurrentRandomProfile;
++extern std::atomic<int64_t> gTlsLastRotationSec;
++extern std::atomic<int>  gTlsEchExtensionId; // default 0xfe0d
++
+ static BIGNUM *get_y2(BIGNUM *x, const BIGNUM *mod, BN_CTX *big_num_context) {
+     // returns y^2 = x^3 + 486662 * x^2 + x
+     BIGNUM *y = BN_dup(x);
+@@ -163,7 +176,7 @@ public:
+ 
+     struct Op {
+         enum class Type {
+-            String, Random, K, M, P, E, Zero, Domain, Grease, BeginScope, EndScope, Permutation
++            String, Random, K, M, P, E, Zero, Domain, Grease, BeginScope, EndScope, Permutation, EchId
+         };
+         Type type;
+         size_t length;
+@@ -249,6 +262,12 @@ public:
+             return res;
+         }
+ 
++        static Op echId() {
++            Op res;
++            res.type = Type::EchId;
++            return res;
++        }
++
+     };
+ 
+     static const TlsHello &getDefault() {
+@@ -311,12 +330,13 @@ public:
+                         },
+                         { Op::string("\x44\xcd\x00\x05\x00\x03\x02\x68\x32", 9) },
+                         {
+-                            Op::string("\xfe\x0d", 2),
++                            Op::echId(),
+                             Op::begin_scope(),
+-                            Op::string("\x00\x00\x01\x00\x01", 5),
++                            Op::string("\x00\x01\x00\x01", 4),
+                             Op::random(1),
+-                            Op::string("\x00\x20", 2),
+-                            Op::random(32),
++                            Op::begin_scope(),
++                            Op::K(),
++                            Op::end_scope(),
+                             Op::begin_scope(),
+                             Op::E(),
+                             Op::end_scope(),
+@@ -336,6 +356,284 @@ public:
+         return result;
+     }
+ 
++    // Firefox 121+ profile: CHACHA20 before AES-256, no ML-KEM, no compress_certificate, no SCT
++    static const TlsHello &getFirefox() {
++        static TlsHello result = [] {
++            TlsHello res;
++            res.ops = {
++                    Op::string("\x16\x03\x01", 3),
++                    Op::begin_scope(),
++                    Op::string("\x01\x00", 2),
++                    Op::begin_scope(),
++                    Op::string("\x03\x03", 2),
++                    Op::zero(32),
++                    Op::string("\x20", 1),
++                    Op::random(32),
++                    // Firefox cipher order: AES-128, CHACHA20, AES-256, then legacy
++                    Op::string("\x00\x1e", 2),
++                    Op::string("\x13\x01\x13\x03\x13\x02\xc0\x2b\xc0\x2f\xcc\xa9\xcc\xa8\xc0\x2c\xc0\x30\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x01\x00", 30),
++                    Op::begin_scope(),
++                    Op::string("\x00\x00", 2),
++                    Op::permutation({
++                        {
++                            Op::string("\x00\x00", 2),
++                            Op::begin_scope(),
++                            Op::begin_scope(),
++                            Op::string("\x00", 1),
++                            Op::begin_scope(),
++                            Op::domain(),
++                            Op::end_scope(),
++                            Op::end_scope(),
++                            Op::end_scope()
++                        },
++                        { Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9) },
++                        // supported_groups without ML-KEM (0x11ec)
++                        {
++                            Op::string("\x00\x0a\x00\x0a\x00\x08", 6),
++                            Op::string("\x00\x1d\x00\x17\x00\x18\x00\x19", 8)
++                        },
++                        { Op::string("\x00\x0b\x00\x02\x01\x00", 6) },
++                        // Firefox sig algs: includes rsa_pkcs1_sha1 (\x02\x01) and rsa_pkcs1_sha256 (\x04\x01)
++                        { Op::string("\x00\x0d\x00\x14\x00\x12\x04\x03\x08\x04\x04\x01\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01", 24) },
++                        { Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31", 18) },
++                        { Op::string("\x00\x17\x00\x00", 4) },
++                        { Op::string("\x00\x23\x00\x00", 4) },
++                        {
++                            Op::string("\x00\x2b\x00\x05\x04", 5),
++                            Op::string("\x03\x04\x03\x03", 4)
++                        },
++                        { Op::string("\x00\x2d\x00\x02\x01\x01", 6) },
++                        // key_share: X25519 only (no ML-KEM)
++                        {
++                            Op::string("\x00\x33\x00\x26\x00\x24", 6),
++                            Op::string("\x00\x1d\x00\x20", 4),
++                            Op::K(),
++                        },
++                        {
++                            Op::echId(),
++                            Op::begin_scope(),
++                            Op::string("\x00\x01\x00\x01", 4),
++                            Op::random(1),
++                            Op::begin_scope(),
++                            Op::K(),
++                            Op::end_scope(),
++                            Op::begin_scope(),
++                            Op::E(),
++                            Op::end_scope(),
++                            Op::end_scope()
++                        },
++                        { Op::string("\xff\x01\x00\x01\x00", 5) }
++                    }),
++                    Op::string("\x00\x01\x00", 3),
++                    Op::P(),
++                    Op::end_scope(),
++                    Op::end_scope(),
++                    Op::end_scope()
++            };
++            return res;
++        }();
++        return result;
++    }
++
++    // Safari 17 — no GREASE ciphers, different groups (incl. secp521r1), fixed extension order
++    static const TlsHello &getSafari() {
++        static TlsHello result = [] {
++            TlsHello res;
++            res.ops = {
++                    Op::string("\x16\x03\x01", 3),
++                    Op::begin_scope(),
++                    Op::string("\x01\x00", 2),
++                    Op::begin_scope(),
++                    Op::string("\x03\x03", 2),
++                    Op::zero(32),
++                    Op::string("\x20", 1),
++                    Op::random(32),
++                    // Safari cipher suites: 17 ciphers × 2 = 34 bytes, no GREASE
++                    Op::string("\x00\x22", 2),
++                    Op::string("\x13\x01\x13\x02\x13\x03\xc0\x2c\xc0\x2b\xc0\x30\xc0\x2f"
++                               "\xcc\xa9\xcc\xa8\xc0\x0a\xc0\x09\xc0\x14\xc0\x13"
++                               "\x00\x9d\x00\x9c\x00\x35\x00\x2f", 34),
++                    Op::begin_scope(), // extensions total length
++                    // renegotiation_info (ff01)
++                    Op::string("\xff\x01\x00\x01\x00", 5),
++                    // server_name (0000)
++                    Op::string("\x00\x00", 2),
++                    Op::begin_scope(),
++                    Op::begin_scope(),
++                    Op::string("\x00", 1),
++                    Op::begin_scope(),
++                    Op::domain(),
++                    Op::end_scope(),
++                    Op::end_scope(),
++                    Op::end_scope(),
++                    // extended_master_secret (0017)
++                    Op::string("\x00\x17\x00\x00", 4),
++                    // session_ticket (0023)
++                    Op::string("\x00\x23\x00\x00", 4),
++                    // ALPN (0010): h2, http/1.1
++                    Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31", 18),
++                    // status_request (0005)
++                    Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9),
++                    // supported_groups (000a): X25519, secp256r1, secp384r1, secp521r1 — no GREASE, no ML-KEM
++                    Op::string("\x00\x0a\x00\x0a\x00\x08\x00\x1d\x00\x17\x00\x18\x00\x19", 14),
++                    // ec_point_formats (000b)
++                    Op::string("\x00\x0b\x00\x02\x01\x00", 6),
++                    // signature_algorithms (000d) — Safari includes rsa_pkcs1_sha1
++                    Op::string("\x00\x0d\x00\x14\x00\x12\x04\x03\x08\x04\x04\x01\x05\x03"
++                               "\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01", 24),
++                    // supported_versions (002b): TLS 1.3 + TLS 1.2, no GREASE
++                    Op::string("\x00\x2b\x00\x05\x04\x03\x04\x03\x03", 9),
++                    // psk_key_exchange_modes (002d)
++                    Op::string("\x00\x2d\x00\x02\x01\x01", 6),
++                    // key_share (0033): X25519 only, no ML-KEM
++                    Op::string("\x00\x33\x00\x26\x00\x24\x00\x1d\x00\x20", 10),
++                    Op::K(),
++                    // compress_certificate (001b)
++                    Op::string("\x00\x1b\x00\x03\x02\x00\x02", 7),
++                    // ECH extension (configurable, default fe0d)
++                    Op::echId(),
++                    Op::begin_scope(),
++                    Op::string("\x00\x01\x00\x01", 4),
++                    Op::random(1),
++                    Op::begin_scope(),
++                    Op::K(),
++                    Op::end_scope(),
++                    Op::begin_scope(),
++                    Op::E(),
++                    Op::end_scope(),
++                    Op::end_scope(),
++                    Op::P(),
++                    Op::end_scope(), // extensions
++                    Op::end_scope(), // ClientHello body
++                    Op::end_scope()  // TLS record
++            };
++            return res;
++        }();
++        return result;
++    }
++
++    // Edge 120+ — Chromium-based: GREASE like Chrome but different supported_versions order,
++    // no compress_certificate (0x001b), no SCT (0x0012), adds ApplicationSettings (0x4469)
++    static const TlsHello &getEdge() {
++        static TlsHello result = [] {
++            TlsHello res;
++            res.ops = {
++                    Op::string("\x16\x03\x01", 3),
++                    Op::begin_scope(),
++                    Op::string("\x01\x00", 2),
++                    Op::begin_scope(),
++                    Op::string("\x03\x03", 2),
++                    Op::zero(32),
++                    Op::string("\x20", 1),
++                    Op::random(32),
++                    Op::string("\x00\x20", 2),
++                    Op::grease(0),
++                    Op::string("\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30"
++                               "\xcc\xa9\xcc\xa8\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x01\x00", 32),
++                    Op::begin_scope(),
++                    Op::grease(2),
++                    Op::string("\x00\x00", 2),
++                    Op::permutation({
++                        {
++                            Op::string("\x00\x00", 2),
++                            Op::begin_scope(),
++                            Op::begin_scope(),
++                            Op::string("\x00", 1),
++                            Op::begin_scope(),
++                            Op::domain(),
++                            Op::end_scope(),
++                            Op::end_scope(),
++                            Op::end_scope()
++                        },
++                        { Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9) },
++                        {
++                            Op::string("\x00\x0a\x00\x0c\x00\x0a", 6),
++                            Op::grease(4),
++                            Op::string("\x11\xec\x00\x1d\x00\x17\x00\x18", 8)
++                        },
++                        { Op::string("\x00\x0b\x00\x02\x01\x00", 6) },
++                        { Op::string("\x00\x0d\x00\x12\x00\x10\x04\x03\x08\x04\x04\x01"
++                                     "\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01", 22) },
++                        { Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74"
++                                     "\x74\x70\x2f\x31\x2e\x31", 18) },
++                        { Op::string("\x00\x17\x00\x00", 4) },
++                        { Op::string("\x00\x23\x00\x00", 4) },
++                        {
++                            Op::string("\x00\x2b\x00\x07\x06", 5),
++                            Op::grease(6),
++                            Op::string("\x03\x04\x03\x03", 4)
++                        },
++                        { Op::string("\x00\x2d\x00\x02\x01\x01", 6) },
++                        {
++                            Op::string("\x00\x33\x04\xef\x04\xed", 6),
++                            Op::grease(4),
++                            Op::string("\x00\x01\x00\x11\xec\x04\xc0", 7),
++                            Op::M(),
++                            Op::K(),
++                            Op::string("\x00\x1d\x00\x20", 4),
++                            Op::K(),
++                        },
++                        // Edge-specific: ApplicationSettings (4469)
++                        { Op::string("\x44\x69\x00\x05\x00\x03\x02\x68\x32", 9) },
++                        {
++                            Op::echId(),
++                            Op::begin_scope(),
++                            Op::string("\x00\x01\x00\x01", 4),
++                            Op::random(1),
++                            Op::begin_scope(),
++                            Op::K(),
++                            Op::end_scope(),
++                            Op::begin_scope(),
++                            Op::E(),
++                            Op::end_scope(),
++                            Op::end_scope()
++                        },
++                        { Op::string("\xff\x01\x00\x01\x00", 5) }
++                    }),
++                    Op::grease(3),
++                    Op::string("\x00\x01\x00", 3),
++                    Op::P(),
++                    Op::end_scope(),
++                    Op::end_scope(),
++                    Op::end_scope()
++            };
++            return res;
++        }();
++        return result;
++    }
++
++    static const TlsHello &getForProfile(int profile) {
++        if (profile == 1) return getFirefox();
++        if (profile == 2) return getSafari();
++        if (profile == 3) return getEdge();
++        if (profile == 4) {
++            // Random profile: per-connection or timed rotation
++            int interval = gTlsRotationIntervalSec.load();
++            if (interval > 0) {
++                using namespace std::chrono;
++                int64_t now = duration_cast<seconds>(steady_clock::now().time_since_epoch()).count();
++                int64_t last = gTlsLastRotationSec.load();
++                if (now - last >= interval) {
++                    int next = rand() % 4; // pick from Chrome/Firefox/Safari/Edge
++                    gTlsCurrentRandomProfile.store(next);
++                    gTlsLastRotationSec.store(now);
++                }
++                int cur = gTlsCurrentRandomProfile.load();
++                if (cur == 1) return getFirefox();
++                if (cur == 2) return getSafari();
++                if (cur == 3) return getEdge();
++                return getDefault();
++            }
++            // per-connection random
++            int r = rand() % 4;
++            if (r == 1) return getFirefox();
++            if (r == 2) return getSafari();
++            if (r == 3) return getEdge();
++            return getDefault();
++        }
++        return getDefault();
++    }
++
+     uint32_t writeToBuffer(uint8_t *data) {
+         uint32_t offset = 0;
+         for (auto op : ops) {
+@@ -392,6 +690,13 @@ private:
+                 offset += 2;
+                 break;
+             }
++            case Type::EchId: {
++                int id = gTlsEchExtensionId.load() & 0xffff;
++                data[offset] = static_cast<uint8_t>((id >> 8) & 0xff);
++                data[offset + 1] = static_cast<uint8_t>(id & 0xff);
++                offset += 2;
++                break;
++            }
+             case Type::BeginScope:
+                 scopeOffset.push_back(offset);
+                 offset += 2;
+@@ -415,11 +720,14 @@ private:
+             }
+             case Type::P: {
+                 auto length = offset;
+-                if (length <= 513) {
+-                    writeOp(Op::string("\x00\x15", 2), data, offset);
+-                    writeOp(Op::begin_scope(), data, offset);
+-                    writeOp(Op::zero(513 - length), data, offset);
+-                    writeOp(Op::end_scope(), data, offset);
++                if (length < 512) {
++                    uint32_t padSize = 512 - length - 4; // 4 = extension type (2) + scope length (2)
++                    if ((int32_t)padSize > 0) {
++                        writeOp(Op::string("\x00\x15", 2), data, offset);
++                        writeOp(Op::begin_scope(), data, offset);
++                        writeOp(Op::zero(padSize), data, offset);
++                        writeOp(Op::end_scope(), data, offset);
++                    }
+                 }
+                 break;
+             }
+@@ -920,7 +1228,7 @@ void ConnectionSocket::onEvent(uint32_t events) {
+                         lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
+                         tlsHashMismatch = false;
+                         proxyAuthState = 11;
+-                        TlsHello hello = TlsHello::getDefault();
++                        TlsHello hello = TlsHello::getForProfile(gTlsFingerprintProfile.load());
+                         hello.setDomain(currentSecretDomain);
+                         uint32_t size = hello.writeToBuffer(tempBuffer->bytes);
+                         uint32_t outLength;
+@@ -933,7 +1241,21 @@ void ConnectionSocket::onEvent(uint32_t events) {
+                         memcpy(tempBuffer->bytes + 11, tempBuffer->bytes + 64 * 1024, 32);
+                         bytesRead = 0;
+ 
+-                        if (send(socketFd, tempBuffer->bytes, size, 0) < 0) {
++                        bool sendOk;
++                        if (gTlsFragmentEnabled && size > 2) {
++                            int minB = gTlsFragmentMin.load();
++                            int maxB = gTlsFragmentMax.load();
++                            if (minB < 1) minB = 1;
++                            if (maxB < minB) maxB = minB;
++                            int range = maxB - minB;
++                            int splitAt = minB + (range > 0 ? rand() % (range + 1) : 0);
++                            if (splitAt >= (int)size) splitAt = 1;
++                            sendOk = (send(socketFd, tempBuffer->bytes, splitAt, 0) >= 0) &&
++                                     (send(socketFd, tempBuffer->bytes + splitAt, size - splitAt, 0) >= 0);
++                        } else {
++                            sendOk = (send(socketFd, tempBuffer->bytes, size, 0) >= 0);
++                        }
++                        if (!sendOk) {
+                             if (LOGS_ENABLED) DEBUG_E("connection(%p) send failed", this);
+                             closeSocket(1, -1);
+                             return;
+diff --git a/TMessagesProj/proguard-rules.pro b/TMessagesProj/proguard-rules.pro
+index aeab02b29..fae6790df 100644
+--- a/TMessagesProj/proguard-rules.pro
++++ b/TMessagesProj/proguard-rules.pro
+@@ -19,6 +19,10 @@
+ -keep class org.telegram.tgnet.NativeByteBuffer { *; }
+ -keep class org.telegram.tgnet.RequestTimeDelegate { *; }
+ -keep class org.telegram.tgnet.RequestDelegate { *; }
++# Called from TMessagesProj_App (GithubUpdaterController); this module's own
++# R8 pass can't see that cross-module call, so it strips them as unused.
++-keep class org.telegram.ui.web.HttpGetTask { *; }
++-keep class org.telegram.ui.web.HttpGetFileTask { *; }
+ -keep class com.google.android.exoplayer2.ext.** { *; }
+ -keep class com.google.android.exoplayer2.extractor.FlacStreamMetadata { *; }
+ -keep class com.google.android.exoplayer2.metadata.flac.PictureFrame { *; }
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+index b1caaddb4..46121505a 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+@@ -26,8 +26,8 @@ public class BuildVars {
+     public static boolean NO_SCOPED_STORAGE = Build.VERSION.SDK_INT <= 29;
+     public static String BUILD_VERSION_STRING = BuildConfig.BUILD_VERSION_STRING;
+ 
+-    public static int APP_ID = 4;
+-    public static String APP_HASH = "014b35b6184100b085b0d0572f9b5103";
++    public static int APP_ID = 2725571;
++    public static String APP_HASH = "0fffbe0c4d5caccab04ac7b674f94a3b";
+ 
+     // SafetyNet key for Google Identity SDK, set it to empty to disable
+     public static String SAFETYNET_KEY = "AIzaSyDqt8P-7F7CPCseMkOiVRgb1LY8RN1bvH8";
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/DatabaseMigrationHelper.java b/TMessagesProj/src/main/java/org/telegram/messenger/DatabaseMigrationHelper.java
+index 91fefa223..2759efdb7 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/DatabaseMigrationHelper.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/DatabaseMigrationHelper.java
+@@ -1679,6 +1679,12 @@ public class DatabaseMigrationHelper {
+             database.executeFast("PRAGMA user_version = 176").stepThis().dispose();
+             version = 176;
+         }
++        if (version == 176) {
++            // TGX: locally-retained tombstones for messages recalled by the sender (anti-recall feature)
++            database.executeFast("CREATE TABLE recalled_messages(uid INTEGER, mid INTEGER, recalled_date INTEGER, PRIMARY KEY(uid, mid))").stepThis().dispose();
++            database.executeFast("PRAGMA user_version = 177").stepThis().dispose();
++            version = 177;
++        }
+ 
+         return version;
+     }
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
+index 80374e50c..2b8a14643 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
+@@ -222,6 +222,8 @@ public class MessageObject {
+     public String monthKey;
+     public boolean deleted;
+     public boolean deletedByThanos;
++    // TGX: anti-recall — sender deleted this message server-side but we retained it locally (see recalled_messages table)
++    public boolean recalledBySender;
+     public float audioProgress;
+     public float forceSeekTo = -1;
+     public int audioProgressMs;
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
+index 2e65a2ca4..14aeaa5ef 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
+@@ -18370,6 +18370,10 @@ public class MessagesController extends BaseController implements NotificationCe
+         LongSparseArray<ArrayList<Integer>> markContentAsReadMessages = null;
+         SparseIntArray markAsReadEncrypted = null;
+         LongSparseArray<ArrayList<Integer>> deletedMessages = null;
++        // TGX: anti-recall — mids filtered out of deletedMessages at classification time (below), keyed by the
++        // *resolved* real dialogId (never 0, unlike deletedMessages' private/group bucket). Never reaches any
++        // deletedMessages consumer downstream, so no consumption point can be missed.
++        LongSparseArray<ArrayList<Integer>> recalledMessages = null;
+         LongSparseArray<ArrayList<Integer>> deletedQuickReplyMessages = null;
+         LongSparseArray<ArrayList<Integer>> scheduledDeletedMessages = null;
+         LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSent = null;
+@@ -18758,6 +18762,11 @@ public class MessagesController extends BaseController implements NotificationCe
+                 dialogs_read_outbox_max.put(dialogId, Math.max(value, update.max_id));
+             } else if (baseUpdate instanceof TL_update.TL_updateDeleteMessages) {
+                 TL_update.TL_updateDeleteMessages update = (TL_update.TL_updateDeleteMessages) baseUpdate;
++                // TGX: anti-recall — dialogId isn't known here (TL_updateDeleteMessages doesn't carry one), so
++                // retention for this branch is decided later: MessagesStorage.filterRecalledMessages resolves
++                // mid -> uid against storage before the physical delete, and ChatActivity's own messagesDeleted
++                // observer separately keeps retained messages visible in whichever chat is currently open (it
++                // knows its own dialog_id unambiguously, unlike a lookup keyed only by mid at this level).
+                 if (deletedMessages == null) {
+                     deletedMessages = new LongSparseArray<>();
+                 }
+@@ -19283,16 +19292,33 @@ public class MessagesController extends BaseController implements NotificationCe
+                 if (BuildVars.LOGS_ENABLED) {
+                     FileLog.d(baseUpdate + " channelId = " + update.channel_id);
+                 }
+-                if (deletedMessages == null) {
+-                    deletedMessages = new LongSparseArray<>();
+-                }
+                 long dialogId = -update.channel_id;
+-                ArrayList<Integer> arrayList = deletedMessages.get(dialogId);
+-                if (arrayList == null) {
+-                    arrayList = new ArrayList<>();
+-                    deletedMessages.put(dialogId, arrayList);
++                // TGX: anti-recall — channel/supergroup dialogId is known upfront (channel_id), so the whole
++                // batch is decided uniformly, same as the private/group branch above.
++                if (isAntiRecallEnabledForDialog(dialogId)) {
++                    if (recalledMessages == null) {
++                        recalledMessages = new LongSparseArray<>();
++                    }
++                    ArrayList<Integer> recalledList = recalledMessages.get(dialogId);
++                    if (recalledList == null) {
++                        recalledList = new ArrayList<>();
++                        recalledMessages.put(dialogId, recalledList);
++                    }
++                    recalledList.addAll(update.messages);
++                    for (int m = 0, msize = update.messages.size(); m < msize; m++) {
++                        markMidRecalled(dialogId, update.messages.get(m));
++                    }
++                } else {
++                    if (deletedMessages == null) {
++                        deletedMessages = new LongSparseArray<>();
++                    }
++                    ArrayList<Integer> arrayList = deletedMessages.get(dialogId);
++                    if (arrayList == null) {
++                        arrayList = new ArrayList<>();
++                        deletedMessages.put(dialogId, arrayList);
++                    }
++                    arrayList.addAll(update.messages);
+                 }
+-                arrayList.addAll(update.messages);
+             } else if (baseUpdate instanceof TL_update.TL_updateChannel) {
+                 if (BuildVars.LOGS_ENABLED) {
+                     TL_update.TL_updateChannel update = (TL_update.TL_updateChannel) baseUpdate;
+@@ -20910,6 +20936,7 @@ public class MessagesController extends BaseController implements NotificationCe
+         LongSparseArray<ArrayList<Integer>> markContentAsReadMessagesFinal = markContentAsReadMessages;
+         SparseIntArray markAsReadEncryptedFinal = markAsReadEncrypted;
+         LongSparseArray<ArrayList<Integer>> deletedMessagesFinal = deletedMessages;
++        LongSparseArray<ArrayList<Integer>> recalledMessagesFinal = recalledMessages;
+         LongSparseArray<ArrayList<Integer>> deletedQuickRepliesMessagesFinal = deletedQuickReplyMessages;
+         LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesFinal = scheduledDeletedMessages;
+         LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSentFinal = scheduledDeletedMessagesSent;
+@@ -21034,6 +21061,35 @@ public class MessagesController extends BaseController implements NotificationCe
+                 }
+                 getNotificationsController().removeDeletedMessagesFromNotifications(deletedMessagesFinal, false);
+             }
++            // TGX: anti-recall — mids filtered out of deletedMessages at classification time; obj.recalledBySender
++            // is set here (never obj.deleted), and messagesRecalled fires instead of messagesDeleted, so no
++            // downstream deletedMessages consumer (there were two, and this took a live bug to find both) ever
++            // sees these mids at all.
++            if (recalledMessagesFinal != null) {
++                for (int a = 0, size = recalledMessagesFinal.size(); a < size; a++) {
++                    long dialogId = recalledMessagesFinal.keyAt(a);
++                    ArrayList<Integer> arrayList = recalledMessagesFinal.valueAt(a);
++                    if (arrayList == null) {
++                        continue;
++                    }
++                    ArrayList<MessageObject> objs = dialogMessage.get(dialogId);
++                    if (objs != null) {
++                        for (int i = 0; i < objs.size(); ++i) {
++                            MessageObject obj = objs.get(i);
++                            if (obj != null) {
++                                for (int b = 0, size2 = arrayList.size(); b < size2; b++) {
++                                    if (obj.getId() == arrayList.get(b)) {
++                                        obj.recalledBySender = true;
++                                        break;
++                                    }
++                                }
++                            }
++                        }
++                    }
++                    getMessagesStorage().saveRecalledMessages(dialogId, arrayList);
++                    getNotificationCenter().postNotificationName(NotificationCenter.messagesRecalled, arrayList, dialogId);
++                }
++            }
+             if (deletedQuickRepliesMessagesFinal != null) {
+                 for (int a = 0, size = deletedQuickRepliesMessagesFinal.size(); a < size; a++) {
+                     long topicId = deletedQuickRepliesMessagesFinal.keyAt(a);
+@@ -21120,6 +21176,20 @@ public class MessagesController extends BaseController implements NotificationCe
+             for (int a = 0, size = deletedMessages.size(); a < size; a++) {
+                 long key = deletedMessages.keyAt(a);
+                 ArrayList<Integer> arrayList = deletedMessages.valueAt(a);
++                if (key == 0) {
++                    // TGX: anti-recall fallback — mids here already exclude anything resolved in-memory at
++                    // classification time above; this covers messages whose dialog isn't currently open, by
++                    // resolving mid -> uid against storage before deciding whether to actually delete them.
++                    getMessagesStorage().filterRecalledMessages(arrayList, remainingMids -> {
++                        if (remainingMids != null && !remainingMids.isEmpty()) {
++                            getMessagesStorage().getStorageQueue().postRunnable(() -> {
++                                ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, remainingMids, false, true, 0, 0);
++                                getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, remainingMids, dialogIds);
++                            });
++                        }
++                    });
++                    continue;
++                }
+                 getMessagesStorage().getStorageQueue().postRunnable(() -> {
+                     ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, arrayList, false, true, 0, 0);
+                     getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, arrayList, dialogIds);
+@@ -21458,6 +21528,67 @@ public class MessagesController extends BaseController implements NotificationCe
+         return false;
+     }
+ 
++    // TGX: anti-recall — global default (DataSettingsActivity toggle) + per-dialog override,
++    // same override/inherit pattern as isDialogMuted (notify2_ / -1 = inherit).
++    public static boolean isAntiRecallEnabledGlobally() {
++        return getGlobalMainSettings().getBoolean("anti_recall_enabled", false);
++    }
++
++    public static void setAntiRecallEnabledGlobally(boolean enabled) {
++        getGlobalMainSettings().edit().putBoolean("anti_recall_enabled", enabled).commit();
++    }
++
++    public boolean isAntiRecallEnabledForDialog(long dialogId) {
++        if (DialogObject.isEncryptedDialog(dialogId)) {
++            return false;
++        }
++        int override = notificationsPreferences.getInt("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0), -1);
++        if (override == -1) {
++            return isAntiRecallEnabledGlobally();
++        }
++        return override == 1;
++    }
++
++    public void setAntiRecallEnabledForDialog(long dialogId, boolean enabled) {
++        notificationsPreferences.edit().putInt("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0), enabled ? 1 : 0).commit();
++    }
++
++    // TGX: anti-recall — session-lifetime cache of "this mid was recalled" (mid -> unix seconds it was recalled
++    // at) that survives MessageObject being reconstructed (e.g. on a dialog/message-list reload), since
++    // recalledBySender on a specific MessageObject instance doesn't: a fresh deserialize from messages_v2 always
++    // starts with recalledBySender=false. Kept separately from the recalled_messages SQL table (which is the
++    // actual persistence across app restarts); this is just a fast synchronous read-through for UI code that
++    // can't do a DB query per render.
++    private final LongSparseArray<HashMap<Integer, Integer>> recalledMidsCache = new LongSparseArray<>();
++
++    public void markMidRecalled(long dialogId, int mid) {
++        markMidRecalled(dialogId, mid, (int) (System.currentTimeMillis() / 1000));
++    }
++
++    public void markMidRecalled(long dialogId, int mid, int recalledDate) {
++        HashMap<Integer, Integer> mids = recalledMidsCache.get(dialogId);
++        if (mids == null) {
++            mids = new HashMap<>();
++            recalledMidsCache.put(dialogId, mids);
++        }
++        mids.put(mid, recalledDate);
++    }
++
++    public boolean isMidRecalled(long dialogId, int mid) {
++        HashMap<Integer, Integer> mids = recalledMidsCache.get(dialogId);
++        return mids != null && mids.containsKey(mid);
++    }
++
++    public int getRecalledDate(long dialogId, int mid) {
++        HashMap<Integer, Integer> mids = recalledMidsCache.get(dialogId);
++        Integer date = mids != null ? mids.get(mid) : null;
++        return date != null ? date : 0;
++    }
++
++    public void clearAntiRecallOverrideForDialog(long dialogId) {
++        notificationsPreferences.edit().remove("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0)).commit();
++    }
++
+     public void markReactionsAsRead(long dialogId, long topicId) {
+         if (topicId == 0) {
+             TLRPC.Dialog dialog = dialogs_dict.get(dialogId);
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
+index 4d719fab6..91d5ee211 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
+@@ -117,7 +117,7 @@ public class MessagesStorage extends BaseController {
+         }
+     }
+ 
+-    public final static int LAST_DB_VERSION = 176;
++    public final static int LAST_DB_VERSION = 177;
+     private boolean databaseMigrationInProgress;
+     public boolean showClearDatabaseAlert;
+ 
+@@ -548,6 +548,9 @@ public class MessagesStorage extends BaseController {
+         database.executeFast("CREATE INDEX IF NOT EXISTS idx_to_reply_scheduled_messages_v2 ON scheduled_messages_v2(reply_to_message_id, mid);").stepThis().dispose();
+ 
+         database.executeFast("CREATE TABLE messages_v2(mid INTEGER, uid INTEGER, read_state INTEGER, send_state INTEGER, date INTEGER, data BLOB, out INTEGER, ttl INTEGER, media INTEGER, replydata BLOB, imp INTEGER, mention INTEGER, forwards INTEGER, replies_data BLOB, thread_reply_id INTEGER, is_channel INTEGER, reply_to_message_id INTEGER, custom_params BLOB, group_id INTEGER, reply_to_story_id INTEGER, PRIMARY KEY(mid, uid))").stepThis().dispose();
++
++        // TGX: locally-retained tombstones for messages recalled by the sender (anti-recall feature)
++        database.executeFast("CREATE TABLE recalled_messages(uid INTEGER, mid INTEGER, recalled_date INTEGER, PRIMARY KEY(uid, mid))").stepThis().dispose();
+         database.executeFast("CREATE INDEX IF NOT EXISTS uid_mid_read_out_idx_messages_v2 ON messages_v2(uid, mid, read_state, out);").stepThis().dispose();
+         database.executeFast("CREATE INDEX IF NOT EXISTS uid_date_mid_idx_messages_v2 ON messages_v2(uid, date, mid);").stepThis().dispose();
+         database.executeFast("CREATE INDEX IF NOT EXISTS mid_out_idx_messages_v2 ON messages_v2(mid, out);").stepThis().dispose();
+@@ -14849,6 +14852,119 @@ public class MessagesStorage extends BaseController {
+         executeInStorageQueue(() -> updateDialogsWithDeletedMessagesInternal(dialogId, channelId, messages, additionalDialogsToUpdate));
+     }
+ 
++    // TGX: anti-recall — persist tombstones for messages the sender deleted but that we chose to retain locally.
++    public void saveRecalledMessages(long uid, ArrayList<Integer> mids) {
++        if (mids == null || mids.isEmpty()) {
++            return;
++        }
++        storageQueue.postRunnable(() -> {
++            try {
++                database.beginTransaction();
++                SQLitePreparedStatement state = database.executeFast("INSERT OR IGNORE INTO recalled_messages VALUES(?, ?, ?)");
++                int now = (int) (System.currentTimeMillis() / 1000);
++                for (int i = 0, size = mids.size(); i < size; i++) {
++                    state.requery();
++                    state.bindLong(1, uid);
++                    state.bindInteger(2, mids.get(i));
++                    state.bindInteger(3, now);
++                    state.step();
++                }
++                state.dispose();
++                database.commitTransaction();
++            } catch (Exception e) {
++                FileLog.e(e);
++            }
++        });
++    }
++
++    // TGX: anti-recall — TL_updateDeleteMessages (private chats / basic groups) doesn't carry a dialogId,
++    // unlike TL_updateDeleteChannelMessages. Resolve mid -> uid here (same lookup markMessagesAsDeletedInternal
++    // would do), persist a tombstone for any dialog with anti-recall enabled, and hand back only the mids that
++    // should still go through the normal deletion path. Never touches markMessagesAsDeletedInternal itself, so
++    // local user-initiated deletes (which also call markMessagesAsDeleted) are completely unaffected.
++    public void filterRecalledMessages(ArrayList<Integer> candidateMids, Utilities.Callback<ArrayList<Integer>> onRemainingMids) {
++        if (candidateMids == null || candidateMids.isEmpty()) {
++            AndroidUtilities.runOnUIThread(() -> onRemainingMids.run(candidateMids));
++            return;
++        }
++        storageQueue.postRunnable(() -> {
++            ArrayList<Integer> remaining = new ArrayList<>(candidateMids);
++            LongSparseArray<ArrayList<Integer>> retainedByDialog = null;
++            SQLiteCursor cursor = null;
++            try {
++                String ids = TextUtils.join(",", candidateMids);
++                cursor = database.queryFinalized(String.format(Locale.US, "SELECT mid, uid FROM messages_v2 WHERE mid IN(%s) AND is_channel = 0", ids));
++                while (cursor.next()) {
++                    int mid = cursor.intValue(0);
++                    long uid = cursor.longValue(1);
++                    boolean enabled = getMessagesController().isAntiRecallEnabledForDialog(uid);
++                    if (enabled) {
++                        if (retainedByDialog == null) {
++                            retainedByDialog = new LongSparseArray<>();
++                        }
++                        ArrayList<Integer> mids = retainedByDialog.get(uid);
++                        if (mids == null) {
++                            mids = new ArrayList<>();
++                            retainedByDialog.put(uid, mids);
++                        }
++                        mids.add(mid);
++                        remaining.remove((Integer) mid);
++                    }
++                }
++            } catch (Exception e) {
++                FileLog.e(e);
++            } finally {
++                if (cursor != null) {
++                    cursor.dispose();
++                }
++            }
++            if (retainedByDialog != null) {
++                for (int i = 0, size = retainedByDialog.size(); i < size; i++) {
++                    long uid = retainedByDialog.keyAt(i);
++                    ArrayList<Integer> mids = retainedByDialog.valueAt(i);
++                    saveRecalledMessages(uid, mids);
++                    AndroidUtilities.runOnUIThread(() -> {
++                        for (int m = 0, msize = mids.size(); m < msize; m++) {
++                            getMessagesController().markMidRecalled(uid, mids.get(m));
++                        }
++                        getNotificationCenter().postNotificationName(NotificationCenter.messagesRecalled, mids, uid);
++                    });
++                }
++            }
++            AndroidUtilities.runOnUIThread(() -> onRemainingMids.run(remaining));
++        });
++    }
++
++    // TGX: anti-recall — given candidate mids just loaded from messages_v2, return the subset that are recalled tombstones.
++    public void getRecalledMids(long uid, ArrayList<Integer> candidateMids, Utilities.Callback<HashSet<Integer>> onResult) {
++        storageQueue.postRunnable(() -> {
++            HashSet<Integer> recalled = new HashSet<>();
++            if (candidateMids != null && !candidateMids.isEmpty()) {
++                SQLiteCursor cursor = null;
++                try {
++                    StringBuilder mids = new StringBuilder();
++                    for (int i = 0, size = candidateMids.size(); i < size; i++) {
++                        if (i != 0) {
++                            mids.append(',');
++                        }
++                        mids.append(candidateMids.get(i));
++                    }
++                    cursor = database.queryFinalized(String.format(Locale.US, "SELECT mid FROM recalled_messages WHERE uid = %d AND mid IN (%s)", uid, mids));
++                    while (cursor.next()) {
++                        recalled.add(cursor.intValue(0));
++                    }
++                } catch (Exception e) {
++                    FileLog.e(e);
++                } finally {
++                    if (cursor != null) {
++                        cursor.dispose();
++                    }
++                }
++            }
++            AndroidUtilities.runOnUIThread(() -> onResult.run(recalled));
++        });
++    }
++
+     public ArrayList<Long> markMessagesAsDeleted(long dialogId, ArrayList<Integer> messages, boolean useQueue, boolean deleteFiles, int mode, int topicId) {
+         if (messages.isEmpty()) {
+             return null;
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationCenter.java b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationCenter.java
+index cdefac769..d62564b4f 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationCenter.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationCenter.java
+@@ -34,6 +34,8 @@ public class NotificationCenter {
+     public static final int closeChatActivity = totalEvents++;
+     public static final int closeProfileActivity = totalEvents++;
+     public static final int messagesDeleted = totalEvents++;
++    // TGX: anti-recall — fired instead of messagesDeleted for messages we chose to retain locally (args: ArrayList<Integer> mids, long dialogId)
++    public static final int messagesRecalled = totalEvents++;
+     public static final int historyCleared = totalEvents++;
+     public static final int messagesRead = totalEvents++;
+     public static final int threadMessagesRead = totalEvents++;
+diff --git a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
+index 470e3c4a6..9f3bd8980 100644
+--- a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
++++ b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
+@@ -999,6 +999,21 @@ public class ConnectionsManager extends BaseController {
+     public static native void native_setUserId(int currentAccount, long id);
+     public static native void native_init(int currentAccount, int version, int layer, int apiId, String deviceModel, String systemVersion, String appVersion, String langCode, String systemLangCode, String configPath, String logPath, String regId, String cFingerprint, String installer, String packageId, int timezoneOffset, long userId, boolean userPremium, boolean enablePushConnection, boolean hasNetwork, int networkType, int performanceClass);
+     public static native void native_setProxySettings(int currentAccount, String address, int port, String username, String password, String secret);
++    public static native void native_setTlsFragmentConfig(boolean enabled, int minBytes, int maxBytes);
++    public static native void native_setTlsFingerprintProfile(int profile, int rotationIntervalSec);
++    public static native void native_setTlsEchExtensionId(int extensionId);
++
++    public static void setTlsFragmentConfig(boolean enabled, int minBytes, int maxBytes) {
++        native_setTlsFragmentConfig(enabled, minBytes, maxBytes);
++    }
++
++    public static void setTlsFingerprintProfile(int profile, int rotationIntervalSec) {
++        native_setTlsFingerprintProfile(profile, rotationIntervalSec);
++    }
++
++    public static void setTlsEchExtensionId(int extensionId) {
++        native_setTlsEchExtensionId(extensionId);
++    }
+     public static native void native_setLangCode(int currentAccount, String langCode);
+     public static native void native_setRegId(int currentAccount, String regId);
+     public static native void native_setSystemLangCode(int currentAccount, String langCode);
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java b/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
+index 7d7291c05..15c86810b 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
+@@ -70,6 +70,7 @@ import android.text.TextUtils;
+ import android.text.style.CharacterStyle;
+ import android.text.style.ClickableSpan;
+ import android.text.style.DynamicDrawableSpan;
++import android.text.style.ForegroundColorSpan;
+ import android.text.style.LeadingMarginSpan;
+ import android.text.style.StrikethroughSpan;
+ import android.text.style.URLSpan;
+@@ -18394,6 +18395,15 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+             timeString = LocaleController.formatSmallDateChat(currentMessageObject.realDate) + ", " + LocaleController.getInstance().getFormatterDay().format((long) (currentMessageObject.realDate) * 1000);
+         } else if (currentMessageObject.isRepostPreview) {
+             timeString = LocaleController.formatSmallDateChat(messageObject.messageOwner.date) + ", " + LocaleController.getInstance().getFormatterDay().format((long) (messageObject.messageOwner.date) * 1000);
++        } else if (currentMessageObject.recalledBySender || MessagesController.getInstance(currentAccount).isMidRecalled(currentMessageObject.getDialogId(), currentMessageObject.getId())) {
++            // TGX: anti-recall — message was deleted by the sender server-side but retained locally. Checks the
++            // session-lifetime cache too, not just the object's own field: a MessageObject for this mid can get
++            // reconstructed (e.g. on a dialog/message-list reload) with recalledBySender reset to false. Shows
++            // when it was recalled (falls back to the original send date if that timestamp isn't cached, e.g.
++            // right after a cold app restart before this dialog's cache is repopulated).
++            int recalledDate = MessagesController.getInstance(currentAccount).getRecalledDate(currentMessageObject.getDialogId(), currentMessageObject.getId());
++            long dateToShow = recalledDate != 0 ? recalledDate : messageObject.messageOwner.date;
++            timeString = "удалено отправителем" + " " + LocaleController.getInstance().getFormatterDay().format(dateToShow * 1000L);
+         } else if (edited) {
+             timeString = AppGlobalConfig.getInstance(currentAccount).messagePrimaryEditedDate.get() ?
+                 LocaleController.formatPmEditedDate(currentMessagesGroup != null ? currentMessagesGroup.getMaxEditDate() : messageObject.messageOwner.edit_date) :
+@@ -18421,6 +18431,18 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+         } else {
+             currentTimeString = timeString;
+         }
++        if (currentMessageObject.recalledBySender || MessagesController.getInstance(currentAccount).isMidRecalled(currentMessageObject.getDialogId(), currentMessageObject.getId())) {
++            // TGX: anti-recall — color just the "удалено отправителем" label red, leaving the date/signString
++            // part in the normal time color, same technique as EmptyStubSpan usage elsewhere in this file.
++            String label = "удалено отправителем";
++            String full = currentTimeString.toString();
++            int labelStart = full.indexOf(label);
++            if (labelStart >= 0) {
++                SpannableString colored = new SpannableString(currentTimeString);
++                colored.setSpan(new ForegroundColorSpan(getThemedColor(Theme.key_text_RedRegular)), labelStart, labelStart + label.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
++                currentTimeString = colored;
++            }
++        }
+         if (currentMessageObject.isStakedDice()) {
+             currentTimeString = TextUtils.concat("💎", StarsIntroActivity.formatTON(currentMessageObject.getStakedDiceAmount()), "  ", currentTimeString);
+             currentTimeString = StarsIntroActivity.replaceDiamond(currentTimeString, 0.55f, null, 0, dp(-.33f), 1.05f);
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
+index f2ccd7e90..cc20f0600 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
+@@ -487,6 +487,7 @@ public class ChatActivity extends BaseFragment implements
+     private RecyclerListView.OnItemClickListener mentionsOnItemClickListener;
+     private SuggestEmojiView suggestEmojiPanel;
+     private ActionBarMenuItem.Item muteItem;
++    private ActionBarMenuItem.Item antiRecallItem;
+     private ActionBarMenuItem.Item muteItemGap;
+     private ActionBarMenuItem.Item feeItemGap;
+     private ActionBarMenuItem.Item feeItemText;
+@@ -1619,6 +1620,7 @@ public class ChatActivity extends BaseFragment implements
+     private final static int save_to = 25;
+     private final static int auto_delete_timer = 26;
+     private final static int change_colors = 27;
++    private final static int anti_recall_toggle = 75;
+     private final static int tag_message = 28;
+     private final static int boost_group = 29;
+ 
+@@ -2896,6 +2898,7 @@ public class ChatActivity extends BaseFragment implements
+             .add(NotificationCenter.didLoadSendAsPeers)
+             .add(NotificationCenter.closeChatActivity)
+             .add(NotificationCenter.messagesDeleted)
++            .add(NotificationCenter.messagesRecalled)
+             .add(NotificationCenter.historyCleared)
+             .add(NotificationCenter.messageReceivedByServer)
+             .add(NotificationCenter.messageReceivedByAck)
+@@ -3864,6 +3867,8 @@ public class ChatActivity extends BaseFragment implements
+                     }
+                 } else if (id == mute) {
+                     toggleMute(false);
++                } else if (id == anti_recall_toggle) {
++                    toggleAntiRecallForDialog();
+                 } else if (id == add_shortcut) {
+                     try {
+                         getMediaDataController().installShortcut(currentUser.id, MediaDataController.SHORTCUT_TYPE_USER_OR_CHAT);
+@@ -4398,6 +4403,10 @@ public class ChatActivity extends BaseFragment implements
+             if (themeDelegate.isThemeChangeAvailable(true)) {
+                 headerItem.lazilyAddSubItem(change_colors, R.drawable.msg_background, LocaleController.getString(R.string.SetWallpapers));
+             }
++            if (currentEncryptedChat == null) {
++                // TGX: anti-recall — per-chat override of the global "show deleted messages" setting.
++                antiRecallItem = headerItem.lazilyAddSubItem(anti_recall_toggle, R.drawable.msg_delete, getAntiRecallMenuItemText());
++            }
+             if (currentUser != null && currentUser.self && getDialogId() != UserObject.VERIFY) {
+                 headerItem.lazilyAddSubItem(add_shortcut, R.drawable.msg_home, LocaleController.getString(R.string.AddShortcut));
+             }
+@@ -16485,6 +16494,22 @@ public class ChatActivity extends BaseFragment implements
+         }
+     }
+ 
++    // TGX: anti-recall — per-chat override text/toggle, mirrors toggleMute/updateTitleIcons' handling of muteItem.
++    private String getAntiRecallMenuItemText() {
++        return getMessagesController().isAntiRecallEnabledForDialog(dialog_id)
++                ? "Не показывать удалённые сообщения"
++                : "Показывать удалённые сообщения";
++    }
++
++    private void toggleAntiRecallForDialog() {
++        boolean enabled = !getMessagesController().isAntiRecallEnabledForDialog(dialog_id);
++        getMessagesController().setAntiRecallEnabledForDialog(dialog_id, enabled);
++        updateTitleIcons();
++        BulletinFactory.of(this).createSimpleBulletin(R.raw.chats_infotip, enabled
++                ? "Удалённые отправителем сообщения теперь сохраняются в этом чате"
++                : "В этом чате восстановлено обычное поведение удаления").show();
++    }
++
+     private void toggleMute(boolean instant) {
+         boolean muted = getMessagesController().isDialogMuted(dialog_id, getTopicId());
+         if (!muted) {
+@@ -19481,6 +19506,9 @@ public class ChatActivity extends BaseFragment implements
+             leftIcon = avatarContainer.getBotVerificationDrawable(DialogObject.getBotVerificationIcon(currentUser), false);
+         }
+         avatarContainer.setTitleIcons(leftIcon, rightIcon);
++        if (antiRecallItem != null) {
++            antiRecallItem.setText(getAntiRecallMenuItemText());
++        }
+         if (!forceToggleMuted && muteItem != null) {
+             if (isMuted) {
+                 muteItem.setRightIconVisibility(View.GONE);
+@@ -22102,6 +22130,44 @@ public class ChatActivity extends BaseFragment implements
+                 return;
+             }
+             ArrayList<Integer> markAsDeletedMessages = (ArrayList<Integer>) args[0];
++            // TGX: anti-recall — dialog_id is unambiguous here (this fragment is scoped to exactly one dialog),
++            // unlike mid -> uid resolution at the MessagesController level (which turned out unreliable: messages
++            // visibly loaded in this very chat were not found via MessagesController.dialogMessagesByIds). Split
++            // out ids that belong to this open chat and mark them recalled instead of letting them reach
++            // processDeletedMessages (which removes cells from the visible list, with animation).
++            if (getMessagesController().isAntiRecallEnabledForDialog(dialog_id)) {
++                ArrayList<Integer> stillDeletedIds = new ArrayList<>();
++                boolean anyRecalled = false;
++                for (int msg_id : markAsDeletedMessages) {
++                    MessageObject msg = messagesDict[0].get(msg_id);
++                    if (msg != null) {
++                        msg.recalledBySender = true;
++                        getMessagesController().markMidRecalled(dialog_id, msg_id);
++                        anyRecalled = true;
++                        // TGX: anti-recall — updateVisibleRows() only touches cells currently attached to
++                        // chatListView; a message scrolled slightly off (or otherwise not among its children at
++                        // this exact moment) never got its measureTime() re-run. updateRowWithMessageObject is the
++                        // same targeted single-message refresh already used for read-status/edit/poll updates.
++                        // forceUpdate=true is needed too: setMessageContent's messageChanged check is a reference
++                        // comparison (currentMessageObject != messageObject) that's false here since it's the
++                        // same MessageObject instance — without forcing it, the rebind can silently no-op until
++                        // some other event (e.g. scrolling) forces a real redraw.
++                        msg.forceUpdate = true;
++                        if (chatAdapter != null) {
++                            chatAdapter.updateRowWithMessageObject(msg, false, false);
++                        }
++                    } else {
++                        stillDeletedIds.add(msg_id);
++                    }
++                }
++                if (anyRecalled) {
++                    updateVisibleRows();
++                }
++                markAsDeletedMessages = stillDeletedIds;
++                if (markAsDeletedMessages.isEmpty()) {
++                    return;
++                }
++            }
+             long channelId = (Long) args[1];
+             boolean update = args.length > 2 && (boolean) args[2];
+             boolean sent = args.length > 3 && (boolean) args[3];
+@@ -22165,6 +22231,29 @@ public class ChatActivity extends BaseFragment implements
+                     removeSelfFromStack();
+                 }
+             }
++        } else if (id == NotificationCenter.messagesRecalled) {
++            // TGX: anti-recall — same mids as messagesDeleted would have carried, but we keep them: just flag + repaint.
++            ArrayList<Integer> recalledMids = (ArrayList<Integer>) args[0];
++            long recalledDialogId = (Long) args[1];
++            for (int msg_id : recalledMids) {
++                getMessagesController().markMidRecalled(recalledDialogId, msg_id);
++            }
++            if (recalledDialogId == dialog_id) {
++                for (int msg_id : recalledMids) {
++                    MessageObject msg = messagesDict[0].get(msg_id);
++                    if (msg != null) {
++                        msg.recalledBySender = true;
++                        // TGX: anti-recall — see the identical comment on the messagesDeleted branch above:
++                        // updateVisibleRows() alone misses cells that aren't currently attached to chatListView,
++                        // and forceUpdate is needed so the rebind isn't a same-reference no-op.
++                        msg.forceUpdate = true;
++                        if (chatAdapter != null) {
++                            chatAdapter.updateRowWithMessageObject(msg, false, false);
++                        }
++                    }
++                }
++                updateVisibleRows();
++            }
+         } else if (id == NotificationCenter.quickRepliesDeleted) {
+             if (chatMode != MODE_QUICK_REPLIES) return;
+             if ((Long) args[1] != getQuickReplyId()) return;
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java
+index 910de86ec..c703103c9 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java
+@@ -113,6 +113,10 @@ public class DataSettingsActivity extends BaseFragment {
+     private int saveToGalleryGroupsRow;
+     private int saveToGalleryDividerRow;
+ 
++    private int antiRecallSectionRow;
++    private int antiRecallEnabledRow;
++    private int antiRecallSection2Row;
++
+     private int rowCount;
+ 
+     private boolean updateVoipUseLessData;
+@@ -174,6 +178,10 @@ public class DataSettingsActivity extends BaseFragment {
+         saveToGalleryChannelsRow = rowCount++;
+         saveToGalleryDividerRow = rowCount++;
+ 
++        antiRecallSectionRow = rowCount++;
++        antiRecallEnabledRow = rowCount++;
++        antiRecallSection2Row = rowCount++;
++
+ //        autoplayHeaderRow = rowCount++;
+ //        autoplayGifsRow = rowCount++;
+ //        autoplayVideoRow = rowCount++;
+@@ -550,6 +558,11 @@ public class DataSettingsActivity extends BaseFragment {
+                 showDialog(builder.create());
+             } else if (position == proxyRow) {
+                 presentFragment(new ProxyListActivity());
++            } else if (position == antiRecallEnabledRow) {
++                boolean enabled = !MessagesController.isAntiRecallEnabledGlobally();
++                MessagesController.setAntiRecallEnabledGlobally(enabled);
++                TextCheckCell textCheckCell = (TextCheckCell) view;
++                textCheckCell.setChecked(enabled);
+             } else if (position == enableStreamRow) {
+                 SharedConfig.toggleStreamMedia();
+                 TextCheckCell textCheckCell = (TextCheckCell) view;
+@@ -739,6 +752,8 @@ public class DataSettingsActivity extends BaseFragment {
+                         headerCell.setText(LocaleController.getString(R.string.Calls));
+                     } else if (position == proxySectionRow) {
+                         headerCell.setText(LocaleController.getString(R.string.Proxy));
++                    } else if (position == antiRecallSectionRow) {
++                        headerCell.setText("Anti-recall");
+                     } else if (position == streamSectionRow) {
+                         headerCell.setText(LocaleController.getString(R.string.Streaming));
+                     } else if (position == autoplayHeaderRow) {
+@@ -750,7 +765,9 @@ public class DataSettingsActivity extends BaseFragment {
+                 }
+                 case 3: {
+                     TextCheckCell checkCell = (TextCheckCell) holder.itemView;
+-                    if (position == enableStreamRow) {
++                    if (position == antiRecallEnabledRow) {
++                        checkCell.setTextAndCheck("Показывать удалённые сообщения", MessagesController.isAntiRecallEnabledGlobally(), false);
++                    } else if (position == enableStreamRow) {
+                         checkCell.setTextAndCheck(LocaleController.getString(R.string.EnableStreaming), SharedConfig.streamMedia, enableAllStreamRow != -1);
+                     } else if (position == enableCacheStreamRow) {
+                         //checkCell.setTextAndCheck(LocaleController.getString(R.string.CacheStreamFile), SharedConfig.saveStreamMedia, true);
+@@ -866,7 +883,9 @@ public class DataSettingsActivity extends BaseFragment {
+             if (viewType == 3) {
+                 TextCheckCell checkCell = (TextCheckCell) holder.itemView;
+                 int position = holder.getAdapterPosition();
+-                if (position == enableCacheStreamRow) {
++                if (position == antiRecallEnabledRow) {
++                    checkCell.setChecked(MessagesController.isAntiRecallEnabledGlobally());
++                } else if (position == enableCacheStreamRow) {
+                     checkCell.setChecked(SharedConfig.saveStreamMedia);
+                 } else if (position == enableStreamRow) {
+                     checkCell.setChecked(SharedConfig.streamMedia);
+@@ -885,7 +904,7 @@ public class DataSettingsActivity extends BaseFragment {
+         public boolean isRowEnabled(int position) {
+             return position == mobileRow || position == roamingRow || position == wifiRow || position == storageUsageRow || position == useLessDataForCallsRow || position == dataUsageRow || position == proxyRow || position == clearDraftsRow ||
+                     position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == quickRepliesRow || position == autoplayVideoRow || position == autoplayGifsRow ||
+-                    position == storageNumRow || position == saveToGalleryGroupsRow || position == saveToGalleryPeerRow || position == saveToGalleryChannelsRow || position == resetDownloadRow;
++                    position == storageNumRow || position == saveToGalleryGroupsRow || position == saveToGalleryPeerRow || position == saveToGalleryChannelsRow || position == resetDownloadRow || position == antiRecallEnabledRow;
+         }
+ 
+         @Override
+@@ -926,11 +945,11 @@ public class DataSettingsActivity extends BaseFragment {
+ 
+         @Override
+         public int getItemViewType(int position) {
+-            if (position == mediaDownloadSection2Row || position == usageSection2Row || position == callsSection2Row || position == proxySection2Row || position == autoplaySectionRow || position == clearDraftsSectionRow || position == saveToGalleryDividerRow) {
++            if (position == mediaDownloadSection2Row || position == usageSection2Row || position == callsSection2Row || position == proxySection2Row || position == autoplaySectionRow || position == clearDraftsSectionRow || position == saveToGalleryDividerRow || position == antiRecallSection2Row) {
+                 return 0;
+-            } else if (position == mediaDownloadSectionRow || position == streamSectionRow || position == callsSectionRow || position == usageSectionRow || position == proxySectionRow || position == autoplayHeaderRow || position == saveToGallerySectionRow) {
++            } else if (position == mediaDownloadSectionRow || position == streamSectionRow || position == callsSectionRow || position == usageSectionRow || position == proxySectionRow || position == autoplayHeaderRow || position == saveToGallerySectionRow || position == antiRecallSectionRow) {
+                 return 2;
+-            } else if (position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == autoplayGifsRow || position == autoplayVideoRow) {
++            } else if (position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == autoplayGifsRow || position == autoplayVideoRow || position == antiRecallEnabledRow) {
+                 return 3;
+             } else if (position == enableAllStreamInfoRow) {
+                 return 4;
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
+index 5e5e6934c..456f4714d 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
+@@ -72,12 +72,28 @@ import java.io.UnsupportedEncodingException;
+ import java.net.URLDecoder;
+ import java.net.URLEncoder;
+ import java.util.ArrayList;
++import java.util.Locale;
+ 
+ public class ProxySettingsActivity extends BaseFragment {
+ 
+     private final static int TYPE_SOCKS5 = 0;
+     private final static int TYPE_MTPROTO = 1;
+ 
++    private static int parseEchExtensionId(String text) {
++        if (text == null) {
++            return DEFAULT_ECH_EXTENSION_ID;
++        }
++        text = text.trim();
++        if (!text.matches("(?i)[0-9a-f]{1,4}")) {
++            return DEFAULT_ECH_EXTENSION_ID;
++        }
++        try {
++            return Integer.parseInt(text, 16) & 0xffff;
++        } catch (NumberFormatException e) {
++            return DEFAULT_ECH_EXTENSION_ID;
++        }
++    }
++
+     private final static int FIELD_IP = 0;
+     private final static int FIELD_PORT = 1;
+     private final static int FIELD_USER = 2;
+@@ -108,6 +124,30 @@ public class ProxySettingsActivity extends BaseFragment {
+ 
+     private ClipboardManager clipboardManager;
+ 
++    // TLS Fragmentation UI
++    private LinearLayout fragmentContainer;
++    private android.widget.Switch fragmentSwitch;
++    private EditTextBoldCursor fragmentMinField;
++    private EditTextBoldCursor fragmentMaxField;
++
++    // TLS Fingerprint profile UI
++    private TextSettingsCell fingerprintProfileCell;
++    private int currentFingerprintProfile = 0;
++    private int currentRotationInterval = 0;
++    private FrameLayout rotationIntervalContainer;
++    private EditTextBoldCursor rotationIntervalField;
++    private static final String[] FINGERPRINT_PROFILE_NAMES = {
++        "Chrome 120+ (default)", "Firefox 121+", "Safari 17", "Edge 120+", "Random"
++    };
++
++    // TLS ECH extension ID UI
++    private TextSettingsCell echIdCell;
++    private int currentEchId = DEFAULT_ECH_EXTENSION_ID;
++    private static final int DEFAULT_ECH_EXTENSION_ID = 0xfe0d;
++    private static final int[] ECH_ID_PRESET_VALUES = {0xfe0d, 0xfe02};
++    private static final String[] ECH_ID_PRESET_NAMES = {"fe0d (default)", "fe02 (legacy)", "Custom…"};
++
++
+     private boolean addingNewProxy;
+ 
+     private SharedConfig.ProxyInfo currentProxyInfo;
+@@ -116,6 +156,38 @@ public class ProxySettingsActivity extends BaseFragment {
+ 
+     private static final int done_button = 1;
+ 
++    private void showEchCustomIdDialog() {
++        if (getParentActivity() == null) {
++            return;
++        }
++        Context context = getParentActivity();
++        FrameLayout container = new FrameLayout(context);
++        container.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
++        EditTextBoldCursor input = new EditTextBoldCursor(context);
++        input.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
++        input.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        input.setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        input.setBackground(null);
++        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
++        input.setSingleLine(true);
++        input.setGravity((LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
++        input.setLineColors(Theme.getColor(Theme.key_windowBackgroundWhiteInputField), Theme.getColor(Theme.key_windowBackgroundWhiteInputFieldActivated), Theme.getColor(Theme.key_text_RedRegular));
++        input.setHintText("hex, e.g. fe0d");
++        input.setText(String.format(Locale.US, "%04x", currentEchId));
++        input.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(6), AndroidUtilities.dp(21), 0);
++        container.addView(input, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 36, Gravity.CENTER_VERTICAL, 21, 6, 21, 0));
++
++        android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(context);
++        builder.setTitle("Custom ECH Extension ID");
++        builder.setView(container);
++        builder.setPositiveButton(LocaleController.getString(R.string.OK), (dialog, which) -> {
++            currentEchId = parseEchExtensionId(input.getText().toString());
++            echIdCell.setTextAndValue("ECH extension ID", String.format(Locale.US, "%04x", currentEchId), false);
++        });
++        builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
++        showDialog(builder.create());
++    }
++
+     public static class TypeCell extends FrameLayout {
+ 
+         private TextView textView;
+@@ -198,7 +270,7 @@ public class ProxySettingsActivity extends BaseFragment {
+         actionBar.setTitle(LocaleController.getString(R.string.ProxyDetails));
+         actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+         actionBar.setAllowOverlayTitle(false);
+-        if (parentLayout != null && parentLayout.isLayersLayout()) {
++        if (AndroidUtilities.isTablet()) {
+             actionBar.setOccupyStatusBar(false);
+         }
+ 
+@@ -243,6 +315,30 @@ public class ProxySettingsActivity extends BaseFragment {
+                         editor.putString("proxy_secret", currentProxyInfo.secret);
+                         ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret);
+                     }
++                    // Save and apply TLS fingerprint profile
++                    if (rotationIntervalField != null) {
++                        currentRotationInterval = Utilities.parseInt(rotationIntervalField.getText().toString());
++                        if (currentRotationInterval < 30 && currentRotationInterval != 0) currentRotationInterval = 30;
++                        if (currentRotationInterval > 240) currentRotationInterval = 240;
++                    }
++                    editor.putInt("tls_fingerprint_profile", currentFingerprintProfile);
++                    editor.putInt("tls_rotation_interval", currentRotationInterval);
++                    ConnectionsManager.setTlsFingerprintProfile(currentFingerprintProfile, currentRotationInterval);
++                    // Save and apply ECH extension ID
++                    editor.putInt("tls_ech_extension_id", currentEchId);
++                    ConnectionsManager.setTlsEchExtensionId(currentEchId);
++                    // Save and apply TLS fragment settings
++                    if (fragmentContainer != null) {
++                        boolean fragEnabled = fragmentSwitch.isChecked();
++                        int fragMin = Utilities.parseInt(fragmentMinField.getText().toString());
++                        int fragMax = Utilities.parseInt(fragmentMaxField.getText().toString());
++                        if (fragMin < 1) fragMin = 1;
++                        if (fragMax < fragMin) fragMax = fragMin;
++                        editor.putBoolean("tls_fragment_enabled", fragEnabled);
++                        editor.putInt("tls_fragment_min", fragMin);
++                        editor.putInt("tls_fragment_max", fragMax);
++                        ConnectionsManager.setTlsFragmentConfig(fragEnabled, fragMin, fragMax);
++                    }
+                     editor.commit();
+ 
+                     NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
+@@ -448,6 +544,166 @@ public class ProxySettingsActivity extends BaseFragment {
+             linearLayout2.addView(bottomCells[i], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+         }
+ 
++        // TLS Fingerprint + Fragmentation section (MTProto only)
++        SharedPreferences fragPrefs = MessagesController.getGlobalMainSettings();
++        boolean savedFragEnabled = fragPrefs.getBoolean("tls_fragment_enabled", false);
++        int savedFragMin = fragPrefs.getInt("tls_fragment_min", 1);
++        int savedFragMax = fragPrefs.getInt("tls_fragment_max", 3);
++        currentFingerprintProfile = fragPrefs.getInt("tls_fingerprint_profile", 0);
++        currentRotationInterval = fragPrefs.getInt("tls_rotation_interval", 0);
++        currentEchId = fragPrefs.getInt("tls_ech_extension_id", DEFAULT_ECH_EXTENSION_ID);
++        ConnectionsManager.setTlsFragmentConfig(savedFragEnabled, savedFragMin, savedFragMax);
++        ConnectionsManager.setTlsFingerprintProfile(currentFingerprintProfile, currentRotationInterval);
++        ConnectionsManager.setTlsEchExtensionId(currentEchId);
++
++        fragmentContainer = new LinearLayout(context);
++        fragmentContainer.setOrientation(LinearLayout.VERTICAL);
++        fragmentContainer.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
++        linearLayout2.addView(fragmentContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++        fragmentContainer.setVisibility(View.GONE);
++
++        // TLS Fingerprint profile section
++        HeaderCell fpHeader = new HeaderCell(context);
++        fpHeader.setText("TLS Fingerprint");
++        fragmentContainer.addView(fpHeader, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
++        fingerprintProfileCell = new TextSettingsCell(context);
++        fingerprintProfileCell.setBackground(Theme.getSelectorDrawable(true));
++        fingerprintProfileCell.setTextAndValue("Browser profile", FINGERPRINT_PROFILE_NAMES[currentFingerprintProfile], false);
++        fingerprintProfileCell.setOnClickListener(v -> {
++            if (getParentActivity() == null) return;
++            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
++            builder.setTitle("TLS Fingerprint Profile");
++            builder.setSingleChoiceItems(FINGERPRINT_PROFILE_NAMES, currentFingerprintProfile, (dialog, which) -> {
++                currentFingerprintProfile = which;
++                fingerprintProfileCell.setTextAndValue("Browser profile", FINGERPRINT_PROFILE_NAMES[which], false);
++                // show/hide rotation interval for Random profile (index 4)
++                if (rotationIntervalContainer != null) {
++                    rotationIntervalContainer.setVisibility(which == 4 ? View.VISIBLE : View.GONE);
++                }
++                dialog.dismiss();
++            });
++            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
++            showDialog(builder.create());
++        });
++        fragmentContainer.addView(fingerprintProfileCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
++        // ECH extension ID picker (same checkmark-list pattern as Browser profile, right next to it)
++        echIdCell = new TextSettingsCell(context);
++        echIdCell.setBackground(Theme.getSelectorDrawable(true));
++        echIdCell.setTextAndValue("ECH extension ID", String.format(Locale.US, "%04x", currentEchId), false);
++        echIdCell.setOnClickListener(v -> {
++            if (getParentActivity() == null) return;
++            int selected = ECH_ID_PRESET_NAMES.length - 1;
++            for (int i = 0; i < ECH_ID_PRESET_VALUES.length; i++) {
++                if (ECH_ID_PRESET_VALUES[i] == currentEchId) {
++                    selected = i;
++                    break;
++                }
++            }
++            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
++            builder.setTitle("ECH Extension ID");
++            builder.setSingleChoiceItems(ECH_ID_PRESET_NAMES, selected, (dialog, which) -> {
++                dialog.dismiss();
++                if (which == ECH_ID_PRESET_NAMES.length - 1) {
++                    showEchCustomIdDialog();
++                } else {
++                    currentEchId = ECH_ID_PRESET_VALUES[which];
++                    echIdCell.setTextAndValue("ECH extension ID", String.format(Locale.US, "%04x", currentEchId), false);
++                }
++            });
++            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
++            showDialog(builder.create());
++        });
++        fragmentContainer.addView(echIdCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
++        // Rotation interval field (visible only when Random profile is selected)
++        rotationIntervalContainer = new FrameLayout(context);
++        rotationIntervalContainer.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
++        rotationIntervalField = new EditTextBoldCursor(context);
++        rotationIntervalField.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
++        rotationIntervalField.setHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
++        rotationIntervalField.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        rotationIntervalField.setBackground(null);
++        rotationIntervalField.setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        rotationIntervalField.setInputType(InputType.TYPE_CLASS_NUMBER);
++        rotationIntervalField.setSingleLine(true);
++        rotationIntervalField.setGravity((LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
++        rotationIntervalField.setHeaderHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader));
++        rotationIntervalField.setTransformHintToHeader(true);
++        rotationIntervalField.setLineColors(Theme.getColor(Theme.key_windowBackgroundWhiteInputField), Theme.getColor(Theme.key_windowBackgroundWhiteInputFieldActivated), Theme.getColor(Theme.key_text_RedRegular));
++        rotationIntervalField.setHintText("Rotation interval, sec (30–240, 0=per connection)");
++        rotationIntervalField.setText(currentRotationInterval > 0 ? String.valueOf(currentRotationInterval) : "");
++        rotationIntervalField.setPadding(AndroidUtilities.dp(LocaleController.isRTL ? 0 : 21), 0, AndroidUtilities.dp(LocaleController.isRTL ? 21 : 0), 0);
++        rotationIntervalContainer.addView(rotationIntervalField, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 64, Gravity.CENTER_VERTICAL));
++        fragmentContainer.addView(rotationIntervalContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 64));
++        rotationIntervalContainer.setVisibility(currentFingerprintProfile == 4 ? View.VISIBLE : View.GONE);
++
++        // Section header
++        HeaderCell fragHeader = new HeaderCell(context);
++        fragHeader.setText("TLS Fragmentation");
++        fragmentContainer.addView(fragHeader, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
++        // Toggle row
++        FrameLayout switchRow = new FrameLayout(context);
++        switchRow.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
++        TextView switchLabel = new TextView(context);
++        switchLabel.setText("Fragment ClientHello");
++        switchLabel.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
++        switchLabel.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        switchRow.addView(switchLabel, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL | (LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT), LocaleController.isRTL ? 0 : 21, 0, LocaleController.isRTL ? 21 : 0, 0));
++        fragmentSwitch = new android.widget.Switch(context);
++        fragmentSwitch.setChecked(savedFragEnabled);
++        switchRow.addView(fragmentSwitch, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL | (LocaleController.isRTL ? Gravity.LEFT : Gravity.RIGHT), 21, 0, 21, 0));
++        fragmentContainer.addView(switchRow, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 50));
++
++        // Min field
++        FrameLayout minContainer = new FrameLayout(context);
++        minContainer.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
++        fragmentMinField = new EditTextBoldCursor(context);
++        fragmentMinField.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
++        fragmentMinField.setHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
++        fragmentMinField.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        fragmentMinField.setBackground(null);
++        fragmentMinField.setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        fragmentMinField.setInputType(InputType.TYPE_CLASS_NUMBER);
++        fragmentMinField.setSingleLine(true);
++        fragmentMinField.setGravity((LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
++        fragmentMinField.setHeaderHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader));
++        fragmentMinField.setTransformHintToHeader(true);
++        fragmentMinField.setLineColors(Theme.getColor(Theme.key_windowBackgroundWhiteInputField), Theme.getColor(Theme.key_windowBackgroundWhiteInputFieldActivated), Theme.getColor(Theme.key_text_RedRegular));
++        fragmentMinField.setHintText("Min bytes (default: 1)");
++        fragmentMinField.setText(String.valueOf(savedFragMin));
++        fragmentMinField.setPadding(AndroidUtilities.dp(LocaleController.isRTL ? 0 : 21), 0, AndroidUtilities.dp(LocaleController.isRTL ? 21 : 0), 0);
++        minContainer.addView(fragmentMinField, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 64, Gravity.CENTER_VERTICAL));
++        fragmentContainer.addView(minContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 64));
++
++        // Max field
++        FrameLayout maxContainer = new FrameLayout(context);
++        maxContainer.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
++        fragmentMaxField = new EditTextBoldCursor(context);
++        fragmentMaxField.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
++        fragmentMaxField.setHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
++        fragmentMaxField.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        fragmentMaxField.setBackground(null);
++        fragmentMaxField.setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
++        fragmentMaxField.setInputType(InputType.TYPE_CLASS_NUMBER);
++        fragmentMaxField.setSingleLine(true);
++        fragmentMaxField.setGravity((LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
++        fragmentMaxField.setHeaderHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader));
++        fragmentMaxField.setTransformHintToHeader(true);
++        fragmentMaxField.setLineColors(Theme.getColor(Theme.key_windowBackgroundWhiteInputField), Theme.getColor(Theme.key_windowBackgroundWhiteInputFieldActivated), Theme.getColor(Theme.key_text_RedRegular));
++        fragmentMaxField.setHintText("Max bytes (default: 3)");
++        fragmentMaxField.setText(String.valueOf(savedFragMax));
++        fragmentMaxField.setPadding(AndroidUtilities.dp(LocaleController.isRTL ? 0 : 21), 0, AndroidUtilities.dp(LocaleController.isRTL ? 21 : 0), 0);
++        maxContainer.addView(fragmentMaxField, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 64, Gravity.CENTER_VERTICAL));
++        fragmentContainer.addView(maxContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 64));
++
++        // Divider
++        ShadowSectionCell fragDivider = new ShadowSectionCell(context);
++        fragDivider.setBackground(Theme.getThemedDrawableByKey(context, R.drawable.greydivider_bottom, Theme.key_windowBackgroundGrayShadow));
++        linearLayout2.addView(fragDivider, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
+         pasteCell = new TextSettingsCell(fragmentView.getContext());
+         pasteCell.setBackground(Theme.getSelectorDrawable(true));
+         pasteCell.setText(LocaleController.getString(R.string.PasteFromClipboard), false);
+@@ -746,12 +1002,14 @@ public class ProxySettingsActivity extends BaseFragment {
+                 ((View) inputFields[FIELD_SECRET].getParent()).setVisibility(View.GONE);
+                 ((View) inputFields[FIELD_PASSWORD].getParent()).setVisibility(View.VISIBLE);
+                 ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.VISIBLE);
++                if (fragmentContainer != null) fragmentContainer.setVisibility(View.GONE);
+             } else if (currentType == 1) {
+                 bottomCells[0].setVisibility(View.GONE);
+                 bottomCells[1].setVisibility(View.VISIBLE);
+                 ((View) inputFields[FIELD_SECRET].getParent()).setVisibility(View.VISIBLE);
+                 ((View) inputFields[FIELD_PASSWORD].getParent()).setVisibility(View.GONE);
+                 ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.GONE);
++                if (fragmentContainer != null) fragmentContainer.setVisibility(View.VISIBLE);
+             }
+             typeCell[0].setChecked(currentType == 0, animated);
+             typeCell[1].setChecked(currentType == 1, animated);
+diff --git a/TMessagesProj_App/build.gradle b/TMessagesProj_App/build.gradle
+index 2aa197cb3..632593bdf 100644
+--- a/TMessagesProj_App/build.gradle
++++ b/TMessagesProj_App/build.gradle
+@@ -1,5 +1,22 @@
+ apply plugin: 'com.android.application'
+ 
++def getForkVersionTag() {
++    def envTag = System.getenv("FORK_VERSION_TAG")
++    if (envTag != null && !envTag.isEmpty()) {
++        return envTag
++    }
++    try {
++        def stdout = new ByteArrayOutputStream()
++        exec {
++            commandLine 'git', 'describe', '--tags', '--abbrev=0'
++            standardOutput = stdout
++        }
++        return stdout.toString().trim()
++    } catch (Exception ignored) {
++        return "v0.0"
++    }
++}
++
+ repositories {
+     mavenCentral()
+     google()
+@@ -18,6 +35,7 @@ dependencies {
+     implementation project(':TMessagesProj')
+     coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
+     implementation files('../TMessagesProj/libs/libgsaverification-client.aar')
++    implementation 'androidx.core:core:1.16.0'
+ }
+ 
+ android {
+@@ -176,6 +194,8 @@ android {
+         versionName APP_VERSION_NAME
+         ndkVersion "27.2.12479018"
+ 
++        buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
++
+         multiDexEnabled true
+ 
+         vectorDrawables.generatedDensities = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi']
+diff --git a/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java b/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
+index 7b80edfd4..a18f5eb26 100644
+--- a/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
++++ b/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
+@@ -1,10 +1,78 @@
+ package org.telegram.messenger;
+ 
++import android.content.Context;
++import android.text.TextUtils;
++
+ import org.telegram.messenger.regular.BuildConfig;
++import org.telegram.ui.Components.UpdateAppAlertDialog;
++
++import java.io.File;
+ 
+ public class ApplicationLoaderImpl extends ApplicationLoader {
+     @Override
+     protected String onGetApplicationId() {
+         return BuildConfig.APPLICATION_ID;
+     }
++
++    @Override
++    protected boolean isBeta() {
++        return true;
++    }
++
++    @Override
++    public boolean isCustomUpdate() {
++        return !TextUtils.isEmpty(BuildConfig.FORK_VERSION_TAG);
++    }
++
++    @Override
++    public BetaUpdate getUpdate() {
++        if (!isCustomUpdate()) return null;
++        return GithubUpdaterController.getInstance().getUpdate();
++    }
++
++    @Override
++    public void checkUpdate(boolean force, Runnable whenDone) {
++        if (!isCustomUpdate()) return;
++        GithubUpdaterController.getInstance().checkForUpdate(force, whenDone);
++    }
++
++    @Override
++    public void downloadUpdate() {
++        if (!isCustomUpdate()) return;
++        GithubUpdaterController.getInstance().downloadUpdate();
++    }
++
++    @Override
++    public void cancelDownloadingUpdate() {
++        if (!isCustomUpdate()) return;
++        GithubUpdaterController.getInstance().cancelDownloadingUpdate();
++    }
++
++    @Override
++    public boolean isDownloadingUpdate() {
++        if (!isCustomUpdate()) return false;
++        return GithubUpdaterController.getInstance().isDownloading();
++    }
++
++    @Override
++    public float getDownloadingUpdateProgress() {
++        if (!isCustomUpdate()) return 0;
++        return GithubUpdaterController.getInstance().getDownloadingProgress();
++    }
++
++    @Override
++    public File getDownloadedUpdateFile() {
++        if (!isCustomUpdate()) return null;
++        return GithubUpdaterController.getInstance().getDownloadedFile();
++    }
++
++    @Override
++    public boolean showCustomUpdateAppPopup(Context context, BetaUpdate update, int account) {
++        try {
++            new UpdateAppAlertDialog(context, update, account).show();
++        } catch (Exception e) {
++            FileLog.e(e);
++        }
++        return true;
++    }
+ }
+diff --git a/TMessagesProj_App/src/main/java/org/telegram/messenger/GithubUpdaterController.java b/TMessagesProj_App/src/main/java/org/telegram/messenger/GithubUpdaterController.java
+new file mode 100644
+index 000000000..e3e1b1667
+--- /dev/null
++++ b/TMessagesProj_App/src/main/java/org/telegram/messenger/GithubUpdaterController.java
+@@ -0,0 +1,294 @@
++package org.telegram.messenger;
++
++import android.app.Activity;
++import android.content.SharedPreferences;
++import android.text.TextUtils;
++
++import org.json.JSONArray;
++import org.json.JSONObject;
++import org.telegram.messenger.regular.BuildConfig;
++import org.telegram.ui.web.HttpGetFileTask;
++import org.telegram.ui.web.HttpGetTask;
++
++import java.io.File;
++
++public class GithubUpdaterController {
++
++    private static final String RELEASES_URL = "https://api.github.com/repos/0siriss/telegram_gx/releases/latest";
++    private static final String ASSET_NAME = "app.apk";
++
++    private static GithubUpdaterController instance;
++    public static GithubUpdaterController getInstance() {
++        if (instance == null) {
++            instance = new GithubUpdaterController();
++        }
++        return instance;
++    }
++
++    private String version;
++    private int versionCode;
++    private String changelog;
++    private String path;
++    private long lastCheck;
++
++    private String fileUrl;
++
++    public GithubUpdaterController() {
++        load();
++    }
++
++    private SharedPreferences getSharedPreferences() {
++        return ApplicationLoader.applicationContext.getSharedPreferences("github_update", Activity.MODE_PRIVATE);
++    }
++
++    private void load() {
++        final SharedPreferences prefs = getSharedPreferences();
++
++        version = prefs.getString("version", null);
++        versionCode = prefs.getInt("versionCode", 0);
++        changelog = prefs.getString("changelog", null);
++        path = prefs.getString("path", null);
++        lastCheck = prefs.getLong("lastCheck", 0L);
++
++        if (getCurrentVersionCode() >= versionCode || !TextUtils.isEmpty(path) && !new File(path).exists()) {
++            version = null;
++            versionCode = 0;
++            path = null;
++            changelog = null;
++            lastCheck = 0;
++            save();
++        }
++    }
++
++    private void save() {
++        final SharedPreferences.Editor e = getSharedPreferences().edit();
++        if (TextUtils.isEmpty(version)) {
++            e.remove("version");
++        } else {
++            e.putString("version", version);
++        }
++        if (TextUtils.isEmpty(changelog)) {
++            e.remove("changelog");
++        } else {
++            e.putString("changelog", changelog);
++        }
++        if (versionCode == 0) {
++            e.remove("versionCode");
++        } else {
++            e.putInt("versionCode", versionCode);
++        }
++        if (TextUtils.isEmpty(path)) {
++            e.remove("path");
++        } else {
++            e.putString("path", path);
++        }
++        if (lastCheck == 0) {
++            e.remove("lastCheck");
++        } else {
++            e.putLong("lastCheck", lastCheck);
++        }
++        e.apply();
++    }
++
++    private final static long CHECK_INTERVAL_PAUSED = 1000 * 60 * 60 * 24; // 1 day
++    private final static long CHECK_INTERVAL = 1000 * 60 * 20; // 20 minutes
++
++    private boolean firstCheck = true;
++    private boolean checkingForUpdate;
++    private final Runnable scheduledUpdateCheck = () -> checkForUpdate(false, null);
++    public void checkForUpdate(boolean force, Runnable whenDone) {
++        if (checkingForUpdate) return;
++
++        if (firstCheck) {
++            force = true;
++        }
++        if (!force && System.currentTimeMillis() - lastCheck < (ApplicationLoader.mainInterfacePaused ? CHECK_INTERVAL_PAUSED : CHECK_INTERVAL)) {
++            if (whenDone != null) {
++                whenDone.run();
++            }
++            return;
++        }
++
++        checkingForUpdate = true;
++        firstCheck = false;
++        new HttpGetTask(str -> AndroidUtilities.runOnUIThread(() -> {
++            checkingForUpdate = false;
++            try {
++                final JSONObject json = new JSONObject(str);
++                final String newVersion = json.getString("tag_name");
++                final int newVersionCode = parseVersionCode(newVersion);
++                final String newChangelog = json.optString("body", null);
++
++                String newFileUrl = null;
++                final JSONArray assets = json.optJSONArray("assets");
++                if (assets != null) {
++                    for (int i = 0; i < assets.length(); i++) {
++                        final JSONObject asset = assets.getJSONObject(i);
++                        if (ASSET_NAME.equals(asset.optString("name"))) {
++                            newFileUrl = asset.optString("browser_download_url", null);
++                            break;
++                        }
++                    }
++                }
++
++                final int oldVersionCode = this.versionCode;
++
++                if (newVersionCode > getCurrentVersionCode() && newFileUrl != null) {
++                    if (newVersionCode != this.versionCode && !TextUtils.isEmpty(path)) {
++                        deleteDownloadedFile();
++                    }
++                    version = newVersion;
++                    versionCode = newVersionCode;
++                    changelog = newChangelog;
++                    fileUrl = newFileUrl;
++                } else {
++                    if (!TextUtils.isEmpty(path)) {
++                        deleteDownloadedFile();
++                    }
++                    version = null;
++                    versionCode = 0;
++                    fileUrl = null;
++                    changelog = null;
++                }
++
++                this.lastCheck = System.currentTimeMillis();
++                save();
++
++                final String checkResult = "GithubUpdaterController: checked update, current=" + BuildConfig.FORK_VERSION_TAG + "(" + getCurrentVersionCode() + ")"
++                        + " latest=" + newVersion + "(" + newVersionCode + ")"
++                        + " fileUrl=" + newFileUrl
++                        + " -> " + (this.versionCode != 0 ? "update available: " + this.version : "up to date");
++                FileLog.d(checkResult);
++                android.util.Log.i("GithubUpdaterController", checkResult);
++
++                if (this.versionCode != oldVersionCode) {
++                    NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateAvailable);
++                }
++
++                AndroidUtilities.cancelRunOnUIThread(this.scheduledUpdateCheck);
++                AndroidUtilities.runOnUIThread(this.scheduledUpdateCheck, CHECK_INTERVAL);
++                if (whenDone != null) {
++                    whenDone.run();
++                }
++            } catch (Exception e) {
++                FileLog.e("Failed to check for GitHub release update, received: " + str, e);
++                android.util.Log.e("GithubUpdaterController", "Failed to check for GitHub release update, received: " + str, e);
++            }
++        })).setHeader("User-Agent", "TGX-DPI-Bypass-UpdateChecker")
++          .setHeader("Accept", "application/vnd.github+json")
++          .execute(RELEASES_URL);
++    }
++
++    private static int parseVersionCode(String tag) {
++        try {
++            String cleaned = tag.startsWith("v") || tag.startsWith("V") ? tag.substring(1) : tag;
++            String[] parts = cleaned.split("\\.");
++            int major = Integer.parseInt(parts[0]);
++            int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
++            return major * 1000 + minor;
++        } catch (Exception e) {
++            return 0;
++        }
++    }
++
++    private void deleteDownloadedFile() {
++        final File file = new File(path);
++        try {
++            file.delete();
++        } catch (Exception e) {
++            FileLog.e(e);
++        }
++        path = null;
++    }
++
++    public BetaUpdate getUpdate() {
++        if (version == null || versionCode == 0) {
++            return null;
++        }
++        // TGX: BetaUpdate.higherThan() feeds this string into SharedConfig.versionBiggerOrEqual(), which does a
++        // plain Integer.parseInt() per dot-separated part — our raw tags ("v1.8", "v1.7.1-dev4") crash it
++        // (NumberFormatException on "v1"). versionCode is already the authoritative comparison value, so derive
++        // a clean numeric-only equivalent from it instead of passing the raw tag through.
++        String comparableVersion = (versionCode / 1000) + "." + (versionCode % 1000);
++        return new BetaUpdate(comparableVersion, versionCode, changelog);
++    }
++
++    private boolean downloading;
++    private float downloadingProgress;
++    private HttpGetFileTask downloadingTask;
++    public void downloadUpdate() {
++        downloadUpdate(false);
++    }
++    private void downloadUpdate(boolean triedGettingFileUrl) {
++        if (downloading || !TextUtils.isEmpty(path)) return;
++
++        downloading = true;
++        downloadingProgress = 0.0f;
++        NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateLoading);
++
++        if (TextUtils.isEmpty(fileUrl)) {
++            if (!triedGettingFileUrl) {
++                checkForUpdate(true, () -> downloadUpdate(true));
++            } else {
++                downloading = false;
++            }
++            return;
++        }
++
++        downloadingTask = new HttpGetFileTask(
++            downloadedFile -> AndroidUtilities.runOnUIThread(() -> {
++                if (downloadedFile != null) {
++                    if (!TextUtils.isEmpty(path)) {
++                        deleteDownloadedFile();
++                    }
++                    path = downloadedFile.getAbsolutePath();
++                    save();
++                    downloadingProgress = 1.0f;
++                    downloading = false;
++                    NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateAvailable);
++                } else {
++                    downloading = false;
++                    NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateAvailable);
++                }
++            }),
++            progress -> {
++                downloadingProgress = progress;
++                NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateLoading);
++            }
++        ).setOverrideExtension("apk");
++        downloadingTask.execute(fileUrl);
++    }
++    public void cancelDownloadingUpdate() {
++        if (!downloading) return;
++        if (downloadingTask != null) {
++            downloadingTask.cancel(false);
++        }
++        downloading = false;
++        NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateAvailable);
++    }
++
++    public boolean isDownloading() {
++        return downloading;
++    }
++
++    public float getDownloadingProgress() {
++        return downloadingProgress;
++    }
++
++    public File getDownloadedFile() {
++        if (path == null) {
++            return null;
++        }
++        final File file = new File(path);
++        if (!file.exists()) {
++            path = null;
++            save();
++            return null;
++        }
++        return file;
++    }
++
++    private int getCurrentVersionCode() {
++        return parseVersionCode(BuildConfig.FORK_VERSION_TAG);
++    }
++}
+diff --git a/TMessagesProj_App/src/main/java/org/telegram/ui/Components/UpdateAppAlertDialog.java b/TMessagesProj_App/src/main/java/org/telegram/ui/Components/UpdateAppAlertDialog.java
+new file mode 100644
+index 000000000..4adfb3ee3
+--- /dev/null
++++ b/TMessagesProj_App/src/main/java/org/telegram/ui/Components/UpdateAppAlertDialog.java
+@@ -0,0 +1,376 @@
++package org.telegram.ui.Components;
++
++import android.animation.Animator;
++import android.animation.AnimatorListenerAdapter;
++import android.animation.AnimatorSet;
++import android.animation.ObjectAnimator;
++import android.app.Activity;
++import android.content.Context;
++import android.graphics.Canvas;
++import android.graphics.PorterDuff;
++import android.graphics.PorterDuffColorFilter;
++import android.graphics.drawable.Drawable;
++import android.text.SpannableStringBuilder;
++import android.text.TextUtils;
++import android.util.Pair;
++import android.util.TypedValue;
++import android.view.Gravity;
++import android.view.MotionEvent;
++import android.view.View;
++import android.widget.FrameLayout;
++import android.widget.LinearLayout;
++import android.widget.TextView;
++
++import androidx.core.widget.NestedScrollView;
++
++import org.telegram.messenger.AndroidUtilities;
++import org.telegram.messenger.ApplicationLoader;
++import org.telegram.messenger.BetaUpdate;
++import org.telegram.messenger.DocumentObject;
++import org.telegram.messenger.Emoji;
++import org.telegram.messenger.FileLoader;
++import org.telegram.messenger.ImageLocation;
++import org.telegram.messenger.LocaleController;
++import org.telegram.messenger.MessageObject;
++import org.telegram.messenger.NotificationCenter;
++import org.telegram.messenger.R;
++import org.telegram.messenger.SvgHelper;
++import org.telegram.tgnet.TLRPC;
++import org.telegram.ui.ActionBar.BottomSheet;
++import org.telegram.ui.ActionBar.Theme;
++import org.telegram.ui.Stories.recorder.ButtonWithCounterView;
++
++import java.io.File;
++
++public class UpdateAppAlertDialog extends BottomSheet {
++
++    private BetaUpdate appUpdate;
++    private int accountNum;
++    private RadialProgress radialProgress;
++    private FrameLayout radialProgressView;
++    private AnimatorSet progressAnimation;
++
++    private Drawable shadowDrawable;
++    private TextView textView;
++    private TextView messageTextView;
++    private NestedScrollView scrollView;
++
++    private AnimatorSet shadowAnimation;
++
++    private View shadow;
++
++    private boolean ignoreLayout;
++
++    private LinearLayout linearLayout;
++
++    private int scrollOffsetY;
++
++    private int[] location = new int[2];
++
++    private boolean animationInProgress;
++
++    public class BottomSheetCell extends FrameLayout {
++
++        private View background;
++        private TextView[] textView = new TextView[2];
++        private boolean hasBackground;
++
++        public BottomSheetCell(Context context, boolean withoutBackground) {
++            super(context);
++
++            hasBackground = !withoutBackground;
++            setBackground(null);
++
++            background = new View(context);
++            if (hasBackground) {
++                background.setBackground(Theme.AdaptiveRipple.filledRectByKey(Theme.key_featuredStickers_addButton, 4));
++            }
++            addView(background, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT, 0, 16, withoutBackground ? 0 : 16, 16, 16));
++
++            for (int a = 0; a < 2; a++) {
++                textView[a] = new TextView(context);
++                textView[a].setLines(1);
++                textView[a].setSingleLine(true);
++                textView[a].setGravity(Gravity.CENTER_HORIZONTAL);
++                textView[a].setEllipsize(TextUtils.TruncateAt.END);
++                textView[a].setGravity(Gravity.CENTER);
++                if (hasBackground) {
++                    textView[a].setTextColor(Theme.getColor(Theme.key_featuredStickers_buttonText));
++                    textView[a].setTypeface(AndroidUtilities.bold());
++                } else {
++                    textView[a].setTextColor(Theme.getColor(Theme.key_featuredStickers_addButton));
++                }
++                textView[a].setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14);
++                textView[a].setPadding(0, 0, 0, hasBackground ? 0 : AndroidUtilities.dp(13));
++                addView(textView[a], LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER));
++                if (a == 1) {
++                    textView[a].setAlpha(0.0f);
++                }
++            }
++        }
++
++        @Override
++        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
++            super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(AndroidUtilities.dp(hasBackground ? 80 : 50), MeasureSpec.EXACTLY));
++        }
++
++        public void setText(CharSequence text, boolean animated) {
++            if (!animated) {
++                textView[0].setText(text);
++            } else {
++                textView[1].setText(text);
++                animationInProgress = true;
++                AnimatorSet animatorSet = new AnimatorSet();
++                animatorSet.setDuration(180);
++                animatorSet.setInterpolator(CubicBezierInterpolator.EASE_OUT);
++                animatorSet.playTogether(
++                        ObjectAnimator.ofFloat(textView[0], View.ALPHA, 1.0f, 0.0f),
++                        ObjectAnimator.ofFloat(textView[0], View.TRANSLATION_Y, 0, -AndroidUtilities.dp(10)),
++                        ObjectAnimator.ofFloat(textView[1], View.ALPHA, 0.0f, 1.0f),
++                        ObjectAnimator.ofFloat(textView[1], View.TRANSLATION_Y, AndroidUtilities.dp(10), 0)
++                );
++                animatorSet.addListener(new AnimatorListenerAdapter() {
++                    @Override
++                    public void onAnimationEnd(Animator animation) {
++                        animationInProgress = false;
++                        TextView temp = textView[0];
++                        textView[0] = textView[1];
++                        textView[1] = temp;
++                    }
++                });
++                animatorSet.start();
++            }
++        }
++    }
++
++    public UpdateAppAlertDialog(Context context, BetaUpdate update, int account) {
++        super(context, false);
++        appUpdate = update;
++        accountNum = account;
++        setCanceledOnTouchOutside(false);
++
++        setApplyTopPadding(false);
++        setApplyBottomPadding(false);
++
++        shadowDrawable = context.getResources().getDrawable(R.drawable.sheet_shadow_round).mutate();
++        shadowDrawable.setColorFilter(new PorterDuffColorFilter(Theme.getColor(Theme.key_dialogBackground), PorterDuff.Mode.MULTIPLY));
++
++        FrameLayout container = new FrameLayout(context) {
++            @Override
++            public void setTranslationY(float translationY) {
++                super.setTranslationY(translationY);
++                updateLayout();
++            }
++
++            @Override
++            public boolean onInterceptTouchEvent(MotionEvent ev) {
++                if (ev.getAction() == MotionEvent.ACTION_DOWN && scrollOffsetY != 0 && ev.getY() < scrollOffsetY) {
++                    dismiss();
++                    return true;
++                }
++                return super.onInterceptTouchEvent(ev);
++            }
++
++            @Override
++            public boolean onTouchEvent(MotionEvent e) {
++                return !isDismissed() && super.onTouchEvent(e);
++            }
++
++            @Override
++            protected void onDraw(Canvas canvas) {
++                int top = (int) (scrollOffsetY - backgroundPaddingTop - getTranslationY());
++                shadowDrawable.setBounds(0, top, getMeasuredWidth(), getMeasuredHeight());
++                shadowDrawable.draw(canvas);
++            }
++        };
++        container.setWillNotDraw(false);
++        containerView = container;
++
++        scrollView = new NestedScrollView(context) {
++
++            private boolean ignoreLayout;
++
++            @Override
++            protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
++                int height = MeasureSpec.getSize(heightMeasureSpec);
++                measureChildWithMargins(linearLayout, widthMeasureSpec, 0, heightMeasureSpec, 0);
++                int contentHeight = linearLayout.getMeasuredHeight();
++                int padding = (height / 5 * 2);
++                int visiblePart = height - padding;
++                if (contentHeight - visiblePart < AndroidUtilities.dp(90) || contentHeight < height / 2 + AndroidUtilities.dp(90)) {
++                    padding = height - contentHeight;
++                }
++                if (padding < 0) {
++                    padding = 0;
++                }
++                if (getPaddingTop() != padding) {
++                    ignoreLayout = true;
++                    setPadding(0, padding, 0, 0);
++                    ignoreLayout = false;
++                }
++                super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY));
++            }
++
++            @Override
++            protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
++                super.onLayout(changed, left, top, right, bottom);
++                updateLayout();
++            }
++
++            @Override
++            public void requestLayout() {
++                if (ignoreLayout) {
++                    return;
++                }
++                super.requestLayout();
++            }
++
++            @Override
++            protected void onScrollChanged(int l, int t, int oldl, int oldt) {
++                super.onScrollChanged(l, t, oldl, oldt);
++                updateLayout();
++            }
++        };
++        scrollView.setFillViewport(true);
++        scrollView.setWillNotDraw(false);
++        scrollView.setClipToPadding(false);
++        scrollView.setVerticalScrollBarEnabled(false);
++        container.addView(scrollView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT, Gravity.LEFT | Gravity.TOP, 0, 0, 0, 130));
++
++        linearLayout = new LinearLayout(context);
++        linearLayout.setOrientation(LinearLayout.VERTICAL);
++        scrollView.addView(linearLayout, LayoutHelper.createScroll(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.LEFT | Gravity.TOP));
++
++//        if (appUpdate.sticker != null) {
++//            BackupImageView imageView = new BackupImageView(context);
++//            SvgHelper.SvgDrawable svgThumb = DocumentObject.getSvgThumb(appUpdate.sticker.thumbs, Theme.key_windowBackgroundGray, 1.0f);
++//            TLRPC.PhotoSize thumb = FileLoader.getClosestPhotoSizeWithSize(appUpdate.sticker.thumbs, 90);
++//            ImageLocation imageLocation = ImageLocation.getForDocument(thumb, appUpdate.sticker);
++//
++//            if (svgThumb != null) {
++//                imageView.setImage(ImageLocation.getForDocument(appUpdate.sticker), "250_250", svgThumb, 0, "update");
++//            } else {
++//                imageView.setImage(ImageLocation.getForDocument(appUpdate.sticker), "250_250", imageLocation, null, 0, "update");
++//            }
++//            linearLayout.addView(imageView, LayoutHelper.createLinear(160, 160, Gravity.CENTER_HORIZONTAL | Gravity.TOP, 17, 8, 17, 0));
++//        }
++
++        TextView textView = new TextView(context);
++        textView.setTypeface(AndroidUtilities.bold());
++        textView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 20);
++        textView.setTextColor(Theme.getColor(Theme.key_dialogTextBlack));
++        textView.setSingleLine(true);
++        textView.setEllipsize(TextUtils.TruncateAt.END);
++        textView.setText(LocaleController.getString(R.string.AppUpdateBeta));
++        linearLayout.addView(textView, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL, 23, 16, 23, 0));
++
++        TextView messageTextView = new TextView(getContext());
++        messageTextView.setTextColor(Theme.getColor(Theme.key_dialogTextGray3));
++        messageTextView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14);
++        messageTextView.setMovementMethod(new AndroidUtilities.LinkMovementMethodMy());
++        messageTextView.setLinkTextColor(Theme.getColor(Theme.key_dialogTextLink));
++        messageTextView.setText(LocaleController.formatString(R.string.AppBetaUpdateVersion, appUpdate.version, appUpdate.versionCode));
++        messageTextView.setGravity(Gravity.CENTER_HORIZONTAL | Gravity.TOP);
++        linearLayout.addView(messageTextView, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL, 23, 0, 23, 5));
++
++        if (!TextUtils.isEmpty(appUpdate.changelog)) {
++            TextView changelogTextView = new TextView(getContext());
++            changelogTextView.setTextColor(Theme.getColor(Theme.key_dialogTextBlack));
++            changelogTextView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14);
++            changelogTextView.setMovementMethod(new AndroidUtilities.LinkMovementMethodMy());
++            changelogTextView.setLinkTextColor(Theme.getColor(Theme.key_dialogTextLink));
++            changelogTextView.setText(Emoji.replaceEmoji(appUpdate.changelog, changelogTextView.getPaint().getFontMetricsInt(), false));
++            NotificationCenter.listenEmojiLoading(changelogTextView);
++            changelogTextView.setGravity(Gravity.LEFT | Gravity.TOP);
++            linearLayout.addView(changelogTextView, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.LEFT | Gravity.TOP, 23, 15, 23, 0));
++        }
++
++        FrameLayout.LayoutParams frameLayoutParams = new FrameLayout.LayoutParams(LayoutHelper.MATCH_PARENT, AndroidUtilities.getShadowHeight(), Gravity.BOTTOM | Gravity.LEFT);
++        frameLayoutParams.bottomMargin = AndroidUtilities.dp(130);
++        shadow = new View(context);
++        shadow.setBackgroundColor(Theme.getColor(Theme.key_dialogShadowLine));
++        shadow.setAlpha(0.0f);
++        shadow.setTag(1);
++        container.addView(shadow, frameLayoutParams);
++
++        ButtonWithCounterView doneButton = new ButtonWithCounterView(context, null);
++        final File file = ApplicationLoader.applicationLoaderInstance.getDownloadedUpdateFile();
++        if (file != null) {
++            doneButton.setText(LocaleController.formatString(R.string.AppUpdateNow), false);
++            doneButton.setOnClickListener(v -> {
++                if (file == null) return;
++                Activity activity = AndroidUtilities.findActivity(getContext());
++                if (activity == null) return;
++                AndroidUtilities.openForView(file, "Telegram.apk", "application/vnd.android.package-archive", activity, null, false);
++                dismiss();
++            });
++        } else {
++            doneButton.setText(LocaleController.formatString(R.string.AppUpdateDownloadNow), false);
++            doneButton.setOnClickListener(v -> {
++                ApplicationLoader.applicationLoaderInstance.downloadUpdate();
++                dismiss();
++            });
++        }
++        container.addView(doneButton, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 48, Gravity.FILL_HORIZONTAL | Gravity.BOTTOM, 20, 0, 20, 48 + 4 + 8));
++
++        ButtonWithCounterView scheduleButton = new ButtonWithCounterView(context, false, null);
++        scheduleButton.setText(LocaleController.getString(R.string.AppUpdateRemindMeLater), false);
++        scheduleButton.setOnClickListener(v -> dismiss());
++        container.addView(scheduleButton, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 48, Gravity.FILL_HORIZONTAL | Gravity.BOTTOM, 20, 4, 20, 8));
++    }
++
++    private void runShadowAnimation(final int num, final boolean show) {
++        if (show && shadow.getTag() != null || !show && shadow.getTag() == null) {
++            shadow.setTag(show ? null : 1);
++            if (show) {
++                shadow.setVisibility(View.VISIBLE);
++            }
++            if (shadowAnimation != null) {
++                shadowAnimation.cancel();
++            }
++            shadowAnimation = new AnimatorSet();
++            shadowAnimation.playTogether(ObjectAnimator.ofFloat(shadow, View.ALPHA, show ? 1.0f : 0.0f));
++            shadowAnimation.setDuration(150);
++            shadowAnimation.addListener(new AnimatorListenerAdapter() {
++                @Override
++                public void onAnimationEnd(Animator animation) {
++                    if (shadowAnimation != null && shadowAnimation.equals(animation)) {
++                        if (!show) {
++                            shadow.setVisibility(View.INVISIBLE);
++                        }
++                        shadowAnimation = null;
++                    }
++                }
++
++                @Override
++                public void onAnimationCancel(Animator animation) {
++                    if (shadowAnimation != null && shadowAnimation.equals(animation)) {
++                        shadowAnimation = null;
++                    }
++                }
++            });
++            shadowAnimation.start();
++        }
++    }
++
++    private void updateLayout() {
++        View child = linearLayout.getChildAt(0);
++        child.getLocationInWindow(location);
++        int top = location[1] - AndroidUtilities.dp(24);
++        int newOffset = Math.max(top, 0);
++        if (location[1] + linearLayout.getMeasuredHeight() <= container.getMeasuredHeight() - AndroidUtilities.dp(113) + containerView.getTranslationY()) {
++            runShadowAnimation(0, false);
++        } else {
++            runShadowAnimation(0, true);
++        }
++        if (scrollOffsetY != newOffset) {
++            scrollOffsetY = newOffset;
++            scrollView.invalidate();
++        }
++    }
++
++    @Override
++    protected boolean canDismissWithSwipe() {
++        return false;
++    }
++}
