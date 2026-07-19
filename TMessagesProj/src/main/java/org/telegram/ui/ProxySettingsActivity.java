@@ -72,11 +72,27 @@ import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.util.ArrayList;
+import java.util.Locale;
 
 public class ProxySettingsActivity extends BaseFragment {
 
     private final static int TYPE_SOCKS5 = 0;
     private final static int TYPE_MTPROTO = 1;
+
+    private static int parseEchExtensionId(String text) {
+        if (text == null) {
+            return DEFAULT_ECH_EXTENSION_ID;
+        }
+        text = text.trim();
+        if (!text.matches("(?i)[0-9a-f]{1,4}")) {
+            return DEFAULT_ECH_EXTENSION_ID;
+        }
+        try {
+            return Integer.parseInt(text, 16) & 0xffff;
+        } catch (NumberFormatException e) {
+            return DEFAULT_ECH_EXTENSION_ID;
+        }
+    }
 
     private final static int FIELD_IP = 0;
     private final static int FIELD_PORT = 1;
@@ -108,6 +124,30 @@ public class ProxySettingsActivity extends BaseFragment {
 
     private ClipboardManager clipboardManager;
 
+    // TLS Fragmentation UI
+    private LinearLayout fragmentContainer;
+    private android.widget.Switch fragmentSwitch;
+    private EditTextBoldCursor fragmentMinField;
+    private EditTextBoldCursor fragmentMaxField;
+
+    // TLS Fingerprint profile UI
+    private TextSettingsCell fingerprintProfileCell;
+    private int currentFingerprintProfile = 0;
+    private int currentRotationInterval = 0;
+    private FrameLayout rotationIntervalContainer;
+    private EditTextBoldCursor rotationIntervalField;
+    private static final String[] FINGERPRINT_PROFILE_NAMES = {
+        "Chrome 120+ (default)", "Firefox 121+", "Safari 17", "Edge 120+", "Random"
+    };
+
+    // TLS ECH extension ID UI
+    private TextSettingsCell echIdCell;
+    private int currentEchId = DEFAULT_ECH_EXTENSION_ID;
+    private static final int DEFAULT_ECH_EXTENSION_ID = 0xfe0d;
+    private static final int[] ECH_ID_PRESET_VALUES = {0xfe0d, 0xfe02};
+    private static final String[] ECH_ID_PRESET_NAMES = {"fe0d (default)", "fe02 (legacy)", "Custom…"};
+
+
     private boolean addingNewProxy;
 
     private SharedConfig.ProxyInfo currentProxyInfo;
@@ -115,6 +155,38 @@ public class ProxySettingsActivity extends BaseFragment {
     private boolean ignoreOnTextChange;
 
     private static final int done_button = 1;
+
+    private void showEchCustomIdDialog() {
+        if (getParentActivity() == null) {
+            return;
+        }
+        Context context = getParentActivity();
+        FrameLayout container = new FrameLayout(context);
+        container.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+        EditTextBoldCursor input = new EditTextBoldCursor(context);
+        input.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+        input.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        input.setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        input.setBackground(null);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+        input.setSingleLine(true);
+        input.setGravity((LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
+        input.setLineColors(Theme.getColor(Theme.key_windowBackgroundWhiteInputField), Theme.getColor(Theme.key_windowBackgroundWhiteInputFieldActivated), Theme.getColor(Theme.key_text_RedRegular));
+        input.setHintText("hex, e.g. fe0d");
+        input.setText(String.format(Locale.US, "%04x", currentEchId));
+        input.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(6), AndroidUtilities.dp(21), 0);
+        container.addView(input, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 36, Gravity.CENTER_VERTICAL, 21, 6, 21, 0));
+
+        android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(context);
+        builder.setTitle("Custom ECH Extension ID");
+        builder.setView(container);
+        builder.setPositiveButton(LocaleController.getString(R.string.OK), (dialog, which) -> {
+            currentEchId = parseEchExtensionId(input.getText().toString());
+            echIdCell.setTextAndValue("ECH extension ID", String.format(Locale.US, "%04x", currentEchId), false);
+        });
+        builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
+        showDialog(builder.create());
+    }
 
     public static class TypeCell extends FrameLayout {
 
@@ -198,7 +270,7 @@ public class ProxySettingsActivity extends BaseFragment {
         actionBar.setTitle(LocaleController.getString(R.string.ProxyDetails));
         actionBar.setBackButtonImage(R.drawable.ic_ab_back);
         actionBar.setAllowOverlayTitle(false);
-        if (parentLayout != null && parentLayout.isLayersLayout()) {
+        if (AndroidUtilities.isTablet()) {
             actionBar.setOccupyStatusBar(false);
         }
 
@@ -242,6 +314,30 @@ public class ProxySettingsActivity extends BaseFragment {
                         editor.putInt("proxy_port", currentProxyInfo.port);
                         editor.putString("proxy_secret", currentProxyInfo.secret);
                         ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret);
+                    }
+                    // Save and apply TLS fingerprint profile
+                    if (rotationIntervalField != null) {
+                        currentRotationInterval = Utilities.parseInt(rotationIntervalField.getText().toString());
+                        if (currentRotationInterval < 30 && currentRotationInterval != 0) currentRotationInterval = 30;
+                        if (currentRotationInterval > 240) currentRotationInterval = 240;
+                    }
+                    editor.putInt("tls_fingerprint_profile", currentFingerprintProfile);
+                    editor.putInt("tls_rotation_interval", currentRotationInterval);
+                    ConnectionsManager.setTlsFingerprintProfile(currentFingerprintProfile, currentRotationInterval);
+                    // Save and apply ECH extension ID
+                    editor.putInt("tls_ech_extension_id", currentEchId);
+                    ConnectionsManager.setTlsEchExtensionId(currentEchId);
+                    // Save and apply TLS fragment settings
+                    if (fragmentContainer != null) {
+                        boolean fragEnabled = fragmentSwitch.isChecked();
+                        int fragMin = Utilities.parseInt(fragmentMinField.getText().toString());
+                        int fragMax = Utilities.parseInt(fragmentMaxField.getText().toString());
+                        if (fragMin < 1) fragMin = 1;
+                        if (fragMax < fragMin) fragMax = fragMin;
+                        editor.putBoolean("tls_fragment_enabled", fragEnabled);
+                        editor.putInt("tls_fragment_min", fragMin);
+                        editor.putInt("tls_fragment_max", fragMax);
+                        ConnectionsManager.setTlsFragmentConfig(fragEnabled, fragMin, fragMax);
                     }
                     editor.commit();
 
@@ -447,6 +543,166 @@ public class ProxySettingsActivity extends BaseFragment {
             }
             linearLayout2.addView(bottomCells[i], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
         }
+
+        // TLS Fingerprint + Fragmentation section (MTProto only)
+        SharedPreferences fragPrefs = MessagesController.getGlobalMainSettings();
+        boolean savedFragEnabled = fragPrefs.getBoolean("tls_fragment_enabled", false);
+        int savedFragMin = fragPrefs.getInt("tls_fragment_min", 1);
+        int savedFragMax = fragPrefs.getInt("tls_fragment_max", 3);
+        currentFingerprintProfile = fragPrefs.getInt("tls_fingerprint_profile", 0);
+        currentRotationInterval = fragPrefs.getInt("tls_rotation_interval", 0);
+        currentEchId = fragPrefs.getInt("tls_ech_extension_id", DEFAULT_ECH_EXTENSION_ID);
+        ConnectionsManager.setTlsFragmentConfig(savedFragEnabled, savedFragMin, savedFragMax);
+        ConnectionsManager.setTlsFingerprintProfile(currentFingerprintProfile, currentRotationInterval);
+        ConnectionsManager.setTlsEchExtensionId(currentEchId);
+
+        fragmentContainer = new LinearLayout(context);
+        fragmentContainer.setOrientation(LinearLayout.VERTICAL);
+        fragmentContainer.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+        linearLayout2.addView(fragmentContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+        fragmentContainer.setVisibility(View.GONE);
+
+        // TLS Fingerprint profile section
+        HeaderCell fpHeader = new HeaderCell(context);
+        fpHeader.setText("TLS Fingerprint");
+        fragmentContainer.addView(fpHeader, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+
+        fingerprintProfileCell = new TextSettingsCell(context);
+        fingerprintProfileCell.setBackground(Theme.getSelectorDrawable(true));
+        fingerprintProfileCell.setTextAndValue("Browser profile", FINGERPRINT_PROFILE_NAMES[currentFingerprintProfile], false);
+        fingerprintProfileCell.setOnClickListener(v -> {
+            if (getParentActivity() == null) return;
+            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
+            builder.setTitle("TLS Fingerprint Profile");
+            builder.setSingleChoiceItems(FINGERPRINT_PROFILE_NAMES, currentFingerprintProfile, (dialog, which) -> {
+                currentFingerprintProfile = which;
+                fingerprintProfileCell.setTextAndValue("Browser profile", FINGERPRINT_PROFILE_NAMES[which], false);
+                // show/hide rotation interval for Random profile (index 4)
+                if (rotationIntervalContainer != null) {
+                    rotationIntervalContainer.setVisibility(which == 4 ? View.VISIBLE : View.GONE);
+                }
+                dialog.dismiss();
+            });
+            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
+            showDialog(builder.create());
+        });
+        fragmentContainer.addView(fingerprintProfileCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+
+        // ECH extension ID picker (same checkmark-list pattern as Browser profile, right next to it)
+        echIdCell = new TextSettingsCell(context);
+        echIdCell.setBackground(Theme.getSelectorDrawable(true));
+        echIdCell.setTextAndValue("ECH extension ID", String.format(Locale.US, "%04x", currentEchId), false);
+        echIdCell.setOnClickListener(v -> {
+            if (getParentActivity() == null) return;
+            int selected = ECH_ID_PRESET_NAMES.length - 1;
+            for (int i = 0; i < ECH_ID_PRESET_VALUES.length; i++) {
+                if (ECH_ID_PRESET_VALUES[i] == currentEchId) {
+                    selected = i;
+                    break;
+                }
+            }
+            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
+            builder.setTitle("ECH Extension ID");
+            builder.setSingleChoiceItems(ECH_ID_PRESET_NAMES, selected, (dialog, which) -> {
+                dialog.dismiss();
+                if (which == ECH_ID_PRESET_NAMES.length - 1) {
+                    showEchCustomIdDialog();
+                } else {
+                    currentEchId = ECH_ID_PRESET_VALUES[which];
+                    echIdCell.setTextAndValue("ECH extension ID", String.format(Locale.US, "%04x", currentEchId), false);
+                }
+            });
+            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
+            showDialog(builder.create());
+        });
+        fragmentContainer.addView(echIdCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+
+        // Rotation interval field (visible only when Random profile is selected)
+        rotationIntervalContainer = new FrameLayout(context);
+        rotationIntervalContainer.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+        rotationIntervalField = new EditTextBoldCursor(context);
+        rotationIntervalField.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+        rotationIntervalField.setHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
+        rotationIntervalField.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        rotationIntervalField.setBackground(null);
+        rotationIntervalField.setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        rotationIntervalField.setInputType(InputType.TYPE_CLASS_NUMBER);
+        rotationIntervalField.setSingleLine(true);
+        rotationIntervalField.setGravity((LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
+        rotationIntervalField.setHeaderHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader));
+        rotationIntervalField.setTransformHintToHeader(true);
+        rotationIntervalField.setLineColors(Theme.getColor(Theme.key_windowBackgroundWhiteInputField), Theme.getColor(Theme.key_windowBackgroundWhiteInputFieldActivated), Theme.getColor(Theme.key_text_RedRegular));
+        rotationIntervalField.setHintText("Rotation interval, sec (30–240, 0=per connection)");
+        rotationIntervalField.setText(currentRotationInterval > 0 ? String.valueOf(currentRotationInterval) : "");
+        rotationIntervalField.setPadding(AndroidUtilities.dp(LocaleController.isRTL ? 0 : 21), 0, AndroidUtilities.dp(LocaleController.isRTL ? 21 : 0), 0);
+        rotationIntervalContainer.addView(rotationIntervalField, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 64, Gravity.CENTER_VERTICAL));
+        fragmentContainer.addView(rotationIntervalContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 64));
+        rotationIntervalContainer.setVisibility(currentFingerprintProfile == 4 ? View.VISIBLE : View.GONE);
+
+        // Section header
+        HeaderCell fragHeader = new HeaderCell(context);
+        fragHeader.setText("TLS Fragmentation");
+        fragmentContainer.addView(fragHeader, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+
+        // Toggle row
+        FrameLayout switchRow = new FrameLayout(context);
+        switchRow.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+        TextView switchLabel = new TextView(context);
+        switchLabel.setText("Fragment ClientHello");
+        switchLabel.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+        switchLabel.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        switchRow.addView(switchLabel, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL | (LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT), LocaleController.isRTL ? 0 : 21, 0, LocaleController.isRTL ? 21 : 0, 0));
+        fragmentSwitch = new android.widget.Switch(context);
+        fragmentSwitch.setChecked(savedFragEnabled);
+        switchRow.addView(fragmentSwitch, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL | (LocaleController.isRTL ? Gravity.LEFT : Gravity.RIGHT), 21, 0, 21, 0));
+        fragmentContainer.addView(switchRow, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 50));
+
+        // Min field
+        FrameLayout minContainer = new FrameLayout(context);
+        minContainer.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+        fragmentMinField = new EditTextBoldCursor(context);
+        fragmentMinField.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+        fragmentMinField.setHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
+        fragmentMinField.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        fragmentMinField.setBackground(null);
+        fragmentMinField.setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        fragmentMinField.setInputType(InputType.TYPE_CLASS_NUMBER);
+        fragmentMinField.setSingleLine(true);
+        fragmentMinField.setGravity((LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
+        fragmentMinField.setHeaderHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader));
+        fragmentMinField.setTransformHintToHeader(true);
+        fragmentMinField.setLineColors(Theme.getColor(Theme.key_windowBackgroundWhiteInputField), Theme.getColor(Theme.key_windowBackgroundWhiteInputFieldActivated), Theme.getColor(Theme.key_text_RedRegular));
+        fragmentMinField.setHintText("Min bytes (default: 1)");
+        fragmentMinField.setText(String.valueOf(savedFragMin));
+        fragmentMinField.setPadding(AndroidUtilities.dp(LocaleController.isRTL ? 0 : 21), 0, AndroidUtilities.dp(LocaleController.isRTL ? 21 : 0), 0);
+        minContainer.addView(fragmentMinField, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 64, Gravity.CENTER_VERTICAL));
+        fragmentContainer.addView(minContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 64));
+
+        // Max field
+        FrameLayout maxContainer = new FrameLayout(context);
+        maxContainer.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+        fragmentMaxField = new EditTextBoldCursor(context);
+        fragmentMaxField.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+        fragmentMaxField.setHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
+        fragmentMaxField.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        fragmentMaxField.setBackground(null);
+        fragmentMaxField.setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        fragmentMaxField.setInputType(InputType.TYPE_CLASS_NUMBER);
+        fragmentMaxField.setSingleLine(true);
+        fragmentMaxField.setGravity((LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
+        fragmentMaxField.setHeaderHintColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader));
+        fragmentMaxField.setTransformHintToHeader(true);
+        fragmentMaxField.setLineColors(Theme.getColor(Theme.key_windowBackgroundWhiteInputField), Theme.getColor(Theme.key_windowBackgroundWhiteInputFieldActivated), Theme.getColor(Theme.key_text_RedRegular));
+        fragmentMaxField.setHintText("Max bytes (default: 3)");
+        fragmentMaxField.setText(String.valueOf(savedFragMax));
+        fragmentMaxField.setPadding(AndroidUtilities.dp(LocaleController.isRTL ? 0 : 21), 0, AndroidUtilities.dp(LocaleController.isRTL ? 21 : 0), 0);
+        maxContainer.addView(fragmentMaxField, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 64, Gravity.CENTER_VERTICAL));
+        fragmentContainer.addView(maxContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 64));
+
+        // Divider
+        ShadowSectionCell fragDivider = new ShadowSectionCell(context);
+        fragDivider.setBackground(Theme.getThemedDrawableByKey(context, R.drawable.greydivider_bottom, Theme.key_windowBackgroundGrayShadow));
+        linearLayout2.addView(fragDivider, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
 
         pasteCell = new TextSettingsCell(fragmentView.getContext());
         pasteCell.setBackground(Theme.getSelectorDrawable(true));
@@ -746,12 +1002,14 @@ public class ProxySettingsActivity extends BaseFragment {
                 ((View) inputFields[FIELD_SECRET].getParent()).setVisibility(View.GONE);
                 ((View) inputFields[FIELD_PASSWORD].getParent()).setVisibility(View.VISIBLE);
                 ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.VISIBLE);
+                if (fragmentContainer != null) fragmentContainer.setVisibility(View.GONE);
             } else if (currentType == 1) {
                 bottomCells[0].setVisibility(View.GONE);
                 bottomCells[1].setVisibility(View.VISIBLE);
                 ((View) inputFields[FIELD_SECRET].getParent()).setVisibility(View.VISIBLE);
                 ((View) inputFields[FIELD_PASSWORD].getParent()).setVisibility(View.GONE);
                 ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.GONE);
+                if (fragmentContainer != null) fragmentContainer.setVisibility(View.VISIBLE);
             }
             typeCell[0].setChecked(currentType == 0, animated);
             typeCell[1].setChecked(currentType == 1, animated);

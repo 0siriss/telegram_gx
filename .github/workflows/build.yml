@@ -1,0 +1,137 @@
+name: Build Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Notify build started via Telegram
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=🔨 <b>Сборка начата</b> — ${TAG}%0A%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -d "parse_mode=HTML"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /opt/hostedtoolcache/Ruby
+          sudo rm -rf /opt/hostedtoolcache/PyPy
+          sudo docker image prune -af || true
+          df -h
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install NDK and build tools
+        run: |
+          echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
+            "ndk;23.2.8568313" \
+            "cmake;3.22.1" \
+            "build-tools;36.0.0" \
+            "platforms;android-36"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      - name: Cache NDK build
+        uses: actions/cache@v4
+        with:
+          path: |
+            TMessagesProj/.cxx
+            TMessagesProj/build/intermediates/cmake
+          key: ndk-${{ hashFiles('TMessagesProj/jni/**') }}
+          restore-keys: ndk-
+
+      - name: Create local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+
+      - name: Build Release APK
+        run: ./gradlew :TMessagesProj_App:assembleRelease --no-daemon
+        env:
+          GRADLE_OPTS: "-Xmx6g -XX:MaxMetaspaceSize=512m"
+          FORK_VERSION_TAG: ${{ github.ref_name }}
+
+      - name: Get tag name
+        id: tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "TGX DPI Bypass ${{ steps.tag.outputs.tag }}"
+          body: |
+            ## TGX DPI Bypass — ${{ steps.tag.outputs.tag }}
+
+            Telegram Android fork with TLS DPI bypass patches.
+
+            ### Что включено:
+            - TLS ECH fix (0xfe0d)
+            - Fingerprint profiles: Chrome 120+, Firefox 121+, Safari 17, Edge 120+, Random
+            - TLS ClientHello fragmentation
+            - Configurable rotation interval (30–240s)
+            - Anti-recall: сообщения, удалённые отправителем, сохраняются локально и помечаются "удалено отправителем" (настраивается глобально и отдельно для каждого чата)
+          files: |
+            TMessagesProj_App/build/outputs/apk/afat/release/app.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Send APK via Telegram
+        run: |
+          APK_PATH="TMessagesProj_App/build/outputs/apk/afat/release/app.apk"
+          APK_SIZE=$(stat -c%s "$APK_PATH" 2>/dev/null || echo 0)
+          MAX_SIZE=$((50 * 1024 * 1024))  # 50 MB
+
+          if [ "$APK_SIZE" -le "$MAX_SIZE" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+              -F "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -F "document=@$APK_PATH" \
+              -F "caption=✅ <b>TGX DPI Bypass ${{ steps.tag.outputs.tag }}</b> готов!%0A%0A• TLS ECH 0xfe0d%0A• Fingerprint: Chrome/Firefox/Safari/Edge/Random%0A• Фрагментация ClientHello" \
+              -F "parse_mode=HTML"
+          else
+            RELEASE_URL="${{ steps.release.outputs.url }}"
+            SIZE_MB=$(echo "scale=1; $APK_SIZE / 1048576" | bc)
+            TEXT="✅ <b>TGX DPI Bypass ${{ steps.tag.outputs.tag }}</b> готов!%0A%0AAPK слишком большой для прямой отправки (${SIZE_MB} МБ).%0A%0A📥 <a href=\"$RELEASE_URL\">Скачать с GitHub Release</a>"
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -d "text=$TEXT" \
+              -d "parse_mode=HTML"
+          fi
+
+      - name: Notify build failure via Telegram
+        if: failure()
+        run: |
+          TEXT="❌ <b>Сборка упала</b> — ${{ steps.tag.outputs.tag }}%0A%0AПосмотри логи:%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=$TEXT" \
+            -d "parse_mode=HTML"

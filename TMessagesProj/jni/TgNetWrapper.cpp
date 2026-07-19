@@ -12,6 +12,17 @@
 #include <openssl/bn.h>
 #include <openssl/pem.h>
 #include <openssl/aes.h>
+#include <atomic>
+
+// TLS config — accessed by ConnectionSocket.cpp
+std::atomic<bool>    gTlsFragmentEnabled{false};
+std::atomic<int>     gTlsFragmentMin{1};
+std::atomic<int>     gTlsFragmentMax{3};
+std::atomic<int>     gTlsFingerprintProfile{0}; // 0=Chrome,1=Firefox,2=Safari,3=Edge,4=Random
+std::atomic<int>     gTlsRotationIntervalSec{0};
+std::atomic<int>     gTlsCurrentRandomProfile{0};
+std::atomic<int64_t> gTlsLastRotationSec{0};
+std::atomic<int>     gTlsEchExtensionId{0xfe0d};
 
 JavaVM *java;
 
@@ -221,6 +232,24 @@ void applyDatacenterAddress(JNIEnv *env, jclass c, jint instanceNum, jint datace
     if (valueStr != 0) {
         env->ReleaseStringUTFChars(ipAddress, valueStr);
     }
+}
+
+void setTlsFragmentConfig(JNIEnv *env, jclass c, jboolean enabled, jint minBytes, jint maxBytes) {
+    gTlsFragmentEnabled = (bool) enabled;
+    gTlsFragmentMin = (int) minBytes;
+    gTlsFragmentMax = (int) maxBytes;
+}
+
+void setTlsFingerprintProfile(JNIEnv *env, jclass c, jint profile, jint rotationIntervalSec) {
+    gTlsFingerprintProfile = (int) profile;
+    gTlsRotationIntervalSec = (int) rotationIntervalSec;
+    // reset rotation timer so next connection picks immediately
+    gTlsLastRotationSec = 0;
+    gTlsCurrentRandomProfile = rand() % 4;
+}
+
+void setTlsEchExtensionId(JNIEnv *env, jclass c, jint extensionId) {
+    gTlsEchExtensionId = (int) extensionId & 0xffff;
 }
 
 void setProxySettings(JNIEnv *env, jclass c, jint instanceNum, jstring address, jint port, jstring username, jstring password, jstring secret) {
@@ -537,6 +566,9 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
         {"native_bindRequestToGuid", "(III)V", (void *) bindRequestToGuid},
         {"native_applyDatacenterAddress", "(IILjava/lang/String;I)V", (void *) applyDatacenterAddress},
         {"native_setProxySettings", "(ILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void *) setProxySettings},
+        {"native_setTlsFragmentConfig", "(ZII)V", (void *) setTlsFragmentConfig},
+        {"native_setTlsFingerprintProfile", "(II)V", (void *) setTlsFingerprintProfile},
+        {"native_setTlsEchExtensionId", "(I)V", (void *) setTlsEchExtensionId},
         {"native_getConnectionState", "(I)I", (void *) getConnectionState},
         {"native_setUserId", "(IJ)V", (void *) setUserId},
         {"native_init", "(IIIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IJZZZII)V", (void *) init},

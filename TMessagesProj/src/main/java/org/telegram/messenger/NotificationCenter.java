@@ -34,6 +34,8 @@ public class NotificationCenter {
     public static final int closeChatActivity = totalEvents++;
     public static final int closeProfileActivity = totalEvents++;
     public static final int messagesDeleted = totalEvents++;
+    // TGX: anti-recall — fired instead of messagesDeleted for messages we chose to retain locally (args: ArrayList<Integer> mids, long dialogId)
+    public static final int messagesRecalled = totalEvents++;
     public static final int historyCleared = totalEvents++;
     public static final int messagesRead = totalEvents++;
     public static final int threadMessagesRead = totalEvents++;

@@ -19,6 +19,10 @@
 -keep class org.telegram.tgnet.NativeByteBuffer { *; }
 -keep class org.telegram.tgnet.RequestTimeDelegate { *; }
 -keep class org.telegram.tgnet.RequestDelegate { *; }
+# Called from TMessagesProj_App (GithubUpdaterController); this module's own
+# R8 pass can't see that cross-module call, so it strips them as unused.
+-keep class org.telegram.ui.web.HttpGetTask { *; }
+-keep class org.telegram.ui.web.HttpGetFileTask { *; }
 -keep class com.google.android.exoplayer2.ext.** { *; }
 -keep class com.google.android.exoplayer2.extractor.FlacStreamMetadata { *; }
 -keep class com.google.android.exoplayer2.metadata.flac.PictureFrame { *; }

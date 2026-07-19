@@ -18370,6 +18370,10 @@ public class MessagesController extends BaseController implements NotificationCe
         LongSparseArray<ArrayList<Integer>> markContentAsReadMessages = null;
         SparseIntArray markAsReadEncrypted = null;
         LongSparseArray<ArrayList<Integer>> deletedMessages = null;
+        // TGX: anti-recall — mids filtered out of deletedMessages at classification time (below), keyed by the
+        // *resolved* real dialogId (never 0, unlike deletedMessages' private/group bucket). Never reaches any
+        // deletedMessages consumer downstream, so no consumption point can be missed.
+        LongSparseArray<ArrayList<Integer>> recalledMessages = null;
         LongSparseArray<ArrayList<Integer>> deletedQuickReplyMessages = null;
         LongSparseArray<ArrayList<Integer>> scheduledDeletedMessages = null;
         LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSent = null;
@@ -18758,6 +18762,11 @@ public class MessagesController extends BaseController implements NotificationCe
                 dialogs_read_outbox_max.put(dialogId, Math.max(value, update.max_id));
             } else if (baseUpdate instanceof TL_update.TL_updateDeleteMessages) {
                 TL_update.TL_updateDeleteMessages update = (TL_update.TL_updateDeleteMessages) baseUpdate;
+                // TGX: anti-recall — dialogId isn't known here (TL_updateDeleteMessages doesn't carry one), so
+                // retention for this branch is decided later: MessagesStorage.filterRecalledMessages resolves
+                // mid -> uid against storage before the physical delete, and ChatActivity's own messagesDeleted
+                // observer separately keeps retained messages visible in whichever chat is currently open (it
+                // knows its own dialog_id unambiguously, unlike a lookup keyed only by mid at this level).
                 if (deletedMessages == null) {
                     deletedMessages = new LongSparseArray<>();
                 }
@@ -19283,16 +19292,33 @@ public class MessagesController extends BaseController implements NotificationCe
                 if (BuildVars.LOGS_ENABLED) {
                     FileLog.d(baseUpdate + " channelId = " + update.channel_id);
                 }
-                if (deletedMessages == null) {
-                    deletedMessages = new LongSparseArray<>();
-                }
                 long dialogId = -update.channel_id;
-                ArrayList<Integer> arrayList = deletedMessages.get(dialogId);
-                if (arrayList == null) {
-                    arrayList = new ArrayList<>();
-                    deletedMessages.put(dialogId, arrayList);
+                // TGX: anti-recall — channel/supergroup dialogId is known upfront (channel_id), so the whole
+                // batch is decided uniformly, same as the private/group branch above.
+                if (isAntiRecallEnabledForDialog(dialogId)) {
+                    if (recalledMessages == null) {
+                        recalledMessages = new LongSparseArray<>();
+                    }
+                    ArrayList<Integer> recalledList = recalledMessages.get(dialogId);
+                    if (recalledList == null) {
+                        recalledList = new ArrayList<>();
+                        recalledMessages.put(dialogId, recalledList);
+                    }
+                    recalledList.addAll(update.messages);
+                    for (int m = 0, msize = update.messages.size(); m < msize; m++) {
+                        markMidRecalled(dialogId, update.messages.get(m));
+                    }
+                } else {
+                    if (deletedMessages == null) {
+                        deletedMessages = new LongSparseArray<>();
+                    }
+                    ArrayList<Integer> arrayList = deletedMessages.get(dialogId);
+                    if (arrayList == null) {
+                        arrayList = new ArrayList<>();
+                        deletedMessages.put(dialogId, arrayList);
+                    }
+                    arrayList.addAll(update.messages);
                 }
-                arrayList.addAll(update.messages);
             } else if (baseUpdate instanceof TL_update.TL_updateChannel) {
                 if (BuildVars.LOGS_ENABLED) {
                     TL_update.TL_updateChannel update = (TL_update.TL_updateChannel) baseUpdate;
@@ -20910,6 +20936,7 @@ public class MessagesController extends BaseController implements NotificationCe
         LongSparseArray<ArrayList<Integer>> markContentAsReadMessagesFinal = markContentAsReadMessages;
         SparseIntArray markAsReadEncryptedFinal = markAsReadEncrypted;
         LongSparseArray<ArrayList<Integer>> deletedMessagesFinal = deletedMessages;
+        LongSparseArray<ArrayList<Integer>> recalledMessagesFinal = recalledMessages;
         LongSparseArray<ArrayList<Integer>> deletedQuickRepliesMessagesFinal = deletedQuickReplyMessages;
         LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesFinal = scheduledDeletedMessages;
         LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSentFinal = scheduledDeletedMessagesSent;
@@ -21034,6 +21061,35 @@ public class MessagesController extends BaseController implements NotificationCe
                 }
                 getNotificationsController().removeDeletedMessagesFromNotifications(deletedMessagesFinal, false);
             }
+            // TGX: anti-recall — mids filtered out of deletedMessages at classification time; obj.recalledBySender
+            // is set here (never obj.deleted), and messagesRecalled fires instead of messagesDeleted, so no
+            // downstream deletedMessages consumer (there were two, and this took a live bug to find both) ever
+            // sees these mids at all.
+            if (recalledMessagesFinal != null) {
+                for (int a = 0, size = recalledMessagesFinal.size(); a < size; a++) {
+                    long dialogId = recalledMessagesFinal.keyAt(a);
+                    ArrayList<Integer> arrayList = recalledMessagesFinal.valueAt(a);
+                    if (arrayList == null) {
+                        continue;
+                    }
+                    ArrayList<MessageObject> objs = dialogMessage.get(dialogId);
+                    if (objs != null) {
+                        for (int i = 0; i < objs.size(); ++i) {
+                            MessageObject obj = objs.get(i);
+                            if (obj != null) {
+                                for (int b = 0, size2 = arrayList.size(); b < size2; b++) {
+                                    if (obj.getId() == arrayList.get(b)) {
+                                        obj.recalledBySender = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    getMessagesStorage().saveRecalledMessages(dialogId, arrayList);
+                    getNotificationCenter().postNotificationName(NotificationCenter.messagesRecalled, arrayList, dialogId);
+                }
+            }
             if (deletedQuickRepliesMessagesFinal != null) {
                 for (int a = 0, size = deletedQuickRepliesMessagesFinal.size(); a < size; a++) {
                     long topicId = deletedQuickRepliesMessagesFinal.keyAt(a);
@@ -21120,6 +21176,20 @@ public class MessagesController extends BaseController implements NotificationCe
             for (int a = 0, size = deletedMessages.size(); a < size; a++) {
                 long key = deletedMessages.keyAt(a);
                 ArrayList<Integer> arrayList = deletedMessages.valueAt(a);
+                if (key == 0) {
+                    // TGX: anti-recall fallback — mids here already exclude anything resolved in-memory at
+                    // classification time above; this covers messages whose dialog isn't currently open, by
+                    // resolving mid -> uid against storage before deciding whether to actually delete them.
+                    getMessagesStorage().filterRecalledMessages(arrayList, remainingMids -> {
+                        if (remainingMids != null && !remainingMids.isEmpty()) {
+                            getMessagesStorage().getStorageQueue().postRunnable(() -> {
+                                ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, remainingMids, false, true, 0, 0);
+                                getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, remainingMids, dialogIds);
+                            });
+                        }
+                    });
+                    continue;
+                }
                 getMessagesStorage().getStorageQueue().postRunnable(() -> {
                     ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, arrayList, false, true, 0, 0);
                     getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, arrayList, dialogIds);
@@ -21456,6 +21526,67 @@ public class MessagesController extends BaseController implements NotificationCe
             }
         }
         return false;
+    }
+
+    // TGX: anti-recall — global default (DataSettingsActivity toggle) + per-dialog override,
+    // same override/inherit pattern as isDialogMuted (notify2_ / -1 = inherit).
+    public static boolean isAntiRecallEnabledGlobally() {
+        return getGlobalMainSettings().getBoolean("anti_recall_enabled", false);
+    }
+
+    public static void setAntiRecallEnabledGlobally(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("anti_recall_enabled", enabled).commit();
+    }
+
+    public boolean isAntiRecallEnabledForDialog(long dialogId) {
+        if (DialogObject.isEncryptedDialog(dialogId)) {
+            return false;
+        }
+        int override = notificationsPreferences.getInt("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0), -1);
+        if (override == -1) {
+            return isAntiRecallEnabledGlobally();
+        }
+        return override == 1;
+    }
+
+    public void setAntiRecallEnabledForDialog(long dialogId, boolean enabled) {
+        notificationsPreferences.edit().putInt("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0), enabled ? 1 : 0).commit();
+    }
+
+    // TGX: anti-recall — session-lifetime cache of "this mid was recalled" (mid -> unix seconds it was recalled
+    // at) that survives MessageObject being reconstructed (e.g. on a dialog/message-list reload), since
+    // recalledBySender on a specific MessageObject instance doesn't: a fresh deserialize from messages_v2 always
+    // starts with recalledBySender=false. Kept separately from the recalled_messages SQL table (which is the
+    // actual persistence across app restarts); this is just a fast synchronous read-through for UI code that
+    // can't do a DB query per render.
+    private final LongSparseArray<HashMap<Integer, Integer>> recalledMidsCache = new LongSparseArray<>();
+
+    public void markMidRecalled(long dialogId, int mid) {
+        markMidRecalled(dialogId, mid, (int) (System.currentTimeMillis() / 1000));
+    }
+
+    public void markMidRecalled(long dialogId, int mid, int recalledDate) {
+        HashMap<Integer, Integer> mids = recalledMidsCache.get(dialogId);
+        if (mids == null) {
+            mids = new HashMap<>();
+            recalledMidsCache.put(dialogId, mids);
+        }
+        mids.put(mid, recalledDate);
+    }
+
+    public boolean isMidRecalled(long dialogId, int mid) {
+        HashMap<Integer, Integer> mids = recalledMidsCache.get(dialogId);
+        return mids != null && mids.containsKey(mid);
+    }
+
+    public int getRecalledDate(long dialogId, int mid) {
+        HashMap<Integer, Integer> mids = recalledMidsCache.get(dialogId);
+        Integer date = mids != null ? mids.get(mid) : null;
+        return date != null ? date : 0;
+    }
+
+    public void clearAntiRecallOverrideForDialog(long dialogId) {
+        notificationsPreferences.edit().remove("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0)).commit();
     }
 
     public void markReactionsAsRead(long dialogId, long topicId) {

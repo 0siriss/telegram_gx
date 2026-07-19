@@ -113,6 +113,10 @@ public class DataSettingsActivity extends BaseFragment {
     private int saveToGalleryGroupsRow;
     private int saveToGalleryDividerRow;
 
+    private int antiRecallSectionRow;
+    private int antiRecallEnabledRow;
+    private int antiRecallSection2Row;
+
     private int rowCount;
 
     private boolean updateVoipUseLessData;
@@ -173,6 +177,10 @@ public class DataSettingsActivity extends BaseFragment {
         saveToGalleryGroupsRow = rowCount++;
         saveToGalleryChannelsRow = rowCount++;
         saveToGalleryDividerRow = rowCount++;
+
+        antiRecallSectionRow = rowCount++;
+        antiRecallEnabledRow = rowCount++;
+        antiRecallSection2Row = rowCount++;
 
 //        autoplayHeaderRow = rowCount++;
 //        autoplayGifsRow = rowCount++;
@@ -550,6 +558,11 @@ public class DataSettingsActivity extends BaseFragment {
                 showDialog(builder.create());
             } else if (position == proxyRow) {
                 presentFragment(new ProxyListActivity());
+            } else if (position == antiRecallEnabledRow) {
+                boolean enabled = !MessagesController.isAntiRecallEnabledGlobally();
+                MessagesController.setAntiRecallEnabledGlobally(enabled);
+                TextCheckCell textCheckCell = (TextCheckCell) view;
+                textCheckCell.setChecked(enabled);
             } else if (position == enableStreamRow) {
                 SharedConfig.toggleStreamMedia();
                 TextCheckCell textCheckCell = (TextCheckCell) view;
@@ -739,6 +752,8 @@ public class DataSettingsActivity extends BaseFragment {
                         headerCell.setText(LocaleController.getString(R.string.Calls));
                     } else if (position == proxySectionRow) {
                         headerCell.setText(LocaleController.getString(R.string.Proxy));
+                    } else if (position == antiRecallSectionRow) {
+                        headerCell.setText("Anti-recall");
                     } else if (position == streamSectionRow) {
                         headerCell.setText(LocaleController.getString(R.string.Streaming));
                     } else if (position == autoplayHeaderRow) {
@@ -750,7 +765,9 @@ public class DataSettingsActivity extends BaseFragment {
                 }
                 case 3: {
                     TextCheckCell checkCell = (TextCheckCell) holder.itemView;
-                    if (position == enableStreamRow) {
+                    if (position == antiRecallEnabledRow) {
+                        checkCell.setTextAndCheck("Показывать удалённые сообщения", MessagesController.isAntiRecallEnabledGlobally(), false);
+                    } else if (position == enableStreamRow) {
                         checkCell.setTextAndCheck(LocaleController.getString(R.string.EnableStreaming), SharedConfig.streamMedia, enableAllStreamRow != -1);
                     } else if (position == enableCacheStreamRow) {
                         //checkCell.setTextAndCheck(LocaleController.getString(R.string.CacheStreamFile), SharedConfig.saveStreamMedia, true);
@@ -866,7 +883,9 @@ public class DataSettingsActivity extends BaseFragment {
             if (viewType == 3) {
                 TextCheckCell checkCell = (TextCheckCell) holder.itemView;
                 int position = holder.getAdapterPosition();
-                if (position == enableCacheStreamRow) {
+                if (position == antiRecallEnabledRow) {
+                    checkCell.setChecked(MessagesController.isAntiRecallEnabledGlobally());
+                } else if (position == enableCacheStreamRow) {
                     checkCell.setChecked(SharedConfig.saveStreamMedia);
                 } else if (position == enableStreamRow) {
                     checkCell.setChecked(SharedConfig.streamMedia);
@@ -885,7 +904,7 @@ public class DataSettingsActivity extends BaseFragment {
         public boolean isRowEnabled(int position) {
             return position == mobileRow || position == roamingRow || position == wifiRow || position == storageUsageRow || position == useLessDataForCallsRow || position == dataUsageRow || position == proxyRow || position == clearDraftsRow ||
                     position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == quickRepliesRow || position == autoplayVideoRow || position == autoplayGifsRow ||
-                    position == storageNumRow || position == saveToGalleryGroupsRow || position == saveToGalleryPeerRow || position == saveToGalleryChannelsRow || position == resetDownloadRow;
+                    position == storageNumRow || position == saveToGalleryGroupsRow || position == saveToGalleryPeerRow || position == saveToGalleryChannelsRow || position == resetDownloadRow || position == antiRecallEnabledRow;
         }
 
         @Override
@@ -926,11 +945,11 @@ public class DataSettingsActivity extends BaseFragment {
 
         @Override
         public int getItemViewType(int position) {
-            if (position == mediaDownloadSection2Row || position == usageSection2Row || position == callsSection2Row || position == proxySection2Row || position == autoplaySectionRow || position == clearDraftsSectionRow || position == saveToGalleryDividerRow) {
+            if (position == mediaDownloadSection2Row || position == usageSection2Row || position == callsSection2Row || position == proxySection2Row || position == autoplaySectionRow || position == clearDraftsSectionRow || position == saveToGalleryDividerRow || position == antiRecallSection2Row) {
                 return 0;
-            } else if (position == mediaDownloadSectionRow || position == streamSectionRow || position == callsSectionRow || position == usageSectionRow || position == proxySectionRow || position == autoplayHeaderRow || position == saveToGallerySectionRow) {
+            } else if (position == mediaDownloadSectionRow || position == streamSectionRow || position == callsSectionRow || position == usageSectionRow || position == proxySectionRow || position == autoplayHeaderRow || position == saveToGallerySectionRow || position == antiRecallSectionRow) {
                 return 2;
-            } else if (position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == autoplayGifsRow || position == autoplayVideoRow) {
+            } else if (position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == autoplayGifsRow || position == autoplayVideoRow || position == antiRecallEnabledRow) {
                 return 3;
             } else if (position == enableAllStreamInfoRow) {
                 return 4;

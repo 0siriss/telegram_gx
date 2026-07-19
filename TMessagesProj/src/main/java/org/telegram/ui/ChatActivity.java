@@ -487,6 +487,7 @@ public class ChatActivity extends BaseFragment implements
     private RecyclerListView.OnItemClickListener mentionsOnItemClickListener;
     private SuggestEmojiView suggestEmojiPanel;
     private ActionBarMenuItem.Item muteItem;
+    private ActionBarMenuItem.Item antiRecallItem;
     private ActionBarMenuItem.Item muteItemGap;
     private ActionBarMenuItem.Item feeItemGap;
     private ActionBarMenuItem.Item feeItemText;
@@ -1619,6 +1620,7 @@ public class ChatActivity extends BaseFragment implements
     private final static int save_to = 25;
     private final static int auto_delete_timer = 26;
     private final static int change_colors = 27;
+    private final static int anti_recall_toggle = 75;
     private final static int tag_message = 28;
     private final static int boost_group = 29;
 
@@ -2896,6 +2898,7 @@ public class ChatActivity extends BaseFragment implements
             .add(NotificationCenter.didLoadSendAsPeers)
             .add(NotificationCenter.closeChatActivity)
             .add(NotificationCenter.messagesDeleted)
+            .add(NotificationCenter.messagesRecalled)
             .add(NotificationCenter.historyCleared)
             .add(NotificationCenter.messageReceivedByServer)
             .add(NotificationCenter.messageReceivedByAck)
@@ -3864,6 +3867,8 @@ public class ChatActivity extends BaseFragment implements
                     }
                 } else if (id == mute) {
                     toggleMute(false);
+                } else if (id == anti_recall_toggle) {
+                    toggleAntiRecallForDialog();
                 } else if (id == add_shortcut) {
                     try {
                         getMediaDataController().installShortcut(currentUser.id, MediaDataController.SHORTCUT_TYPE_USER_OR_CHAT);
@@ -4397,6 +4402,10 @@ public class ChatActivity extends BaseFragment implements
             }
             if (themeDelegate.isThemeChangeAvailable(true)) {
                 headerItem.lazilyAddSubItem(change_colors, R.drawable.msg_background, LocaleController.getString(R.string.SetWallpapers));
+            }
+            if (currentEncryptedChat == null) {
+                // TGX: anti-recall — per-chat override of the global "show deleted messages" setting.
+                antiRecallItem = headerItem.lazilyAddSubItem(anti_recall_toggle, R.drawable.msg_delete, getAntiRecallMenuItemText());
             }
             if (currentUser != null && currentUser.self && getDialogId() != UserObject.VERIFY) {
                 headerItem.lazilyAddSubItem(add_shortcut, R.drawable.msg_home, LocaleController.getString(R.string.AddShortcut));
@@ -16485,6 +16494,22 @@ public class ChatActivity extends BaseFragment implements
         }
     }
 
+    // TGX: anti-recall — per-chat override text/toggle, mirrors toggleMute/updateTitleIcons' handling of muteItem.
+    private String getAntiRecallMenuItemText() {
+        return getMessagesController().isAntiRecallEnabledForDialog(dialog_id)
+                ? "Не показывать удалённые сообщения"
+                : "Показывать удалённые сообщения";
+    }
+
+    private void toggleAntiRecallForDialog() {
+        boolean enabled = !getMessagesController().isAntiRecallEnabledForDialog(dialog_id);
+        getMessagesController().setAntiRecallEnabledForDialog(dialog_id, enabled);
+        updateTitleIcons();
+        BulletinFactory.of(this).createSimpleBulletin(R.raw.chats_infotip, enabled
+                ? "Удалённые отправителем сообщения теперь сохраняются в этом чате"
+                : "В этом чате восстановлено обычное поведение удаления").show();
+    }
+
     private void toggleMute(boolean instant) {
         boolean muted = getMessagesController().isDialogMuted(dialog_id, getTopicId());
         if (!muted) {
@@ -19481,6 +19506,9 @@ public class ChatActivity extends BaseFragment implements
             leftIcon = avatarContainer.getBotVerificationDrawable(DialogObject.getBotVerificationIcon(currentUser), false);
         }
         avatarContainer.setTitleIcons(leftIcon, rightIcon);
+        if (antiRecallItem != null) {
+            antiRecallItem.setText(getAntiRecallMenuItemText());
+        }
         if (!forceToggleMuted && muteItem != null) {
             if (isMuted) {
                 muteItem.setRightIconVisibility(View.GONE);
@@ -22102,6 +22130,44 @@ public class ChatActivity extends BaseFragment implements
                 return;
             }
             ArrayList<Integer> markAsDeletedMessages = (ArrayList<Integer>) args[0];
+            // TGX: anti-recall — dialog_id is unambiguous here (this fragment is scoped to exactly one dialog),
+            // unlike mid -> uid resolution at the MessagesController level (which turned out unreliable: messages
+            // visibly loaded in this very chat were not found via MessagesController.dialogMessagesByIds). Split
+            // out ids that belong to this open chat and mark them recalled instead of letting them reach
+            // processDeletedMessages (which removes cells from the visible list, with animation).
+            if (getMessagesController().isAntiRecallEnabledForDialog(dialog_id)) {
+                ArrayList<Integer> stillDeletedIds = new ArrayList<>();
+                boolean anyRecalled = false;
+                for (int msg_id : markAsDeletedMessages) {
+                    MessageObject msg = messagesDict[0].get(msg_id);
+                    if (msg != null) {
+                        msg.recalledBySender = true;
+                        getMessagesController().markMidRecalled(dialog_id, msg_id);
+                        anyRecalled = true;
+                        // TGX: anti-recall — updateVisibleRows() only touches cells currently attached to
+                        // chatListView; a message scrolled slightly off (or otherwise not among its children at
+                        // this exact moment) never got its measureTime() re-run. updateRowWithMessageObject is the
+                        // same targeted single-message refresh already used for read-status/edit/poll updates.
+                        // forceUpdate=true is needed too: setMessageContent's messageChanged check is a reference
+                        // comparison (currentMessageObject != messageObject) that's false here since it's the
+                        // same MessageObject instance — without forcing it, the rebind can silently no-op until
+                        // some other event (e.g. scrolling) forces a real redraw.
+                        msg.forceUpdate = true;
+                        if (chatAdapter != null) {
+                            chatAdapter.updateRowWithMessageObject(msg, false, false);
+                        }
+                    } else {
+                        stillDeletedIds.add(msg_id);
+                    }
+                }
+                if (anyRecalled) {
+                    updateVisibleRows();
+                }
+                markAsDeletedMessages = stillDeletedIds;
+                if (markAsDeletedMessages.isEmpty()) {
+                    return;
+                }
+            }
             long channelId = (Long) args[1];
             boolean update = args.length > 2 && (boolean) args[2];
             boolean sent = args.length > 3 && (boolean) args[3];
@@ -22164,6 +22230,29 @@ public class ChatActivity extends BaseFragment implements
                 } else {
                     removeSelfFromStack();
                 }
+            }
+        } else if (id == NotificationCenter.messagesRecalled) {
+            // TGX: anti-recall — same mids as messagesDeleted would have carried, but we keep them: just flag + repaint.
+            ArrayList<Integer> recalledMids = (ArrayList<Integer>) args[0];
+            long recalledDialogId = (Long) args[1];
+            for (int msg_id : recalledMids) {
+                getMessagesController().markMidRecalled(recalledDialogId, msg_id);
+            }
+            if (recalledDialogId == dialog_id) {
+                for (int msg_id : recalledMids) {
+                    MessageObject msg = messagesDict[0].get(msg_id);
+                    if (msg != null) {
+                        msg.recalledBySender = true;
+                        // TGX: anti-recall — see the identical comment on the messagesDeleted branch above:
+                        // updateVisibleRows() alone misses cells that aren't currently attached to chatListView,
+                        // and forceUpdate is needed so the rebind isn't a same-reference no-op.
+                        msg.forceUpdate = true;
+                        if (chatAdapter != null) {
+                            chatAdapter.updateRowWithMessageObject(msg, false, false);
+                        }
+                    }
+                }
+                updateVisibleRows();
             }
         } else if (id == NotificationCenter.quickRepliesDeleted) {
             if (chatMode != MODE_QUICK_REPLIES) return;

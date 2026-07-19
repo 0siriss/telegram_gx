@@ -31,12 +31,25 @@
 #include "BuffersStorage.h"
 #include "Connection.h"
 #include <random>
+#include <atomic>
+#include <chrono>
 
 #ifndef EPOLLRDHUP
 #define EPOLLRDHUP 0x2000
 #endif
 
 #define MAX_GREASE 8
+
+// TLS config — set via JNI from Java
+extern std::atomic<bool> gTlsFragmentEnabled;
+extern std::atomic<int>  gTlsFragmentMin;
+extern std::atomic<int>  gTlsFragmentMax;
+// 0=Chrome, 1=Firefox, 2=Safari, 3=Edge, 4=Random
+extern std::atomic<int>  gTlsFingerprintProfile;
+extern std::atomic<int>  gTlsRotationIntervalSec; // 0=per-connection, 30-240=timed
+extern std::atomic<int>  gTlsCurrentRandomProfile;
+extern std::atomic<int64_t> gTlsLastRotationSec;
+extern std::atomic<int>  gTlsEchExtensionId; // default 0xfe0d
 
 static BIGNUM *get_y2(BIGNUM *x, const BIGNUM *mod, BN_CTX *big_num_context) {
     // returns y^2 = x^3 + 486662 * x^2 + x
@@ -163,7 +176,7 @@ public:
 
     struct Op {
         enum class Type {
-            String, Random, K, M, P, E, Zero, Domain, Grease, BeginScope, EndScope, Permutation
+            String, Random, K, M, P, E, Zero, Domain, Grease, BeginScope, EndScope, Permutation, EchId
         };
         Type type;
         size_t length;
@@ -249,6 +262,12 @@ public:
             return res;
         }
 
+        static Op echId() {
+            Op res;
+            res.type = Type::EchId;
+            return res;
+        }
+
     };
 
     static const TlsHello &getDefault() {
@@ -311,12 +330,13 @@ public:
                         },
                         { Op::string("\x44\xcd\x00\x05\x00\x03\x02\x68\x32", 9) },
                         {
-                            Op::string("\xfe\x0d", 2),
+                            Op::echId(),
                             Op::begin_scope(),
-                            Op::string("\x00\x00\x01\x00\x01", 5),
+                            Op::string("\x00\x01\x00\x01", 4),
                             Op::random(1),
-                            Op::string("\x00\x20", 2),
-                            Op::random(32),
+                            Op::begin_scope(),
+                            Op::K(),
+                            Op::end_scope(),
                             Op::begin_scope(),
                             Op::E(),
                             Op::end_scope(),
@@ -334,6 +354,284 @@ public:
             return res;
         }();
         return result;
+    }
+
+    // Firefox 121+ profile: CHACHA20 before AES-256, no ML-KEM, no compress_certificate, no SCT
+    static const TlsHello &getFirefox() {
+        static TlsHello result = [] {
+            TlsHello res;
+            res.ops = {
+                    Op::string("\x16\x03\x01", 3),
+                    Op::begin_scope(),
+                    Op::string("\x01\x00", 2),
+                    Op::begin_scope(),
+                    Op::string("\x03\x03", 2),
+                    Op::zero(32),
+                    Op::string("\x20", 1),
+                    Op::random(32),
+                    // Firefox cipher order: AES-128, CHACHA20, AES-256, then legacy
+                    Op::string("\x00\x1e", 2),
+                    Op::string("\x13\x01\x13\x03\x13\x02\xc0\x2b\xc0\x2f\xcc\xa9\xcc\xa8\xc0\x2c\xc0\x30\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x01\x00", 30),
+                    Op::begin_scope(),
+                    Op::string("\x00\x00", 2),
+                    Op::permutation({
+                        {
+                            Op::string("\x00\x00", 2),
+                            Op::begin_scope(),
+                            Op::begin_scope(),
+                            Op::string("\x00", 1),
+                            Op::begin_scope(),
+                            Op::domain(),
+                            Op::end_scope(),
+                            Op::end_scope(),
+                            Op::end_scope()
+                        },
+                        { Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9) },
+                        // supported_groups without ML-KEM (0x11ec)
+                        {
+                            Op::string("\x00\x0a\x00\x0a\x00\x08", 6),
+                            Op::string("\x00\x1d\x00\x17\x00\x18\x00\x19", 8)
+                        },
+                        { Op::string("\x00\x0b\x00\x02\x01\x00", 6) },
+                        // Firefox sig algs: includes rsa_pkcs1_sha1 (\x02\x01) and rsa_pkcs1_sha256 (\x04\x01)
+                        { Op::string("\x00\x0d\x00\x14\x00\x12\x04\x03\x08\x04\x04\x01\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01", 24) },
+                        { Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31", 18) },
+                        { Op::string("\x00\x17\x00\x00", 4) },
+                        { Op::string("\x00\x23\x00\x00", 4) },
+                        {
+                            Op::string("\x00\x2b\x00\x05\x04", 5),
+                            Op::string("\x03\x04\x03\x03", 4)
+                        },
+                        { Op::string("\x00\x2d\x00\x02\x01\x01", 6) },
+                        // key_share: X25519 only (no ML-KEM)
+                        {
+                            Op::string("\x00\x33\x00\x26\x00\x24", 6),
+                            Op::string("\x00\x1d\x00\x20", 4),
+                            Op::K(),
+                        },
+                        {
+                            Op::echId(),
+                            Op::begin_scope(),
+                            Op::string("\x00\x01\x00\x01", 4),
+                            Op::random(1),
+                            Op::begin_scope(),
+                            Op::K(),
+                            Op::end_scope(),
+                            Op::begin_scope(),
+                            Op::E(),
+                            Op::end_scope(),
+                            Op::end_scope()
+                        },
+                        { Op::string("\xff\x01\x00\x01\x00", 5) }
+                    }),
+                    Op::string("\x00\x01\x00", 3),
+                    Op::P(),
+                    Op::end_scope(),
+                    Op::end_scope(),
+                    Op::end_scope()
+            };
+            return res;
+        }();
+        return result;
+    }
+
+    // Safari 17 — no GREASE ciphers, different groups (incl. secp521r1), fixed extension order
+    static const TlsHello &getSafari() {
+        static TlsHello result = [] {
+            TlsHello res;
+            res.ops = {
+                    Op::string("\x16\x03\x01", 3),
+                    Op::begin_scope(),
+                    Op::string("\x01\x00", 2),
+                    Op::begin_scope(),
+                    Op::string("\x03\x03", 2),
+                    Op::zero(32),
+                    Op::string("\x20", 1),
+                    Op::random(32),
+                    // Safari cipher suites: 17 ciphers × 2 = 34 bytes, no GREASE
+                    Op::string("\x00\x22", 2),
+                    Op::string("\x13\x01\x13\x02\x13\x03\xc0\x2c\xc0\x2b\xc0\x30\xc0\x2f"
+                               "\xcc\xa9\xcc\xa8\xc0\x0a\xc0\x09\xc0\x14\xc0\x13"
+                               "\x00\x9d\x00\x9c\x00\x35\x00\x2f", 34),
+                    Op::begin_scope(), // extensions total length
+                    // renegotiation_info (ff01)
+                    Op::string("\xff\x01\x00\x01\x00", 5),
+                    // server_name (0000)
+                    Op::string("\x00\x00", 2),
+                    Op::begin_scope(),
+                    Op::begin_scope(),
+                    Op::string("\x00", 1),
+                    Op::begin_scope(),
+                    Op::domain(),
+                    Op::end_scope(),
+                    Op::end_scope(),
+                    Op::end_scope(),
+                    // extended_master_secret (0017)
+                    Op::string("\x00\x17\x00\x00", 4),
+                    // session_ticket (0023)
+                    Op::string("\x00\x23\x00\x00", 4),
+                    // ALPN (0010): h2, http/1.1
+                    Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31", 18),
+                    // status_request (0005)
+                    Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9),
+                    // supported_groups (000a): X25519, secp256r1, secp384r1, secp521r1 — no GREASE, no ML-KEM
+                    Op::string("\x00\x0a\x00\x0a\x00\x08\x00\x1d\x00\x17\x00\x18\x00\x19", 14),
+                    // ec_point_formats (000b)
+                    Op::string("\x00\x0b\x00\x02\x01\x00", 6),
+                    // signature_algorithms (000d) — Safari includes rsa_pkcs1_sha1
+                    Op::string("\x00\x0d\x00\x14\x00\x12\x04\x03\x08\x04\x04\x01\x05\x03"
+                               "\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01", 24),
+                    // supported_versions (002b): TLS 1.3 + TLS 1.2, no GREASE
+                    Op::string("\x00\x2b\x00\x05\x04\x03\x04\x03\x03", 9),
+                    // psk_key_exchange_modes (002d)
+                    Op::string("\x00\x2d\x00\x02\x01\x01", 6),
+                    // key_share (0033): X25519 only, no ML-KEM
+                    Op::string("\x00\x33\x00\x26\x00\x24\x00\x1d\x00\x20", 10),
+                    Op::K(),
+                    // compress_certificate (001b)
+                    Op::string("\x00\x1b\x00\x03\x02\x00\x02", 7),
+                    // ECH extension (configurable, default fe0d)
+                    Op::echId(),
+                    Op::begin_scope(),
+                    Op::string("\x00\x01\x00\x01", 4),
+                    Op::random(1),
+                    Op::begin_scope(),
+                    Op::K(),
+                    Op::end_scope(),
+                    Op::begin_scope(),
+                    Op::E(),
+                    Op::end_scope(),
+                    Op::end_scope(),
+                    Op::P(),
+                    Op::end_scope(), // extensions
+                    Op::end_scope(), // ClientHello body
+                    Op::end_scope()  // TLS record
+            };
+            return res;
+        }();
+        return result;
+    }
+
+    // Edge 120+ — Chromium-based: GREASE like Chrome but different supported_versions order,
+    // no compress_certificate (0x001b), no SCT (0x0012), adds ApplicationSettings (0x4469)
+    static const TlsHello &getEdge() {
+        static TlsHello result = [] {
+            TlsHello res;
+            res.ops = {
+                    Op::string("\x16\x03\x01", 3),
+                    Op::begin_scope(),
+                    Op::string("\x01\x00", 2),
+                    Op::begin_scope(),
+                    Op::string("\x03\x03", 2),
+                    Op::zero(32),
+                    Op::string("\x20", 1),
+                    Op::random(32),
+                    Op::string("\x00\x20", 2),
+                    Op::grease(0),
+                    Op::string("\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30"
+                               "\xcc\xa9\xcc\xa8\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x01\x00", 32),
+                    Op::begin_scope(),
+                    Op::grease(2),
+                    Op::string("\x00\x00", 2),
+                    Op::permutation({
+                        {
+                            Op::string("\x00\x00", 2),
+                            Op::begin_scope(),
+                            Op::begin_scope(),
+                            Op::string("\x00", 1),
+                            Op::begin_scope(),
+                            Op::domain(),
+                            Op::end_scope(),
+                            Op::end_scope(),
+                            Op::end_scope()
+                        },
+                        { Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9) },
+                        {
+                            Op::string("\x00\x0a\x00\x0c\x00\x0a", 6),
+                            Op::grease(4),
+                            Op::string("\x11\xec\x00\x1d\x00\x17\x00\x18", 8)
+                        },
+                        { Op::string("\x00\x0b\x00\x02\x01\x00", 6) },
+                        { Op::string("\x00\x0d\x00\x12\x00\x10\x04\x03\x08\x04\x04\x01"
+                                     "\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01", 22) },
+                        { Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74"
+                                     "\x74\x70\x2f\x31\x2e\x31", 18) },
+                        { Op::string("\x00\x17\x00\x00", 4) },
+                        { Op::string("\x00\x23\x00\x00", 4) },
+                        {
+                            Op::string("\x00\x2b\x00\x07\x06", 5),
+                            Op::grease(6),
+                            Op::string("\x03\x04\x03\x03", 4)
+                        },
+                        { Op::string("\x00\x2d\x00\x02\x01\x01", 6) },
+                        {
+                            Op::string("\x00\x33\x04\xef\x04\xed", 6),
+                            Op::grease(4),
+                            Op::string("\x00\x01\x00\x11\xec\x04\xc0", 7),
+                            Op::M(),
+                            Op::K(),
+                            Op::string("\x00\x1d\x00\x20", 4),
+                            Op::K(),
+                        },
+                        // Edge-specific: ApplicationSettings (4469)
+                        { Op::string("\x44\x69\x00\x05\x00\x03\x02\x68\x32", 9) },
+                        {
+                            Op::echId(),
+                            Op::begin_scope(),
+                            Op::string("\x00\x01\x00\x01", 4),
+                            Op::random(1),
+                            Op::begin_scope(),
+                            Op::K(),
+                            Op::end_scope(),
+                            Op::begin_scope(),
+                            Op::E(),
+                            Op::end_scope(),
+                            Op::end_scope()
+                        },
+                        { Op::string("\xff\x01\x00\x01\x00", 5) }
+                    }),
+                    Op::grease(3),
+                    Op::string("\x00\x01\x00", 3),
+                    Op::P(),
+                    Op::end_scope(),
+                    Op::end_scope(),
+                    Op::end_scope()
+            };
+            return res;
+        }();
+        return result;
+    }
+
+    static const TlsHello &getForProfile(int profile) {
+        if (profile == 1) return getFirefox();
+        if (profile == 2) return getSafari();
+        if (profile == 3) return getEdge();
+        if (profile == 4) {
+            // Random profile: per-connection or timed rotation
+            int interval = gTlsRotationIntervalSec.load();
+            if (interval > 0) {
+                using namespace std::chrono;
+                int64_t now = duration_cast<seconds>(steady_clock::now().time_since_epoch()).count();
+                int64_t last = gTlsLastRotationSec.load();
+                if (now - last >= interval) {
+                    int next = rand() % 4; // pick from Chrome/Firefox/Safari/Edge
+                    gTlsCurrentRandomProfile.store(next);
+                    gTlsLastRotationSec.store(now);
+                }
+                int cur = gTlsCurrentRandomProfile.load();
+                if (cur == 1) return getFirefox();
+                if (cur == 2) return getSafari();
+                if (cur == 3) return getEdge();
+                return getDefault();
+            }
+            // per-connection random
+            int r = rand() % 4;
+            if (r == 1) return getFirefox();
+            if (r == 2) return getSafari();
+            if (r == 3) return getEdge();
+            return getDefault();
+        }
+        return getDefault();
     }
 
     uint32_t writeToBuffer(uint8_t *data) {
@@ -392,6 +690,13 @@ private:
                 offset += 2;
                 break;
             }
+            case Type::EchId: {
+                int id = gTlsEchExtensionId.load() & 0xffff;
+                data[offset] = static_cast<uint8_t>((id >> 8) & 0xff);
+                data[offset + 1] = static_cast<uint8_t>(id & 0xff);
+                offset += 2;
+                break;
+            }
             case Type::BeginScope:
                 scopeOffset.push_back(offset);
                 offset += 2;
@@ -415,11 +720,14 @@ private:
             }
             case Type::P: {
                 auto length = offset;
-                if (length <= 513) {
-                    writeOp(Op::string("\x00\x15", 2), data, offset);
-                    writeOp(Op::begin_scope(), data, offset);
-                    writeOp(Op::zero(513 - length), data, offset);
-                    writeOp(Op::end_scope(), data, offset);
+                if (length < 512) {
+                    uint32_t padSize = 512 - length - 4; // 4 = extension type (2) + scope length (2)
+                    if ((int32_t)padSize > 0) {
+                        writeOp(Op::string("\x00\x15", 2), data, offset);
+                        writeOp(Op::begin_scope(), data, offset);
+                        writeOp(Op::zero(padSize), data, offset);
+                        writeOp(Op::end_scope(), data, offset);
+                    }
                 }
                 break;
             }
@@ -920,7 +1228,7 @@ void ConnectionSocket::onEvent(uint32_t events) {
                         lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
                         tlsHashMismatch = false;
                         proxyAuthState = 11;
-                        TlsHello hello = TlsHello::getDefault();
+                        TlsHello hello = TlsHello::getForProfile(gTlsFingerprintProfile.load());
                         hello.setDomain(currentSecretDomain);
                         uint32_t size = hello.writeToBuffer(tempBuffer->bytes);
                         uint32_t outLength;
@@ -933,7 +1241,21 @@ void ConnectionSocket::onEvent(uint32_t events) {
                         memcpy(tempBuffer->bytes + 11, tempBuffer->bytes + 64 * 1024, 32);
                         bytesRead = 0;
 
-                        if (send(socketFd, tempBuffer->bytes, size, 0) < 0) {
+                        bool sendOk;
+                        if (gTlsFragmentEnabled && size > 2) {
+                            int minB = gTlsFragmentMin.load();
+                            int maxB = gTlsFragmentMax.load();
+                            if (minB < 1) minB = 1;
+                            if (maxB < minB) maxB = minB;
+                            int range = maxB - minB;
+                            int splitAt = minB + (range > 0 ? rand() % (range + 1) : 0);
+                            if (splitAt >= (int)size) splitAt = 1;
+                            sendOk = (send(socketFd, tempBuffer->bytes, splitAt, 0) >= 0) &&
+                                     (send(socketFd, tempBuffer->bytes + splitAt, size - splitAt, 0) >= 0);
+                        } else {
+                            sendOk = (send(socketFd, tempBuffer->bytes, size, 0) >= 0);
+                        }
+                        if (!sendOk) {
                             if (LOGS_ENABLED) DEBUG_E("connection(%p) send failed", this);
                             closeSocket(1, -1);
                             return;

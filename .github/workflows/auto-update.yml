@@ -1,0 +1,126 @@
+name: Auto-update from upstream
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Каждый понедельник в 06:00 UTC
+  workflow_dispatch:      # Ручной запуск
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/DrKLO/Telegram.git
+          git fetch upstream master --depth=1
+
+      - name: Check upstream version
+        id: version
+        run: |
+          UPSTREAM=$(git show upstream/master:TMessagesProj/build.gradle \
+            | grep 'versionName' | head -1 | grep -oP '"[^"]+"' | tr -d '"')
+          CURRENT=$(grep 'versionName' TMessagesProj/build.gradle \
+            | head -1 | grep -oP '"[^"]+"' | tr -d '"')
+          echo "upstream=$UPSTREAM" >> $GITHUB_OUTPUT
+          echo "current=$CURRENT"   >> $GITHUB_OUTPUT
+          echo "Upstream: $UPSTREAM | Current: $CURRENT"
+          if [ "$UPSTREAM" != "$CURRENT" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: No update needed
+        if: steps.version.outputs.changed == 'false'
+        run: echo "Already up to date (${{ steps.version.outputs.current }}). Skipping."
+
+      - name: Apply patches on new upstream
+        if: steps.version.outputs.changed == 'true'
+        id: apply
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "GitHub Actions"
+
+          # Запоминаем текущий форк-коммит: upstream/master его не содержит,
+          # а .github/workflows и patches/ не существуют в апстриме вовсе —
+          # reset --hard их удалит, поэтому восстанавливаем их отдельно ниже.
+          PREV=$(git rev-parse HEAD)
+          echo "prev=$PREV" >> $GITHUB_OUTPUT
+
+          # Сброс на чистый upstream
+          git reset --hard upstream/master
+
+          # Возвращаем CI-инфраструктуру и сам набор патчей (их нет в апстриме,
+          # поэтому конфликтовать с новым upstream-кодом им нечем)
+          git checkout "$PREV" -- .github/workflows patches
+
+          # Применяем единый патч со всеми доработками форка
+          # (TLS DPI bypass, ECH picker, updater, anti-recall и т.д.)
+          FAILED=""
+          if ! git apply --3way patches/fork-changes.patch; then
+            FAILED="patches/fork-changes.patch"
+          fi
+
+          if [ -n "$FAILED" ]; then
+            echo "patch_failed=true"  >> $GITHUB_OUTPUT
+            echo "failed_files=$FAILED" >> $GITHUB_OUTPUT
+          else
+            echo "patch_failed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Notify patch failure via Telegram
+        if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'true'
+        run: |
+          TEXT="❌ *Auto-update failed*%0A%0AНовая версия DrKLO: *${{ steps.version.outputs.upstream }}*%0AПатчи не применились автоматически — нужен ручной merge.%0A%0AФайлы:%0A${{ steps.apply.outputs.failed_files }}"
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=$TEXT" \
+            -d "parse_mode=Markdown"
+          exit 1
+
+      - name: Commit, tag and push
+        if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'false'
+        id: push
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "GitHub Actions"
+
+          # Добавляем всё: patch может создавать новые файлы (updater, anti-recall и т.д.),
+          # а не только модифицировать уже существующие
+          git add -A
+
+          git commit -m "Auto-update to DrKLO ${{ steps.version.outputs.upstream }} with fork patches"
+
+          # Определяем новый тег
+          LATEST_TAG=$(git tag --sort=-v:refname | grep '^v' | head -1)
+          MAJOR=$(echo "$LATEST_TAG" | grep -oP '\d+' | head -1)
+          MINOR=$(echo "$LATEST_TAG" | grep -oP '\d+' | tail -1)
+          NEW_TAG="v$MAJOR.$((MINOR + 1))"
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+
+          git tag "$NEW_TAG"
+          git push origin master --force
+          git push origin "$NEW_TAG"
+
+      - name: Trigger build workflow
+        if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'false'
+        run: |
+          gh workflow run build.yml --ref ${{ steps.push.outputs.new_tag }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify update started via Telegram
+        if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'false'
+        run: |
+          TEXT="🔄 *Auto-update started*%0A%0AНовая версия DrKLO: *${{ steps.version.outputs.upstream }}*%0AТег: *${{ steps.push.outputs.new_tag }}*%0A%0AПатчи применены ✅ Сборка запущена..."
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=$TEXT" \
+            -d "parse_mode=Markdown"
