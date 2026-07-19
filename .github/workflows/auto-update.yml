@@ -24,10 +24,13 @@ jobs:
       - name: Check upstream version
         id: version
         run: |
-          UPSTREAM=$(git show upstream/master:TMessagesProj/build.gradle \
-            | grep 'versionName' | head -1 | grep -oP '"[^"]+"' | tr -d '"')
-          CURRENT=$(grep 'versionName' TMessagesProj/build.gradle \
-            | head -1 | grep -oP '"[^"]+"' | tr -d '"')
+          # Версия хранится в APP_VERSION_NAME в корневом gradle.properties, а не в
+          # TMessagesProj/build.gradle (там его нет вообще — старая проверка сравнивала
+          # две пустые строки и поэтому НИКОГДА не обнаруживала обновление).
+          UPSTREAM=$(git show upstream/master:gradle.properties \
+            | grep '^APP_VERSION_NAME=' | head -1 | cut -d= -f2-)
+          CURRENT=$(grep '^APP_VERSION_NAME=' gradle.properties \
+            | head -1 | cut -d= -f2-)
           echo "upstream=$UPSTREAM" >> $GITHUB_OUTPUT
           echo "current=$CURRENT"   >> $GITHUB_OUTPUT
           echo "Upstream: $UPSTREAM | Current: $CURRENT"
