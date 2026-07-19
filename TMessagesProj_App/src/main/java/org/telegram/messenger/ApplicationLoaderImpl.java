@@ -1,10 +1,78 @@
 package org.telegram.messenger;
 
+import android.content.Context;
+import android.text.TextUtils;
+
 import org.telegram.messenger.regular.BuildConfig;
+import org.telegram.ui.Components.UpdateAppAlertDialog;
+
+import java.io.File;
 
 public class ApplicationLoaderImpl extends ApplicationLoader {
     @Override
     protected String onGetApplicationId() {
         return BuildConfig.APPLICATION_ID;
+    }
+
+    @Override
+    protected boolean isBeta() {
+        return true;
+    }
+
+    @Override
+    public boolean isCustomUpdate() {
+        return !TextUtils.isEmpty(BuildConfig.FORK_VERSION_TAG);
+    }
+
+    @Override
+    public BetaUpdate getUpdate() {
+        if (!isCustomUpdate()) return null;
+        return GithubUpdaterController.getInstance().getUpdate();
+    }
+
+    @Override
+    public void checkUpdate(boolean force, Runnable whenDone) {
+        if (!isCustomUpdate()) return;
+        GithubUpdaterController.getInstance().checkForUpdate(force, whenDone);
+    }
+
+    @Override
+    public void downloadUpdate() {
+        if (!isCustomUpdate()) return;
+        GithubUpdaterController.getInstance().downloadUpdate();
+    }
+
+    @Override
+    public void cancelDownloadingUpdate() {
+        if (!isCustomUpdate()) return;
+        GithubUpdaterController.getInstance().cancelDownloadingUpdate();
+    }
+
+    @Override
+    public boolean isDownloadingUpdate() {
+        if (!isCustomUpdate()) return false;
+        return GithubUpdaterController.getInstance().isDownloading();
+    }
+
+    @Override
+    public float getDownloadingUpdateProgress() {
+        if (!isCustomUpdate()) return 0;
+        return GithubUpdaterController.getInstance().getDownloadingProgress();
+    }
+
+    @Override
+    public File getDownloadedUpdateFile() {
+        if (!isCustomUpdate()) return null;
+        return GithubUpdaterController.getInstance().getDownloadedFile();
+    }
+
+    @Override
+    public boolean showCustomUpdateAppPopup(Context context, BetaUpdate update, int account) {
+        try {
+            new UpdateAppAlertDialog(context, update, account).show();
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        return true;
     }
 }

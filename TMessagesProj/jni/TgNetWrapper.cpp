@@ -22,6 +22,7 @@ std::atomic<int>     gTlsFingerprintProfile{0}; // 0=Chrome,1=Firefox,2=Safari,3
 std::atomic<int>     gTlsRotationIntervalSec{0};
 std::atomic<int>     gTlsCurrentRandomProfile{0};
 std::atomic<int64_t> gTlsLastRotationSec{0};
+std::atomic<int>     gTlsEchExtensionId{0xfe0d};
 
 JavaVM *java;
 
@@ -245,6 +246,10 @@ void setTlsFingerprintProfile(JNIEnv *env, jclass c, jint profile, jint rotation
     // reset rotation timer so next connection picks immediately
     gTlsLastRotationSec = 0;
     gTlsCurrentRandomProfile = rand() % 4;
+}
+
+void setTlsEchExtensionId(JNIEnv *env, jclass c, jint extensionId) {
+    gTlsEchExtensionId = (int) extensionId & 0xffff;
 }
 
 void setProxySettings(JNIEnv *env, jclass c, jint instanceNum, jstring address, jint port, jstring username, jstring password, jstring secret) {
@@ -563,6 +568,7 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
         {"native_setProxySettings", "(ILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void *) setProxySettings},
         {"native_setTlsFragmentConfig", "(ZII)V", (void *) setTlsFragmentConfig},
         {"native_setTlsFingerprintProfile", "(II)V", (void *) setTlsFingerprintProfile},
+        {"native_setTlsEchExtensionId", "(I)V", (void *) setTlsEchExtensionId},
         {"native_getConnectionState", "(I)I", (void *) getConnectionState},
         {"native_setUserId", "(IJ)V", (void *) setUserId},
         {"native_init", "(IIIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IJZZZII)V", (void *) init},

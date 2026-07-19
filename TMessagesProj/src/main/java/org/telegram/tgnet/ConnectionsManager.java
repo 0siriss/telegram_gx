@@ -981,6 +981,7 @@ public class ConnectionsManager extends BaseController {
     public static native void native_setProxySettings(int currentAccount, String address, int port, String username, String password, String secret);
     public static native void native_setTlsFragmentConfig(boolean enabled, int minBytes, int maxBytes);
     public static native void native_setTlsFingerprintProfile(int profile, int rotationIntervalSec);
+    public static native void native_setTlsEchExtensionId(int extensionId);
 
     public static void setTlsFragmentConfig(boolean enabled, int minBytes, int maxBytes) {
         native_setTlsFragmentConfig(enabled, minBytes, maxBytes);
@@ -988,6 +989,10 @@ public class ConnectionsManager extends BaseController {
 
     public static void setTlsFingerprintProfile(int profile, int rotationIntervalSec) {
         native_setTlsFingerprintProfile(profile, rotationIntervalSec);
+    }
+
+    public static void setTlsEchExtensionId(int extensionId) {
+        native_setTlsEchExtensionId(extensionId);
     }
     public static native void native_setLangCode(int currentAccount, String langCode);
     public static native void native_setRegId(int currentAccount, String regId);

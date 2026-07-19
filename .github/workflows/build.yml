@@ -75,6 +75,7 @@ jobs:
         run: ./gradlew :TMessagesProj_App:assembleRelease --no-daemon
         env:
           GRADLE_OPTS: "-Xmx6g -XX:MaxMetaspaceSize=512m"
+          FORK_VERSION_TAG: ${{ github.ref_name }}
 
       - name: Get tag name
         id: tag

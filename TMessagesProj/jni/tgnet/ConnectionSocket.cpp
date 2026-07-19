@@ -49,6 +49,7 @@ extern std::atomic<int>  gTlsFingerprintProfile;
 extern std::atomic<int>  gTlsRotationIntervalSec; // 0=per-connection, 30-240=timed
 extern std::atomic<int>  gTlsCurrentRandomProfile;
 extern std::atomic<int64_t> gTlsLastRotationSec;
+extern std::atomic<int>  gTlsEchExtensionId; // default 0xfe0d
 
 static BIGNUM *get_y2(BIGNUM *x, const BIGNUM *mod, BN_CTX *big_num_context) {
     // returns y^2 = x^3 + 486662 * x^2 + x
@@ -175,7 +176,7 @@ public:
 
     struct Op {
         enum class Type {
-            String, Random, K, M, P, E, Zero, Domain, Grease, BeginScope, EndScope, Permutation
+            String, Random, K, M, P, E, Zero, Domain, Grease, BeginScope, EndScope, Permutation, EchId
         };
         Type type;
         size_t length;
@@ -261,6 +262,12 @@ public:
             return res;
         }
 
+        static Op echId() {
+            Op res;
+            res.type = Type::EchId;
+            return res;
+        }
+
     };
 
     static const TlsHello &getDefault() {
@@ -323,7 +330,7 @@ public:
                         },
                         { Op::string("\x44\xcd\x00\x05\x00\x03\x02\x68\x32", 9) },
                         {
-                            Op::string("\xfe\x0d", 2),
+                            Op::echId(),
                             Op::begin_scope(),
                             Op::string("\x00\x01\x00\x01", 4),
                             Op::random(1),
@@ -403,7 +410,7 @@ public:
                             Op::K(),
                         },
                         {
-                            Op::string("\xfe\x0d", 2),
+                            Op::echId(),
                             Op::begin_scope(),
                             Op::string("\x00\x01\x00\x01", 4),
                             Op::random(1),
@@ -483,8 +490,8 @@ public:
                     Op::K(),
                     // compress_certificate (001b)
                     Op::string("\x00\x1b\x00\x03\x02\x00\x02", 7),
-                    // ECH (fe0d)
-                    Op::string("\xfe\x0d", 2),
+                    // ECH extension (configurable, default fe0d)
+                    Op::echId(),
                     Op::begin_scope(),
                     Op::string("\x00\x01\x00\x01", 4),
                     Op::random(1),
@@ -569,7 +576,7 @@ public:
                         // Edge-specific: ApplicationSettings (4469)
                         { Op::string("\x44\x69\x00\x05\x00\x03\x02\x68\x32", 9) },
                         {
-                            Op::string("\xfe\x0d", 2),
+                            Op::echId(),
                             Op::begin_scope(),
                             Op::string("\x00\x01\x00\x01", 4),
                             Op::random(1),
@@ -680,6 +687,13 @@ private:
             case Type::Grease: {
                 data[offset] = grease[op.seed];
                 data[offset + 1] = grease[op.seed];
+                offset += 2;
+                break;
+            }
+            case Type::EchId: {
+                int id = gTlsEchExtensionId.load() & 0xffff;
+                data[offset] = static_cast<uint8_t>((id >> 8) & 0xff);
+                data[offset + 1] = static_cast<uint8_t>(id & 0xff);
                 offset += 2;
                 break;
             }

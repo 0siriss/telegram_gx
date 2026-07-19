@@ -72,11 +72,27 @@ import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.util.ArrayList;
+import java.util.Locale;
 
 public class ProxySettingsActivity extends BaseFragment {
 
     private final static int TYPE_SOCKS5 = 0;
     private final static int TYPE_MTPROTO = 1;
+
+    private static int parseEchExtensionId(String text) {
+        if (text == null) {
+            return DEFAULT_ECH_EXTENSION_ID;
+        }
+        text = text.trim();
+        if (!text.matches("(?i)[0-9a-f]{1,4}")) {
+            return DEFAULT_ECH_EXTENSION_ID;
+        }
+        try {
+            return Integer.parseInt(text, 16) & 0xffff;
+        } catch (NumberFormatException e) {
+            return DEFAULT_ECH_EXTENSION_ID;
+        }
+    }
 
     private final static int FIELD_IP = 0;
     private final static int FIELD_PORT = 1;
@@ -124,6 +140,13 @@ public class ProxySettingsActivity extends BaseFragment {
         "Chrome 120+ (default)", "Firefox 121+", "Safari 17", "Edge 120+", "Random"
     };
 
+    // TLS ECH extension ID UI
+    private TextSettingsCell echIdCell;
+    private int currentEchId = DEFAULT_ECH_EXTENSION_ID;
+    private static final int DEFAULT_ECH_EXTENSION_ID = 0xfe0d;
+    private static final int[] ECH_ID_PRESET_VALUES = {0xfe0d, 0xfe02};
+    private static final String[] ECH_ID_PRESET_NAMES = {"fe0d (default)", "fe02 (legacy)", "Custom…"};
+
 
     private boolean addingNewProxy;
 
@@ -132,6 +155,37 @@ public class ProxySettingsActivity extends BaseFragment {
     private boolean ignoreOnTextChange;
 
     private static final int done_button = 1;
+
+    private void showEchCustomIdDialog() {
+        if (getParentActivity() == null) {
+            return;
+        }
+        Context context = getParentActivity();
+        FrameLayout container = new FrameLayout(context);
+        EditTextBoldCursor input = new EditTextBoldCursor(context);
+        input.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+        input.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        input.setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        input.setBackground(null);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+        input.setSingleLine(true);
+        input.setGravity((LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
+        input.setLineColors(Theme.getColor(Theme.key_windowBackgroundWhiteInputField), Theme.getColor(Theme.key_windowBackgroundWhiteInputFieldActivated), Theme.getColor(Theme.key_text_RedRegular));
+        input.setHintText("hex, e.g. fe0d");
+        input.setText(String.format(Locale.US, "%04x", currentEchId));
+        input.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(6), AndroidUtilities.dp(21), 0);
+        container.addView(input, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 36, Gravity.CENTER_VERTICAL, 21, 6, 21, 0));
+
+        android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(context);
+        builder.setTitle("Custom ECH Extension ID");
+        builder.setView(container);
+        builder.setPositiveButton(LocaleController.getString(R.string.OK), (dialog, which) -> {
+            currentEchId = parseEchExtensionId(input.getText().toString());
+            echIdCell.setTextAndValue("ECH extension ID", String.format(Locale.US, "%04x", currentEchId), false);
+        });
+        builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
+        showDialog(builder.create());
+    }
 
     public static class TypeCell extends FrameLayout {
 
@@ -269,6 +323,9 @@ public class ProxySettingsActivity extends BaseFragment {
                     editor.putInt("tls_fingerprint_profile", currentFingerprintProfile);
                     editor.putInt("tls_rotation_interval", currentRotationInterval);
                     ConnectionsManager.setTlsFingerprintProfile(currentFingerprintProfile, currentRotationInterval);
+                    // Save and apply ECH extension ID
+                    editor.putInt("tls_ech_extension_id", currentEchId);
+                    ConnectionsManager.setTlsEchExtensionId(currentEchId);
                     // Save and apply TLS fragment settings
                     if (fragmentContainer != null) {
                         boolean fragEnabled = fragmentSwitch.isChecked();
@@ -493,8 +550,10 @@ public class ProxySettingsActivity extends BaseFragment {
         int savedFragMax = fragPrefs.getInt("tls_fragment_max", 3);
         currentFingerprintProfile = fragPrefs.getInt("tls_fingerprint_profile", 0);
         currentRotationInterval = fragPrefs.getInt("tls_rotation_interval", 0);
+        currentEchId = fragPrefs.getInt("tls_ech_extension_id", DEFAULT_ECH_EXTENSION_ID);
         ConnectionsManager.setTlsFragmentConfig(savedFragEnabled, savedFragMin, savedFragMax);
         ConnectionsManager.setTlsFingerprintProfile(currentFingerprintProfile, currentRotationInterval);
+        ConnectionsManager.setTlsEchExtensionId(currentEchId);
 
         fragmentContainer = new LinearLayout(context);
         fragmentContainer.setOrientation(LinearLayout.VERTICAL);
@@ -527,6 +586,35 @@ public class ProxySettingsActivity extends BaseFragment {
             showDialog(builder.create());
         });
         fragmentContainer.addView(fingerprintProfileCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+
+        // ECH extension ID picker (same checkmark-list pattern as Browser profile, right next to it)
+        echIdCell = new TextSettingsCell(context);
+        echIdCell.setBackground(Theme.getSelectorDrawable(true));
+        echIdCell.setTextAndValue("ECH extension ID", String.format(Locale.US, "%04x", currentEchId), false);
+        echIdCell.setOnClickListener(v -> {
+            if (getParentActivity() == null) return;
+            int selected = ECH_ID_PRESET_NAMES.length - 1;
+            for (int i = 0; i < ECH_ID_PRESET_VALUES.length; i++) {
+                if (ECH_ID_PRESET_VALUES[i] == currentEchId) {
+                    selected = i;
+                    break;
+                }
+            }
+            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
+            builder.setTitle("ECH Extension ID");
+            builder.setSingleChoiceItems(ECH_ID_PRESET_NAMES, selected, (dialog, which) -> {
+                dialog.dismiss();
+                if (which == ECH_ID_PRESET_NAMES.length - 1) {
+                    showEchCustomIdDialog();
+                } else {
+                    currentEchId = ECH_ID_PRESET_VALUES[which];
+                    echIdCell.setTextAndValue("ECH extension ID", String.format(Locale.US, "%04x", currentEchId), false);
+                }
+            });
+            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
+            showDialog(builder.create());
+        });
+        fragmentContainer.addView(echIdCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
 
         // Rotation interval field (visible only when Random profile is selected)
         rotationIntervalContainer = new FrameLayout(context);
