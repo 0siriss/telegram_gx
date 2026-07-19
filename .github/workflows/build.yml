@@ -97,9 +97,7 @@ jobs:
             - Fingerprint profiles: Chrome 120+, Firefox 121+, Safari 17, Edge 120+, Random
             - TLS ClientHello fragmentation
             - Configurable rotation interval (30–240s)
-
-            ### Установка:
-            Скачать `app-afat-release.apk` и установить на Android (разрешить установку из неизвестных источников).
+            - Anti-recall: сообщения, удалённые отправителем, сохраняются локально и помечаются "удалено отправителем" (настраивается глобально и отдельно для каждого чата)
           files: |
             TMessagesProj_App/build/outputs/apk/afat/release/app.apk
           draft: false

@@ -205,7 +205,12 @@ public class GithubUpdaterController {
         if (version == null || versionCode == 0) {
             return null;
         }
-        return new BetaUpdate(version, versionCode, changelog);
+        // TGX: BetaUpdate.higherThan() feeds this string into SharedConfig.versionBiggerOrEqual(), which does a
+        // plain Integer.parseInt() per dot-separated part — our raw tags ("v1.8", "v1.7.1-dev4") crash it
+        // (NumberFormatException on "v1"). versionCode is already the authoritative comparison value, so derive
+        // a clean numeric-only equivalent from it instead of passing the raw tag through.
+        String comparableVersion = (versionCode / 1000) + "." + (versionCode % 1000);
+        return new BetaUpdate(comparableVersion, versionCode, changelog);
     }
 
     private boolean downloading;

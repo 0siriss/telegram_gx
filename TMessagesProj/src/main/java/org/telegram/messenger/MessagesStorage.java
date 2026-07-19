@@ -14577,7 +14577,6 @@ public class MessagesStorage extends BaseController {
                     int mid = cursor.intValue(0);
                     long uid = cursor.longValue(1);
                     boolean enabled = getMessagesController().isAntiRecallEnabledForDialog(uid);
-                    android.util.Log.i("TGXAntiRecall", "filterRecalledMessages: resolved mid=" + mid + " uid=" + uid + " isAntiRecallEnabledForDialog=" + enabled);
                     if (enabled) {
                         if (retainedByDialog == null) {
                             retainedByDialog = new LongSparseArray<>();
@@ -14603,7 +14602,12 @@ public class MessagesStorage extends BaseController {
                     long uid = retainedByDialog.keyAt(i);
                     ArrayList<Integer> mids = retainedByDialog.valueAt(i);
                     saveRecalledMessages(uid, mids);
-                    AndroidUtilities.runOnUIThread(() -> getNotificationCenter().postNotificationName(NotificationCenter.messagesRecalled, mids, uid));
+                    AndroidUtilities.runOnUIThread(() -> {
+                        for (int m = 0, msize = mids.size(); m < msize; m++) {
+                            getMessagesController().markMidRecalled(uid, mids.get(m));
+                        }
+                        getNotificationCenter().postNotificationName(NotificationCenter.messagesRecalled, mids, uid);
+                    });
                 }
             }
             AndroidUtilities.runOnUIThread(() -> onRemainingMids.run(remaining));
