@@ -21553,6 +21553,17 @@ public class MessagesController extends BaseController implements NotificationCe
         notificationsPreferences.edit().putInt("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0), enabled ? 1 : 0).commit();
     }
 
+    // TGX: real FCM push is unavailable for this fork (signing cert isn't registered in Telegram's
+    // own Firebase project, see project notes), so this substitutes a foreground-service-held live
+    // MTProto connection instead. DataSettingsActivity toggle; off by default (battery cost).
+    public static boolean isKeepAliveEnabled() {
+        return getGlobalMainSettings().getBoolean("keep_alive_enabled", false);
+    }
+
+    public static void setKeepAliveEnabled(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("keep_alive_enabled", enabled).commit();
+    }
+
     // TGX: anti-recall — session-lifetime cache of "this mid was recalled" (mid -> unix seconds it was recalled
     // at) that survives MessageObject being reconstructed (e.g. on a dialog/message-list reload), since
     // recalledBySender on a specific MessageObject instance doesn't: a fresh deserialize from messages_v2 always
