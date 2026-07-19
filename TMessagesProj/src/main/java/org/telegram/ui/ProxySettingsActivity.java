@@ -162,6 +162,7 @@ public class ProxySettingsActivity extends BaseFragment {
         }
         Context context = getParentActivity();
         FrameLayout container = new FrameLayout(context);
+        container.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
         EditTextBoldCursor input = new EditTextBoldCursor(context);
         input.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
         input.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));

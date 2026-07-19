@@ -219,6 +219,8 @@ public class MessageObject {
     public String monthKey;
     public boolean deleted;
     public boolean deletedByThanos;
+    // TGX: anti-recall — sender deleted this message server-side but we retained it locally (see recalled_messages table)
+    public boolean recalledBySender;
     public float audioProgress;
     public float forceSeekTo = -1;
     public int audioProgressMs;

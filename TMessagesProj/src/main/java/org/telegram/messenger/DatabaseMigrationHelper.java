@@ -1668,6 +1668,12 @@ public class DatabaseMigrationHelper {
             database.executeFast("PRAGMA user_version = 174").stepThis().dispose();
             version = 174;
         }
+        if (version == 174) {
+            // TGX: locally-retained tombstones for messages recalled by the sender (anti-recall feature)
+            database.executeFast("CREATE TABLE recalled_messages(uid INTEGER, mid INTEGER, recalled_date INTEGER, PRIMARY KEY(uid, mid))").stepThis().dispose();
+            database.executeFast("PRAGMA user_version = 175").stepThis().dispose();
+            version = 175;
+        }
 
         return version;
     }

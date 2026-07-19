@@ -113,7 +113,7 @@ public class MessagesStorage extends BaseController {
         }
     }
 
-    public final static int LAST_DB_VERSION = 174;
+    public final static int LAST_DB_VERSION = 175;
     private boolean databaseMigrationInProgress;
     public boolean showClearDatabaseAlert;
 
@@ -543,6 +543,9 @@ public class MessagesStorage extends BaseController {
         database.executeFast("CREATE INDEX IF NOT EXISTS idx_to_reply_scheduled_messages_v2 ON scheduled_messages_v2(reply_to_message_id, mid);").stepThis().dispose();
 
         database.executeFast("CREATE TABLE messages_v2(mid INTEGER, uid INTEGER, read_state INTEGER, send_state INTEGER, date INTEGER, data BLOB, out INTEGER, ttl INTEGER, media INTEGER, replydata BLOB, imp INTEGER, mention INTEGER, forwards INTEGER, replies_data BLOB, thread_reply_id INTEGER, is_channel INTEGER, reply_to_message_id INTEGER, custom_params BLOB, group_id INTEGER, reply_to_story_id INTEGER, PRIMARY KEY(mid, uid))").stepThis().dispose();
+
+        // TGX: locally-retained tombstones for messages recalled by the sender (anti-recall feature)
+        database.executeFast("CREATE TABLE recalled_messages(uid INTEGER, mid INTEGER, recalled_date INTEGER, PRIMARY KEY(uid, mid))").stepThis().dispose();
         database.executeFast("CREATE INDEX IF NOT EXISTS uid_mid_read_out_idx_messages_v2 ON messages_v2(uid, mid, read_state, out);").stepThis().dispose();
         database.executeFast("CREATE INDEX IF NOT EXISTS uid_date_mid_idx_messages_v2 ON messages_v2(uid, date, mid);").stepThis().dispose();
         database.executeFast("CREATE INDEX IF NOT EXISTS mid_out_idx_messages_v2 ON messages_v2(mid, out);").stepThis().dispose();
@@ -14526,6 +14529,115 @@ public class MessagesStorage extends BaseController {
 
     public void updateDialogsWithDeletedMessages(long dialogId, long channelId, ArrayList<Integer> messages, ArrayList<Long> additionalDialogsToUpdate) {
         executeInStorageQueue(() -> updateDialogsWithDeletedMessagesInternal(dialogId, channelId, messages, additionalDialogsToUpdate));
+    }
+
+    // TGX: anti-recall — persist tombstones for messages the sender deleted but that we chose to retain locally.
+    public void saveRecalledMessages(long uid, ArrayList<Integer> mids) {
+        if (mids == null || mids.isEmpty()) {
+            return;
+        }
+        storageQueue.postRunnable(() -> {
+            try {
+                database.beginTransaction();
+                SQLitePreparedStatement state = database.executeFast("INSERT OR IGNORE INTO recalled_messages VALUES(?, ?, ?)");
+                int now = (int) (System.currentTimeMillis() / 1000);
+                for (int i = 0, size = mids.size(); i < size; i++) {
+                    state.requery();
+                    state.bindLong(1, uid);
+                    state.bindInteger(2, mids.get(i));
+                    state.bindInteger(3, now);
+                    state.step();
+                }
+                state.dispose();
+                database.commitTransaction();
+            } catch (Exception e) {
+                FileLog.e(e);
+            }
+        });
+    }
+
+    // TGX: anti-recall — TL_updateDeleteMessages (private chats / basic groups) doesn't carry a dialogId,
+    // unlike TL_updateDeleteChannelMessages. Resolve mid -> uid here (same lookup markMessagesAsDeletedInternal
+    // would do), persist a tombstone for any dialog with anti-recall enabled, and hand back only the mids that
+    // should still go through the normal deletion path. Never touches markMessagesAsDeletedInternal itself, so
+    // local user-initiated deletes (which also call markMessagesAsDeleted) are completely unaffected.
+    public void filterRecalledMessages(ArrayList<Integer> candidateMids, Utilities.Callback<ArrayList<Integer>> onRemainingMids) {
+        if (candidateMids == null || candidateMids.isEmpty()) {
+            AndroidUtilities.runOnUIThread(() -> onRemainingMids.run(candidateMids));
+            return;
+        }
+        storageQueue.postRunnable(() -> {
+            ArrayList<Integer> remaining = new ArrayList<>(candidateMids);
+            LongSparseArray<ArrayList<Integer>> retainedByDialog = null;
+            SQLiteCursor cursor = null;
+            try {
+                String ids = TextUtils.join(",", candidateMids);
+                cursor = database.queryFinalized(String.format(Locale.US, "SELECT mid, uid FROM messages_v2 WHERE mid IN(%s) AND is_channel = 0", ids));
+                while (cursor.next()) {
+                    int mid = cursor.intValue(0);
+                    long uid = cursor.longValue(1);
+                    boolean enabled = getMessagesController().isAntiRecallEnabledForDialog(uid);
+                    android.util.Log.i("TGXAntiRecall", "filterRecalledMessages: resolved mid=" + mid + " uid=" + uid + " isAntiRecallEnabledForDialog=" + enabled);
+                    if (enabled) {
+                        if (retainedByDialog == null) {
+                            retainedByDialog = new LongSparseArray<>();
+                        }
+                        ArrayList<Integer> mids = retainedByDialog.get(uid);
+                        if (mids == null) {
+                            mids = new ArrayList<>();
+                            retainedByDialog.put(uid, mids);
+                        }
+                        mids.add(mid);
+                        remaining.remove((Integer) mid);
+                    }
+                }
+            } catch (Exception e) {
+                FileLog.e(e);
+            } finally {
+                if (cursor != null) {
+                    cursor.dispose();
+                }
+            }
+            if (retainedByDialog != null) {
+                for (int i = 0, size = retainedByDialog.size(); i < size; i++) {
+                    long uid = retainedByDialog.keyAt(i);
+                    ArrayList<Integer> mids = retainedByDialog.valueAt(i);
+                    saveRecalledMessages(uid, mids);
+                    AndroidUtilities.runOnUIThread(() -> getNotificationCenter().postNotificationName(NotificationCenter.messagesRecalled, mids, uid));
+                }
+            }
+            AndroidUtilities.runOnUIThread(() -> onRemainingMids.run(remaining));
+        });
+    }
+
+    // TGX: anti-recall — given candidate mids just loaded from messages_v2, return the subset that are recalled tombstones.
+    public void getRecalledMids(long uid, ArrayList<Integer> candidateMids, Utilities.Callback<HashSet<Integer>> onResult) {
+        storageQueue.postRunnable(() -> {
+            HashSet<Integer> recalled = new HashSet<>();
+            if (candidateMids != null && !candidateMids.isEmpty()) {
+                SQLiteCursor cursor = null;
+                try {
+                    StringBuilder mids = new StringBuilder();
+                    for (int i = 0, size = candidateMids.size(); i < size; i++) {
+                        if (i != 0) {
+                            mids.append(',');
+                        }
+                        mids.append(candidateMids.get(i));
+                    }
+                    cursor = database.queryFinalized(String.format(Locale.US, "SELECT mid FROM recalled_messages WHERE uid = %d AND mid IN (%s)", uid, mids));
+                    while (cursor.next()) {
+                        recalled.add(cursor.intValue(0));
+                    }
+                } catch (Exception e) {
+                    FileLog.e(e);
+                } finally {
+                    if (cursor != null) {
+                        cursor.dispose();
+                    }
+                }
+            }
+            AndroidUtilities.runOnUIThread(() -> onResult.run(recalled));
+        });
     }
 
     public ArrayList<Long> markMessagesAsDeleted(long dialogId, ArrayList<Integer> messages, boolean useQueue, boolean deleteFiles, int mode, int topicId) {

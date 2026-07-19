@@ -154,6 +154,13 @@ public class GithubUpdaterController {
                 this.lastCheck = System.currentTimeMillis();
                 save();
 
+                final String checkResult = "GithubUpdaterController: checked update, current=" + BuildConfig.FORK_VERSION_TAG + "(" + getCurrentVersionCode() + ")"
+                        + " latest=" + newVersion + "(" + newVersionCode + ")"
+                        + " fileUrl=" + newFileUrl
+                        + " -> " + (this.versionCode != 0 ? "update available: " + this.version : "up to date");
+                FileLog.d(checkResult);
+                android.util.Log.i("GithubUpdaterController", checkResult);
+
                 if (this.versionCode != oldVersionCode) {
                     NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateAvailable);
                 }
@@ -165,6 +172,7 @@ public class GithubUpdaterController {
                 }
             } catch (Exception e) {
                 FileLog.e("Failed to check for GitHub release update, received: " + str, e);
+                android.util.Log.e("GithubUpdaterController", "Failed to check for GitHub release update, received: " + str, e);
             }
         })).setHeader("User-Agent", "TGX-DPI-Bypass-UpdateChecker")
           .setHeader("Accept", "application/vnd.github+json")

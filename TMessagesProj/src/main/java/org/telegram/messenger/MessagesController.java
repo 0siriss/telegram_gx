@@ -20361,19 +20361,8 @@ public class MessagesController extends BaseController implements NotificationCe
                     if (arrayList == null) {
                         continue;
                     }
-                    getNotificationCenter().postNotificationName(NotificationCenter.messagesDeleted, arrayList, -dialogId, false);
-                    if (dialogId == 0) {
-                        for (int b = 0, size2 = arrayList.size(); b < size2; b++) {
-                            Integer id = arrayList.get(b);
-                            MessageObject obj = dialogMessagesByIds.get(id);
-                            if (obj != null) {
-                                if (BuildVars.LOGS_ENABLED) {
-                                    FileLog.d("mark messages " + obj.getId() + " deleted");
-                                }
-                                obj.deleted = true;
-                            }
-                        }
-                    } else {
+                    // TGX: anti-recall — channel/supergroup case: dialogId already known, uniform for the whole batch.
+                    if (dialogId != 0 && isAntiRecallEnabledForDialog(dialogId)) {
                         ArrayList<MessageObject> objs = dialogMessage.get(dialogId);
                         if (objs != null) {
                             for (int i = 0; i < objs.size(); ++i) {
@@ -20381,9 +20370,68 @@ public class MessagesController extends BaseController implements NotificationCe
                                 if (obj != null) {
                                     for (int b = 0, size2 = arrayList.size(); b < size2; b++) {
                                         if (obj.getId() == arrayList.get(b)) {
-                                            obj.deleted = true;
+                                            obj.recalledBySender = true;
                                             break;
                                         }
+                                    }
+                                }
+                            }
+                        }
+                        getNotificationCenter().postNotificationName(NotificationCenter.messagesRecalled, arrayList, dialogId);
+                        continue;
+                    }
+                    if (dialogId == 0) {
+                        // TGX: anti-recall — private chat / basic group: resolve retention per-message via the
+                        // already-loaded in-memory MessageObject's real dialogId (messages not currently loaded
+                        // have nothing visible to hide; persistence-side retention is handled separately by
+                        // filterRecalledMessages against storage further below).
+                        ArrayList<Integer> stillDeletedIds = new ArrayList<>();
+                        LongSparseArray<ArrayList<Integer>> recalledByDialog = null;
+                        for (int b = 0, size2 = arrayList.size(); b < size2; b++) {
+                            Integer id = arrayList.get(b);
+                            MessageObject obj = dialogMessagesByIds.get(id);
+                            if (obj != null && isAntiRecallEnabledForDialog(obj.getDialogId())) {
+                                obj.recalledBySender = true;
+                                long objDialogId = obj.getDialogId();
+                                if (recalledByDialog == null) {
+                                    recalledByDialog = new LongSparseArray<>();
+                                }
+                                ArrayList<Integer> ids = recalledByDialog.get(objDialogId);
+                                if (ids == null) {
+                                    ids = new ArrayList<>();
+                                    recalledByDialog.put(objDialogId, ids);
+                                }
+                                ids.add(id);
+                            } else {
+                                if (obj != null) {
+                                    if (BuildVars.LOGS_ENABLED) {
+                                        FileLog.d("mark messages " + obj.getId() + " deleted");
+                                    }
+                                    obj.deleted = true;
+                                }
+                                stillDeletedIds.add(id);
+                            }
+                        }
+                        if (!stillDeletedIds.isEmpty()) {
+                            getNotificationCenter().postNotificationName(NotificationCenter.messagesDeleted, stillDeletedIds, -dialogId, false);
+                        }
+                        if (recalledByDialog != null) {
+                            for (int i = 0, n = recalledByDialog.size(); i < n; i++) {
+                                getNotificationCenter().postNotificationName(NotificationCenter.messagesRecalled, recalledByDialog.valueAt(i), recalledByDialog.keyAt(i));
+                            }
+                        }
+                        continue;
+                    }
+                    getNotificationCenter().postNotificationName(NotificationCenter.messagesDeleted, arrayList, -dialogId, false);
+                    ArrayList<MessageObject> objs = dialogMessage.get(dialogId);
+                    if (objs != null) {
+                        for (int i = 0; i < objs.size(); ++i) {
+                            MessageObject obj = objs.get(i);
+                            if (obj != null) {
+                                for (int b = 0, size2 = arrayList.size(); b < size2; b++) {
+                                    if (obj.getId() == arrayList.get(b)) {
+                                        obj.deleted = true;
+                                        break;
                                     }
                                 }
                             }
@@ -20478,6 +20526,30 @@ public class MessagesController extends BaseController implements NotificationCe
             for (int a = 0, size = deletedMessages.size(); a < size; a++) {
                 long key = deletedMessages.keyAt(a);
                 ArrayList<Integer> arrayList = deletedMessages.valueAt(a);
+                android.util.Log.i("TGXAntiRecall", "processUpdateArray deletedMessages: key=" + key + " mids=" + arrayList
+                        + " isAntiRecallEnabledForDialog(key)=" + (key != 0 ? isAntiRecallEnabledForDialog(key) : "n/a (key=0)"));
+                if (key != 0 && isAntiRecallEnabledForDialog(key)) {
+                    // TGX: anti-recall — channel/supergroup case, dialogId already known (key = -channel_id):
+                    // retain locally instead of letting the delete propagate to storage.
+                    getMessagesStorage().saveRecalledMessages(key, arrayList);
+                    final long recalledDialogId = key;
+                    AndroidUtilities.runOnUIThread(() -> getNotificationCenter().postNotificationName(NotificationCenter.messagesRecalled, arrayList, recalledDialogId));
+                    continue;
+                }
+                if (key == 0) {
+                    // TGX: anti-recall — private chat / basic group case: TL_updateDeleteMessages doesn't carry a
+                    // dialogId, so resolve mid -> uid in storage first and only pass through the mids that should
+                    // actually be deleted (filterRecalledMessages persists tombstones + posts messagesRecalled itself).
+                    getMessagesStorage().filterRecalledMessages(arrayList, remainingMids -> {
+                        if (remainingMids != null && !remainingMids.isEmpty()) {
+                            getMessagesStorage().getStorageQueue().postRunnable(() -> {
+                                ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, remainingMids, false, true, 0, 0);
+                                getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, remainingMids, dialogIds);
+                            });
+                        }
+                    });
+                    continue;
+                }
                 getMessagesStorage().getStorageQueue().postRunnable(() -> {
                     ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, arrayList, false, true, 0, 0);
                     getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, arrayList, dialogIds);
@@ -20814,6 +20886,35 @@ public class MessagesController extends BaseController implements NotificationCe
             }
         }
         return false;
+    }
+
+    // TGX: anti-recall — global default (DataSettingsActivity toggle) + per-dialog override,
+    // same override/inherit pattern as isDialogMuted (notify2_ / -1 = inherit).
+    public static boolean isAntiRecallEnabledGlobally() {
+        return getGlobalMainSettings().getBoolean("anti_recall_enabled", false);
+    }
+
+    public static void setAntiRecallEnabledGlobally(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("anti_recall_enabled", enabled).commit();
+    }
+
+    public boolean isAntiRecallEnabledForDialog(long dialogId) {
+        if (DialogObject.isEncryptedDialog(dialogId)) {
+            return false;
+        }
+        int override = notificationsPreferences.getInt("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0), -1);
+        if (override == -1) {
+            return isAntiRecallEnabledGlobally();
+        }
+        return override == 1;
+    }
+
+    public void setAntiRecallEnabledForDialog(long dialogId, boolean enabled) {
+        notificationsPreferences.edit().putInt("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0), enabled ? 1 : 0).commit();
+    }
+
+    public void clearAntiRecallOverrideForDialog(long dialogId) {
+        notificationsPreferences.edit().remove("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0)).commit();
     }
 
     public void markReactionsAsRead(long dialogId, long topicId) {
