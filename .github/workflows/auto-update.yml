@@ -54,6 +54,12 @@ jobs:
           PREV=$(git rev-parse HEAD)
           echo "prev=$PREV" >> $GITHUB_OUTPUT
 
+          # upstream/master был получен с --depth=1 (shallow) для дешёвой проверки версии.
+          # Пуш shallow-коммита ломается на приёмной стороне ("did not receive expected
+          # object" / index-pack failed), т.к. у него нет полной цепочки родителей —
+          # донабираем полную историю перед тем, как на него переключаться.
+          git fetch upstream master --unshallow
+
           # Сброс на чистый upstream
           git reset --hard upstream/master
 
