@@ -174,7 +174,7 @@ public class GithubUpdaterController {
                 FileLog.e("Failed to check for GitHub release update, received: " + str, e);
                 android.util.Log.e("GithubUpdaterController", "Failed to check for GitHub release update, received: " + str, e);
             }
-        })).setHeader("User-Agent", "TGX-DPI-Bypass-UpdateChecker")
+        })).setHeader("User-Agent", "GramBas-UpdateChecker")
           .setHeader("Accept", "application/vnd.github+json")
           .execute(RELEASES_URL);
     }
@@ -205,7 +205,7 @@ public class GithubUpdaterController {
         if (version == null || versionCode == 0) {
             return null;
         }
-        // TGX: BetaUpdate.higherThan() feeds this string into SharedConfig.versionBiggerOrEqual(), which does a
+        // GramBas: BetaUpdate.higherThan() feeds this string into SharedConfig.versionBiggerOrEqual(), which does a
         // plain Integer.parseInt() per dot-separated part — our raw tags ("v1.8", "v1.7.1-dev4") crash it
         // (NumberFormatException on "v1"). versionCode is already the authoritative comparison value, so derive
         // a clean numeric-only equivalent from it instead of passing the raw tag through.

@@ -21,7 +21,7 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
 
     @Override
     public boolean onPause() {
-        // TGX: real FCM push doesn't work for this fork's signing cert -- keep the native
+        // GramBas: real FCM push doesn't work for this fork's signing cert -- keep the native
         // network layer alive in background instead (see ConnectionKeepAliveService).
         if (MessagesController.isKeepAliveEnabled()) {
             ConnectionKeepAliveService.start(ApplicationLoader.applicationContext);
