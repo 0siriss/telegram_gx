@@ -8298,13 +8298,17 @@ public class MessagesController extends BaseController implements NotificationCe
             LongSparseArray<ArrayList<Integer>> task = currentDeletingTaskMids != null ? currentDeletingTaskMids.clone() : null;
             LongSparseArray<ArrayList<Integer>> taskMedia = currentDeletingTaskMediaMids != null ? currentDeletingTaskMediaMids.clone() : null;
             AndroidUtilities.runOnUIThread(() -> {
-                if (task != null) {
+                // TGX: keep-ephemeral -- skip the scheduled self-destruct/TTL purge so the
+                // message/media stays in local storage instead of being deleted. This only
+                // affects what THIS client keeps locally; it doesn't change TTL/view-once
+                // semantics on the sending side or other participants' clients.
+                if (!isKeepEphemeralEnabled() && task != null) {
                     for (int a = 0, N = task.size(); a < N; a++) {
                         ArrayList<Integer> mids = task.valueAt(a);
                         deleteMessages(mids, null, null, task.keyAt(a), 0, true, 0, !mids.isEmpty() && mids.get(0) > 0);
                     }
                 }
-                if (taskMedia != null) {
+                if (!isKeepEphemeralEnabled() && taskMedia != null) {
                     final boolean checkViewer = SecretMediaViewer.hasInstance() && SecretMediaViewer.getInstance().isVisible();
                     final MessageObject viewerObject = checkViewer ? SecretMediaViewer.getInstance().getCurrentMessageObject() : null;
                     for (int a = 0, N = taskMedia.size(); a < N; a++) {
@@ -14346,6 +14350,10 @@ public class MessagesController extends BaseController implements NotificationCe
         long dialogId = messageObject.getDialogId();
         getMessagesStorage().markMessagesContentAsRead(dialogId, arrayList, 0, 0);
         getNotificationCenter().postNotificationName(NotificationCenter.messagesReadContent, dialogId, arrayList);
+        if (isEphemeralMediaKept(messageObject)) {
+            // Mark locally read but never signal the server -- no view receipt, no destruction.
+            return;
+        }
         if (messageObject.getId() < 0) {
             markMessageAsRead(messageObject.getDialogId(), messageObject.messageOwner.random_id, Integer.MIN_VALUE);
         } else {
@@ -14411,6 +14419,11 @@ public class MessagesController extends BaseController implements NotificationCe
 
     public void doDeleteShowOnceTask(long taskId, long dialogId, int mid) {
         getMessagesStorage().removePendingTask(taskId);
+        if (isKeepEphemeralEnabled()) {
+            // Defuse a show-once task that was already scheduled (e.g. before the toggle was
+            // turned on): drop the task bookkeeping, but keep the media.
+            return;
+        }
         ArrayList<Integer> mids = new ArrayList<>();
         mids.add(mid);
         getMessagesStorage().emptyMessagesMedia(dialogId, mids);
@@ -14421,6 +14434,15 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     public void markMessageAsRead2(long dialogId, int mid, TLRPC.InputChannel inputChannel, int ttl, long taskId, boolean createDeleteTask) {
+        if (isKeepEphemeralEnabled()) {
+            // Never read-and-destroy: skip the server readMessageContents call and don't
+            // schedule a local delete task. Still clean up a pending task passed in from a
+            // caller that already created one before reaching here.
+            if (taskId != 0) {
+                getMessagesStorage().removePendingTask(taskId);
+            }
+            return;
+        }
         if (mid == 0 || ttl < 0) {
             return;
         }
@@ -21562,6 +21584,51 @@ public class MessagesController extends BaseController implements NotificationCe
 
     public static void setKeepAliveEnabled(boolean enabled) {
         getGlobalMainSettings().edit().putBoolean("keep_alive_enabled", enabled).commit();
+    }
+
+    // TGX: retain view-once / self-destructing (TTL) media locally instead of running the local
+    // destruction -- the remote side's own TTL/one-time semantics on their client are unaffected,
+    // this only stops this client from discarding its own already-received copy.
+    public static boolean isKeepEphemeralEnabled() {
+        return getGlobalMainSettings().getBoolean("keep_ephemeral_enabled", false);
+    }
+
+    public static void setKeepEphemeralEnabled(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("keep_ephemeral_enabled", enabled).commit();
+    }
+
+    // TGX: don't apply FLAG_SECURE in secret chats / protected-content viewers, i.e. allow
+    // screenshots there. Off by default -- this is a deliberate opt-in privacy tradeoff for the
+    // user's own device, not a default behavior change.
+    public static boolean isAllowScreenshotsEnabled() {
+        return getGlobalMainSettings().getBoolean("allow_screenshots_enabled", false);
+    }
+
+    public static void setAllowScreenshotsEnabled(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("allow_screenshots_enabled", enabled).commit();
+    }
+
+    // TGX: suppress the "took a screenshot" service message sent to the other party in secret
+    // chats. Independent of isAllowScreenshotsEnabled -- a user may still want FLAG_SECURE (e.g.
+    // to keep the OS-level screenshot block) while not notifying the peer, or vice versa.
+    public static boolean isMuteScreenshotPingEnabled() {
+        return getGlobalMainSettings().getBoolean("mute_screenshot_ping_enabled", false);
+    }
+
+    public static void setMuteScreenshotPingEnabled(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("mute_screenshot_ping_enabled", enabled).commit();
+    }
+
+    // TGX: cloud view-once / TTL media (TL_message with media.ttl_seconds != 0) this client
+    // deliberately keeps. Deliberately does NOT cover secret-chat (TL_message_secret) TTL --
+    // that destruction is a core part of the secret-chat guarantee shown to the other party, not
+    // just a local cleanup step, so it's left untouched here.
+    public static boolean isEphemeralMediaKept(MessageObject messageObject) {
+        if (!isKeepEphemeralEnabled() || messageObject == null || messageObject.messageOwner == null) {
+            return false;
+        }
+        TLRPC.MessageMedia media = MessageObject.getMedia(messageObject.messageOwner);
+        return media != null && media.ttl_seconds != 0;
     }
 
     // TGX: anti-recall — session-lifetime cache of "this mid was recalled" (mid -> unix seconds it was recalled
