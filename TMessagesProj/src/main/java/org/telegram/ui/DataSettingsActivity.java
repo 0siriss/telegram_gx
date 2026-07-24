@@ -116,14 +116,6 @@ public class DataSettingsActivity extends BaseFragment {
     private int saveToGalleryGroupsRow;
     private int saveToGalleryDividerRow;
 
-    private int antiRecallSectionRow;
-    private int antiRecallEnabledRow;
-    private int antiRecallSection2Row;
-
-    private int keepAliveSectionRow;
-    private int keepAliveEnabledRow;
-    private int keepAliveInfoRow;
-
     private int rowCount;
 
     private boolean updateVoipUseLessData;
@@ -184,14 +176,6 @@ public class DataSettingsActivity extends BaseFragment {
         saveToGalleryGroupsRow = rowCount++;
         saveToGalleryChannelsRow = rowCount++;
         saveToGalleryDividerRow = rowCount++;
-
-        antiRecallSectionRow = rowCount++;
-        antiRecallEnabledRow = rowCount++;
-        antiRecallSection2Row = rowCount++;
-
-        keepAliveSectionRow = rowCount++;
-        keepAliveEnabledRow = rowCount++;
-        keepAliveInfoRow = rowCount++;
 
 //        autoplayHeaderRow = rowCount++;
 //        autoplayGifsRow = rowCount++;
@@ -569,31 +553,6 @@ public class DataSettingsActivity extends BaseFragment {
                 showDialog(builder.create());
             } else if (position == proxyRow) {
                 presentFragment(new ProxyListActivity());
-            } else if (position == antiRecallEnabledRow) {
-                boolean enabled = !MessagesController.isAntiRecallEnabledGlobally();
-                MessagesController.setAntiRecallEnabledGlobally(enabled);
-                TextCheckCell textCheckCell = (TextCheckCell) view;
-                textCheckCell.setChecked(enabled);
-            } else if (position == keepAliveEnabledRow) {
-                boolean enabled = !MessagesController.isKeepAliveEnabled();
-                MessagesController.setKeepAliveEnabled(enabled);
-                TextCheckCell textCheckCell = (TextCheckCell) view;
-                textCheckCell.setChecked(enabled);
-                if (enabled) {
-                    android.os.PowerManager powerManager = (android.os.PowerManager) ApplicationLoader.applicationContext.getSystemService(Context.POWER_SERVICE);
-                    String packageName = ApplicationLoader.applicationContext.getPackageName();
-                    if (powerManager != null && !powerManager.isIgnoringBatteryOptimizations(packageName)) {
-                        try {
-                            Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-                            intent.setData(android.net.Uri.parse("package:" + packageName));
-                            if (getParentActivity() != null) {
-                                getParentActivity().startActivity(intent);
-                            }
-                        } catch (Exception e) {
-                            FileLog.e(e);
-                        }
-                    }
-                }
             } else if (position == enableStreamRow) {
                 SharedConfig.toggleStreamMedia();
                 TextCheckCell textCheckCell = (TextCheckCell) view;
@@ -783,10 +742,6 @@ public class DataSettingsActivity extends BaseFragment {
                         headerCell.setText(LocaleController.getString(R.string.Calls));
                     } else if (position == proxySectionRow) {
                         headerCell.setText(LocaleController.getString(R.string.Proxy));
-                    } else if (position == antiRecallSectionRow) {
-                        headerCell.setText("Anti-recall");
-                    } else if (position == keepAliveSectionRow) {
-                        headerCell.setText("Поддержание соединения");
                     } else if (position == streamSectionRow) {
                         headerCell.setText(LocaleController.getString(R.string.Streaming));
                     } else if (position == autoplayHeaderRow) {
@@ -798,11 +753,7 @@ public class DataSettingsActivity extends BaseFragment {
                 }
                 case 3: {
                     TextCheckCell checkCell = (TextCheckCell) holder.itemView;
-                    if (position == antiRecallEnabledRow) {
-                        checkCell.setTextAndCheck("Показывать удалённые сообщения", MessagesController.isAntiRecallEnabledGlobally(), false);
-                    } else if (position == keepAliveEnabledRow) {
-                        checkCell.setTextAndCheck("Держать соединение в фоне", MessagesController.isKeepAliveEnabled(), false);
-                    } else if (position == enableStreamRow) {
+                    if (position == enableStreamRow) {
                         checkCell.setTextAndCheck(LocaleController.getString(R.string.EnableStreaming), SharedConfig.streamMedia, enableAllStreamRow != -1);
                     } else if (position == enableCacheStreamRow) {
                         //checkCell.setTextAndCheck(LocaleController.getString(R.string.CacheStreamFile), SharedConfig.saveStreamMedia, true);
@@ -821,8 +772,6 @@ public class DataSettingsActivity extends BaseFragment {
                     TextInfoPrivacyCell cell = (TextInfoPrivacyCell) holder.itemView;
                     if (position == enableAllStreamInfoRow) {
                         cell.setText(LocaleController.getString(R.string.EnableAllStreamingInfo));
-                    } else if (position == keepAliveInfoRow) {
-                        cell.setText("Настоящие push-уведомления недоступны для этой сборки (FCM не работает с самоподписанным APK). Держит соединение открытым, пока приложение свёрнуто, чтобы сообщения приходили без задержки — расходует больше заряда батареи. Рекомендуется также разрешить автозапуск и отключить оптимизацию батареи для приложения в настройках системы.");
                     }
                     break;
                 }
@@ -920,11 +869,7 @@ public class DataSettingsActivity extends BaseFragment {
             if (viewType == 3) {
                 TextCheckCell checkCell = (TextCheckCell) holder.itemView;
                 int position = holder.getAdapterPosition();
-                if (position == antiRecallEnabledRow) {
-                    checkCell.setChecked(MessagesController.isAntiRecallEnabledGlobally());
-                } else if (position == keepAliveEnabledRow) {
-                    checkCell.setChecked(MessagesController.isKeepAliveEnabled());
-                } else if (position == enableCacheStreamRow) {
+                if (position == enableCacheStreamRow) {
                     checkCell.setChecked(SharedConfig.saveStreamMedia);
                 } else if (position == enableStreamRow) {
                     checkCell.setChecked(SharedConfig.streamMedia);
@@ -943,7 +888,7 @@ public class DataSettingsActivity extends BaseFragment {
         public boolean isRowEnabled(int position) {
             return position == mobileRow || position == roamingRow || position == wifiRow || position == storageUsageRow || position == useLessDataForCallsRow || position == dataUsageRow || position == proxyRow || position == clearDraftsRow ||
                     position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == quickRepliesRow || position == autoplayVideoRow || position == autoplayGifsRow ||
-                    position == storageNumRow || position == saveToGalleryGroupsRow || position == saveToGalleryPeerRow || position == saveToGalleryChannelsRow || position == resetDownloadRow || position == antiRecallEnabledRow || position == keepAliveEnabledRow;
+                    position == storageNumRow || position == saveToGalleryGroupsRow || position == saveToGalleryPeerRow || position == saveToGalleryChannelsRow || position == resetDownloadRow;
         }
 
         @Override
@@ -984,13 +929,13 @@ public class DataSettingsActivity extends BaseFragment {
 
         @Override
         public int getItemViewType(int position) {
-            if (position == mediaDownloadSection2Row || position == usageSection2Row || position == callsSection2Row || position == proxySection2Row || position == autoplaySectionRow || position == clearDraftsSectionRow || position == saveToGalleryDividerRow || position == antiRecallSection2Row) {
+            if (position == mediaDownloadSection2Row || position == usageSection2Row || position == callsSection2Row || position == proxySection2Row || position == autoplaySectionRow || position == clearDraftsSectionRow || position == saveToGalleryDividerRow) {
                 return 0;
-            } else if (position == mediaDownloadSectionRow || position == streamSectionRow || position == callsSectionRow || position == usageSectionRow || position == proxySectionRow || position == autoplayHeaderRow || position == saveToGallerySectionRow || position == antiRecallSectionRow || position == keepAliveSectionRow) {
+            } else if (position == mediaDownloadSectionRow || position == streamSectionRow || position == callsSectionRow || position == usageSectionRow || position == proxySectionRow || position == autoplayHeaderRow || position == saveToGallerySectionRow) {
                 return 2;
-            } else if (position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == autoplayGifsRow || position == autoplayVideoRow || position == antiRecallEnabledRow || position == keepAliveEnabledRow) {
+            } else if (position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == autoplayGifsRow || position == autoplayVideoRow) {
                 return 3;
-            } else if (position == enableAllStreamInfoRow || position == keepAliveInfoRow) {
+            } else if (position == enableAllStreamInfoRow) {
                 return 4;
             } else if (position == mobileRow || position == wifiRow || position == roamingRow || position == saveToGalleryGroupsRow || position == saveToGalleryPeerRow || position == saveToGalleryChannelsRow) {
                 return 5;
