@@ -8802,7 +8802,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
         AndroidUtilities.runOnUIThread(showProxyButtonDelayed = () -> {
             proxyButtonVisible = false;
             showProxyButton(true, true);
-        }, 5000);
+        }, 0);
     }
 
     private void showProxyButton(boolean show, boolean animated) {
