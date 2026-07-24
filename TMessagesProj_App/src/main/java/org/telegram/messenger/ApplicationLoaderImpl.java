@@ -1,10 +1,14 @@
 package org.telegram.messenger;
 
+import android.app.Activity;
 import android.content.Context;
 import android.text.TextUtils;
+import android.view.ViewGroup;
 
 import org.telegram.messenger.regular.BuildConfig;
+import org.telegram.ui.IUpdateLayout;
 import org.telegram.ui.Components.UpdateAppAlertDialog;
+import org.telegram.ui.Components.UpdateLayout;
 
 import java.io.File;
 
@@ -90,5 +94,11 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
             FileLog.e(e);
         }
         return true;
+    }
+
+    @Override
+    public IUpdateLayout takeUpdateLayout(Activity activity, ViewGroup sideMenuContainer) {
+        if (!isCustomUpdate()) return null;
+        return new UpdateLayout(activity, sideMenuContainer);
     }
 }
