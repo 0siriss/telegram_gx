@@ -2513,7 +2513,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
             flagSecure = null;
         }
         if (layout != null && layout.getParentActivity() != null) {
-            flagSecure = new FlagSecureReason(layout.getParentActivity().getWindow(), () -> currentEncryptedChat != null || isPeerNoForwards());
+            flagSecure = new FlagSecureReason(layout.getParentActivity().getWindow(), () -> !MessagesController.isAllowScreenshotsEnabled() && (currentEncryptedChat != null || isPeerNoForwards()));
         }
     }
 

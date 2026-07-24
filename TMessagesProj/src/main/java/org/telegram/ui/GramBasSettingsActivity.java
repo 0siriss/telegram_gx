@@ -36,6 +36,9 @@ public class GramBasSettingsActivity extends BaseFragment {
 
     private static final int ID_ANTI_RECALL = 1;
     private static final int ID_KEEP_ALIVE = 2;
+    private static final int ID_KEEP_EPHEMERAL = 3;
+    private static final int ID_ALLOW_SCREENSHOTS = 4;
+    private static final int ID_MUTE_SCREENSHOT_PING = 5;
 
     @Override
     public View createView(Context context) {
@@ -65,6 +68,9 @@ public class GramBasSettingsActivity extends BaseFragment {
     private void fillItems(ArrayList<UItem> items, UniversalAdapter adapter) {
         items.add(UItem.asHeader("Приватность"));
         items.add(UItem.asCheck(ID_ANTI_RECALL, "Показывать удалённые сообщения").setChecked(MessagesController.isAntiRecallEnabledGlobally()));
+        items.add(UItem.asCheck(ID_KEEP_EPHEMERAL, "Сохранять самоуничтожающиеся медиа").setChecked(MessagesController.isKeepEphemeralEnabled()));
+        items.add(UItem.asCheck(ID_ALLOW_SCREENSHOTS, "Разрешать скриншоты").setChecked(MessagesController.isAllowScreenshotsEnabled()));
+        items.add(UItem.asCheck(ID_MUTE_SCREENSHOT_PING, "Не сообщать о скриншоте (секретные чаты)").setChecked(MessagesController.isMuteScreenshotPingEnabled()));
         items.add(UItem.asShadow(null));
 
         items.add(UItem.asHeader("Соединение"));
@@ -76,6 +82,24 @@ public class GramBasSettingsActivity extends BaseFragment {
         if (item.id == ID_ANTI_RECALL) {
             boolean enabled = !MessagesController.isAntiRecallEnabledGlobally();
             MessagesController.setAntiRecallEnabledGlobally(enabled);
+            if (view instanceof TextCheckCell) {
+                ((TextCheckCell) view).setChecked(enabled);
+            }
+        } else if (item.id == ID_KEEP_EPHEMERAL) {
+            boolean enabled = !MessagesController.isKeepEphemeralEnabled();
+            MessagesController.setKeepEphemeralEnabled(enabled);
+            if (view instanceof TextCheckCell) {
+                ((TextCheckCell) view).setChecked(enabled);
+            }
+        } else if (item.id == ID_ALLOW_SCREENSHOTS) {
+            boolean enabled = !MessagesController.isAllowScreenshotsEnabled();
+            MessagesController.setAllowScreenshotsEnabled(enabled);
+            if (view instanceof TextCheckCell) {
+                ((TextCheckCell) view).setChecked(enabled);
+            }
+        } else if (item.id == ID_MUTE_SCREENSHOT_PING) {
+            boolean enabled = !MessagesController.isMuteScreenshotPingEnabled();
+            MessagesController.setMuteScreenshotPingEnabled(enabled);
             if (view instanceof TextCheckCell) {
                 ((TextCheckCell) view).setChecked(enabled);
             }
