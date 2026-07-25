@@ -1002,6 +1002,7 @@ public class ConnectionsManager extends BaseController {
     public static native void native_setTlsFragmentConfig(boolean enabled, int minBytes, int maxBytes);
     public static native void native_setTlsFingerprintProfile(int profile, int rotationIntervalSec);
     public static native void native_setTlsEchExtensionId(int extensionId);
+    public static native void native_setDpiShapingConfig(int recordSizingMode, int timingMode, int startupCoverMode);
 
     public static void setTlsFragmentConfig(boolean enabled, int minBytes, int maxBytes) {
         native_setTlsFragmentConfig(enabled, minBytes, maxBytes);
@@ -1009,6 +1010,12 @@ public class ConnectionsManager extends BaseController {
 
     public static void setTlsFingerprintProfile(int profile, int rotationIntervalSec) {
         native_setTlsFingerprintProfile(profile, rotationIntervalSec);
+    }
+
+    // recordSizingMode: 0=Off,1=Conservative,2=Varied. timingMode: 0=Off,1=Gentle,2=Balanced.
+    // startupCoverMode: 0=Off,1=Soft,2=Strict. All three only affect FakeTLS (MTProto) proxies.
+    public static void setDpiShapingConfig(int recordSizingMode, int timingMode, int startupCoverMode) {
+        native_setDpiShapingConfig(recordSizingMode, timingMode, startupCoverMode);
     }
 
     public static void setTlsEchExtensionId(int extensionId) {

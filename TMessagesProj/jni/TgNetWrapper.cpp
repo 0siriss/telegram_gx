@@ -23,6 +23,10 @@ std::atomic<int>     gTlsRotationIntervalSec{0};
 std::atomic<int>     gTlsCurrentRandomProfile{0};
 std::atomic<int64_t> gTlsLastRotationSec{0};
 std::atomic<int>     gTlsEchExtensionId{0xfe0d};
+// DPI shaping — accessed by ConnectionSocket.cpp (FakeTLS app-data path only)
+std::atomic<int>     gDpiRecordSizingMode{0};  // 0=Off,1=Conservative,2=Varied
+std::atomic<int>     gDpiTimingMode{0};        // 0=Off,1=Gentle,2=Balanced
+std::atomic<int>     gDpiStartupCoverMode{0};  // 0=Off,1=Soft,2=Strict
 
 JavaVM *java;
 
@@ -250,6 +254,12 @@ void setTlsFingerprintProfile(JNIEnv *env, jclass c, jint profile, jint rotation
 
 void setTlsEchExtensionId(JNIEnv *env, jclass c, jint extensionId) {
     gTlsEchExtensionId = (int) extensionId & 0xffff;
+}
+
+void setDpiShapingConfig(JNIEnv *env, jclass c, jint recordSizingMode, jint timingMode, jint startupCoverMode) {
+    gDpiRecordSizingMode = (int) recordSizingMode;
+    gDpiTimingMode = (int) timingMode;
+    gDpiStartupCoverMode = (int) startupCoverMode;
 }
 
 void setProxySettings(JNIEnv *env, jclass c, jint instanceNum, jstring address, jint port, jstring username, jstring password, jstring secret) {
@@ -569,6 +579,7 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
         {"native_setTlsFragmentConfig", "(ZII)V", (void *) setTlsFragmentConfig},
         {"native_setTlsFingerprintProfile", "(II)V", (void *) setTlsFingerprintProfile},
         {"native_setTlsEchExtensionId", "(I)V", (void *) setTlsEchExtensionId},
+        {"native_setDpiShapingConfig", "(III)V", (void *) setDpiShapingConfig},
         {"native_getConnectionState", "(I)I", (void *) getConnectionState},
         {"native_setUserId", "(IJ)V", (void *) setUserId},
         {"native_init", "(IIIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IJZZZII)V", (void *) init},
