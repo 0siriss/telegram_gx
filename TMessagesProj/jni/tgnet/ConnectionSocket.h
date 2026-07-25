@@ -18,6 +18,7 @@ class ConnectionsManager;
 class ByteStream;
 class EventObject;
 class ByteArray;
+class Timer;
 
 class ConnectionSocket {
 
@@ -45,6 +46,9 @@ protected:
     virtual void onDisconnected(int32_t reason, int32_t error) = 0;
     virtual void onConnected() = 0;
     virtual bool hasPendingRequests() = 0;
+    // Bulk transfer connections (upload/download) must not get DPI timing jitter —
+    // it turns per-frame delay into a serial throughput cap on large files/voice messages.
+    virtual bool isBulkTransferConnection() { return false; }
 
     std::string overrideProxyUser = "";
     std::string overrideProxyPassword = "";
@@ -81,6 +85,19 @@ private:
     int8_t tlsState = 0;
 
     uint8_t proxyAuthState;
+
+    // DPI shaping state — only meaningful while tlsState != 0 (FakeTLS app-data path)
+    int64_t startupCoverStartTime = 0;
+    uint32_t startupCoverFrameCount = 0;
+    bool startupCoverEndedLogged = false;
+    bool firstAppDataFrameSent = false;
+    int64_t nextAppDataWriteTime = 0;
+    Timer *dpiTimingTimer = nullptr;
+
+    bool dpiStartupCoverActive();
+    uint32_t nextAppDataPayloadSize(uint32_t remaining);
+    uint32_t dpiInterPacketDelayMs();
+    void onDpiTimingTimerFired();
 
     int32_t checkSocketError(int32_t *error);
     void closeSocket(int32_t reason, int32_t error);

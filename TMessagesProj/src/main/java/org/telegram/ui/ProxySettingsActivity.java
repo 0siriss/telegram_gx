@@ -147,6 +147,33 @@ public class ProxySettingsActivity extends BaseFragment {
     private static final int[] ECH_ID_PRESET_VALUES = {0xfe0d, 0xfe02};
     private static final String[] ECH_ID_PRESET_NAMES = {"fe0d (default)", "fe02 (legacy)", "Custom…"};
 
+    // DPI shaping UI (record sizing / startup cover / timing jitter) — FakeTLS only
+    private TextSettingsCell dpiPresetCell;
+    private TextSettingsCell recordSizingCell;
+    private TextSettingsCell startupCoverCell;
+    private TextSettingsCell timingJitterCell;
+    private int currentRecordSizingMode = 0;
+    private int currentStartupCoverMode = 0;
+    private int currentTimingMode = 0;
+    private static final String[] RECORD_SIZING_NAMES = {"Off", "Conservative", "Varied"};
+    private static final String[] STARTUP_COVER_NAMES = {"Off", "Soft", "Strict"};
+    private static final String[] TIMING_JITTER_NAMES = {"Off", "Gentle", "Balanced (adds latency)"};
+    private static final String[] DPI_PRESET_NAMES = {"Off", "Balanced", "Maximum stealth"};
+
+    private void updateDpiPresetLabel() {
+        if (dpiPresetCell == null) return;
+        String label;
+        if (currentRecordSizingMode == 0 && currentStartupCoverMode == 0 && currentTimingMode == 0) {
+            label = DPI_PRESET_NAMES[0];
+        } else if (currentRecordSizingMode == 1 && currentStartupCoverMode == 1 && currentTimingMode == 1) {
+            label = DPI_PRESET_NAMES[1];
+        } else if (currentRecordSizingMode == 2 && currentStartupCoverMode == 2 && currentTimingMode == 2) {
+            label = DPI_PRESET_NAMES[2];
+        } else {
+            label = "Custom";
+        }
+        dpiPresetCell.setTextAndValue("Preset", label, false);
+    }
 
     private boolean addingNewProxy;
 
@@ -339,6 +366,11 @@ public class ProxySettingsActivity extends BaseFragment {
                         editor.putInt("tls_fragment_max", fragMax);
                         ConnectionsManager.setTlsFragmentConfig(fragEnabled, fragMin, fragMax);
                     }
+                    // Save and apply DPI shaping (record sizing / startup cover / timing jitter)
+                    editor.putInt("dpi_record_sizing_mode", currentRecordSizingMode);
+                    editor.putInt("dpi_startup_cover_mode", currentStartupCoverMode);
+                    editor.putInt("dpi_timing_mode", currentTimingMode);
+                    ConnectionsManager.setDpiShapingConfig(currentRecordSizingMode, currentTimingMode, currentStartupCoverMode);
                     editor.commit();
 
                     NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
@@ -552,9 +584,13 @@ public class ProxySettingsActivity extends BaseFragment {
         currentFingerprintProfile = fragPrefs.getInt("tls_fingerprint_profile", 0);
         currentRotationInterval = fragPrefs.getInt("tls_rotation_interval", 0);
         currentEchId = fragPrefs.getInt("tls_ech_extension_id", DEFAULT_ECH_EXTENSION_ID);
+        currentRecordSizingMode = fragPrefs.getInt("dpi_record_sizing_mode", 0);
+        currentStartupCoverMode = fragPrefs.getInt("dpi_startup_cover_mode", 0);
+        currentTimingMode = fragPrefs.getInt("dpi_timing_mode", 0);
         ConnectionsManager.setTlsFragmentConfig(savedFragEnabled, savedFragMin, savedFragMax);
         ConnectionsManager.setTlsFingerprintProfile(currentFingerprintProfile, currentRotationInterval);
         ConnectionsManager.setTlsEchExtensionId(currentEchId);
+        ConnectionsManager.setDpiShapingConfig(currentRecordSizingMode, currentTimingMode, currentStartupCoverMode);
 
         fragmentContainer = new LinearLayout(context);
         fragmentContainer.setOrientation(LinearLayout.VERTICAL);
@@ -698,6 +734,92 @@ public class ProxySettingsActivity extends BaseFragment {
         fragmentMaxField.setPadding(AndroidUtilities.dp(LocaleController.isRTL ? 0 : 21), 0, AndroidUtilities.dp(LocaleController.isRTL ? 21 : 0), 0);
         maxContainer.addView(fragmentMaxField, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 64, Gravity.CENTER_VERTICAL));
         fragmentContainer.addView(maxContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 64));
+
+        // Advanced DPI bypass section
+        HeaderCell dpiHeader = new HeaderCell(context);
+        dpiHeader.setText("Advanced DPI bypass");
+        fragmentContainer.addView(dpiHeader, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+
+        dpiPresetCell = new TextSettingsCell(context);
+        dpiPresetCell.setBackground(Theme.getSelectorDrawable(true));
+        dpiPresetCell.setOnClickListener(v -> {
+            if (getParentActivity() == null) return;
+            int selected = -1;
+            if (currentRecordSizingMode == 0 && currentStartupCoverMode == 0 && currentTimingMode == 0) selected = 0;
+            else if (currentRecordSizingMode == 1 && currentStartupCoverMode == 1 && currentTimingMode == 1) selected = 1;
+            else if (currentRecordSizingMode == 2 && currentStartupCoverMode == 2 && currentTimingMode == 2) selected = 2;
+            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
+            builder.setTitle("Preset");
+            builder.setSingleChoiceItems(DPI_PRESET_NAMES, selected, (dialog, which) -> {
+                dialog.dismiss();
+                currentRecordSizingMode = which;
+                currentStartupCoverMode = which;
+                currentTimingMode = which;
+                recordSizingCell.setTextAndValue("Record sizing", RECORD_SIZING_NAMES[currentRecordSizingMode], false);
+                startupCoverCell.setTextAndValue("Startup cover", STARTUP_COVER_NAMES[currentStartupCoverMode], false);
+                timingJitterCell.setTextAndValue("Timing jitter", TIMING_JITTER_NAMES[currentTimingMode], false);
+                updateDpiPresetLabel();
+            });
+            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
+            showDialog(builder.create());
+        });
+        fragmentContainer.addView(dpiPresetCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+        updateDpiPresetLabel();
+
+        recordSizingCell = new TextSettingsCell(context);
+        recordSizingCell.setBackground(Theme.getSelectorDrawable(true));
+        recordSizingCell.setTextAndValue("Record sizing", RECORD_SIZING_NAMES[currentRecordSizingMode], false);
+        recordSizingCell.setOnClickListener(v -> {
+            if (getParentActivity() == null) return;
+            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
+            builder.setTitle("Record sizing");
+            builder.setSingleChoiceItems(RECORD_SIZING_NAMES, currentRecordSizingMode, (dialog, which) -> {
+                dialog.dismiss();
+                currentRecordSizingMode = which;
+                recordSizingCell.setTextAndValue("Record sizing", RECORD_SIZING_NAMES[which], false);
+                updateDpiPresetLabel();
+            });
+            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
+            showDialog(builder.create());
+        });
+        fragmentContainer.addView(recordSizingCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+
+        startupCoverCell = new TextSettingsCell(context);
+        startupCoverCell.setBackground(Theme.getSelectorDrawable(true));
+        startupCoverCell.setTextAndValue("Startup cover", STARTUP_COVER_NAMES[currentStartupCoverMode], false);
+        startupCoverCell.setOnClickListener(v -> {
+            if (getParentActivity() == null) return;
+            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
+            builder.setTitle("Startup cover");
+            builder.setSingleChoiceItems(STARTUP_COVER_NAMES, currentStartupCoverMode, (dialog, which) -> {
+                dialog.dismiss();
+                currentStartupCoverMode = which;
+                startupCoverCell.setTextAndValue("Startup cover", STARTUP_COVER_NAMES[which], false);
+                updateDpiPresetLabel();
+            });
+            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
+            showDialog(builder.create());
+        });
+        fragmentContainer.addView(startupCoverCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+
+        timingJitterCell = new TextSettingsCell(context);
+        timingJitterCell.setBackground(Theme.getSelectorDrawable(true));
+        timingJitterCell.setTextAndValue("Timing jitter", TIMING_JITTER_NAMES[currentTimingMode], false);
+        timingJitterCell.setOnClickListener(v -> {
+            if (getParentActivity() == null) return;
+            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
+            builder.setTitle("Timing jitter");
+            builder.setMessage("Adds a small delay between outgoing packets to mimic browser traffic. Trades some speed for stealth.");
+            builder.setSingleChoiceItems(TIMING_JITTER_NAMES, currentTimingMode, (dialog, which) -> {
+                dialog.dismiss();
+                currentTimingMode = which;
+                timingJitterCell.setTextAndValue("Timing jitter", TIMING_JITTER_NAMES[which], false);
+                updateDpiPresetLabel();
+            });
+            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
+            showDialog(builder.create());
+        });
+        fragmentContainer.addView(timingJitterCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
 
         // Divider
         ShadowSectionCell fragDivider = new ShadowSectionCell(context);

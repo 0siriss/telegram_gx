@@ -50,6 +50,10 @@ extern std::atomic<int>  gTlsRotationIntervalSec; // 0=per-connection, 30-240=ti
 extern std::atomic<int>  gTlsCurrentRandomProfile;
 extern std::atomic<int64_t> gTlsLastRotationSec;
 extern std::atomic<int>  gTlsEchExtensionId; // default 0xfe0d
+// DPI shaping — FakeTLS app-data path only (tlsState != 0)
+extern std::atomic<int>  gDpiRecordSizingMode; // 0=Off,1=Conservative,2=Varied
+extern std::atomic<int>  gDpiTimingMode;       // 0=Off,1=Gentle,2=Balanced
+extern std::atomic<int>  gDpiStartupCoverMode; // 0=Off,1=Soft,2=Strict
 
 static BIGNUM *get_y2(BIGNUM *x, const BIGNUM *mod, BN_CTX *big_num_context) {
     // returns y^2 = x^3 + 486662 * x^2 + x
@@ -759,6 +763,7 @@ ConnectionSocket::ConnectionSocket(int32_t instance) {
     outgoingByteStream = new ByteStream();
     lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
     eventObject = new EventObject(this, EventObjectTypeConnection);
+    dpiTimingTimer = new Timer(instanceNum, [this] { onDpiTimingTimerFired(); });
 }
 
 ConnectionSocket::~ConnectionSocket() {
@@ -777,6 +782,10 @@ ConnectionSocket::~ConnectionSocket() {
     if (tlsBuffer != nullptr) {
         tlsBuffer->reuse();
         tlsBuffer = nullptr;
+    }
+    if (dpiTimingTimer != nullptr) {
+        delete dpiTimingTimer;
+        dpiTimingTimer = nullptr;
     }
 }
 
@@ -1083,6 +1092,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
                             tlsState = 1;
                             proxyAuthState = 0;
                             bytesRead = 0;
+                            startupCoverStartTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
+                            startupCoverFrameCount = 0;
+                            startupCoverEndedLogged = false;
+                            firstAppDataFrameSent = false;
+                            nextAppDataWriteTime = 0;
+                            if (gDpiStartupCoverMode.load() != 0 && LOGS_ENABLED) {
+                                DEBUG_D("connection(%p) dpi_shape startup_cover_start mode=%d record_sizing=%d timing=%d", this, gDpiStartupCoverMode.load(), gDpiRecordSizingMode.load(), gDpiTimingMode.load());
+                            }
                             adjustWriteOp();
                         } else {
                             std::memcpy(tempBuffer->bytes + bytesRead, buffer->bytes(), (size_t) readCount);
@@ -1333,9 +1350,20 @@ void ConnectionSocket::onEvent(uint32_t events) {
                 if (remaining) {
                     ssize_t sentLength;
                     if (tlsState != 0) {
-                        if (remaining > 2878) {
-                            remaining = 2878;
-                        }
+                        int64_t dpiNow = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
+                        if (nextAppDataWriteTime != 0 && dpiNow < nextAppDataWriteTime) {
+                            // Timing jitter is holding this connection's next app-data frame;
+                            // don't send early, let dpiTimingTimer wake us via adjustWriteOp().
+                            if (LOGS_ENABLED) {
+                                DEBUG_D("connection(%p) dpi_shape timing_delay remaining=%lld", this, (long long) (nextAppDataWriteTime - dpiNow));
+                            }
+                            if (dpiTimingTimer != nullptr) {
+                                dpiTimingTimer->setTimeout((uint32_t) std::min<int64_t>(250, nextAppDataWriteTime - dpiNow), false);
+                                dpiTimingTimer->start();
+                            }
+                        } else {
+                        nextAppDataWriteTime = 0;
+                        remaining = nextAppDataPayloadSize(remaining);
                         size_t headersSize = 0;
                         if (tlsState == 1) {
                             static std::string header1 = std::string("\x14\x03\x03\x00\x01\x01", 6);
@@ -1362,7 +1390,21 @@ void ConnectionSocket::onEvent(uint32_t events) {
                                 ConnectionsManager::getInstance(instanceNum).delegate->onBytesSent((int32_t) sentLength, currentNetworkType, instanceNum);
                             }
                             outgoingByteStream->discard((uint32_t) (sentLength - headersSize));
+                            firstAppDataFrameSent = true;
+                            if (dpiStartupCoverActive()) {
+                                startupCoverFrameCount++;
+                            }
+                            if (outgoingByteStream->hasData()) {
+                                uint32_t dpiDelay = dpiInterPacketDelayMs();
+                                if (dpiDelay > 0) {
+                                    nextAppDataWriteTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis() + dpiDelay;
+                                    if (LOGS_ENABLED) {
+                                        DEBUG_D("connection(%p) dpi_shape timing_next delay=%u", this, dpiDelay);
+                                    }
+                                }
+                            }
                             adjustWriteOp();
+                        }
                         }
                     } else {
                         if ((sentLength = send(socketFd, buffer->bytes(), remaining, 0)) < 0) {
@@ -1405,6 +1447,78 @@ void ConnectionSocket::writeBuffer(uint8_t *data, uint32_t size) {
 
 void ConnectionSocket::writeBuffer(NativeByteBuffer *buffer) {
     outgoingByteStream->append(buffer);
+    adjustWriteOp();
+}
+
+bool ConnectionSocket::dpiStartupCoverActive() {
+    int mode = gDpiStartupCoverMode.load();
+    if (mode == 0 || startupCoverStartTime == 0) {
+        return false;
+    }
+    int64_t windowMs = mode == 2 ? 20000 : 12000;
+    uint32_t maxFrames = mode == 2 ? 14 : 8;
+    int64_t now = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
+    if (now - startupCoverStartTime > windowMs || startupCoverFrameCount >= maxFrames) {
+        if (!startupCoverEndedLogged && LOGS_ENABLED) {
+            DEBUG_D("connection(%p) dpi_shape startup_cover_end mode=%d elapsed=%lld frames=%u", this, mode, (long long) (now - startupCoverStartTime), startupCoverFrameCount);
+        }
+        startupCoverEndedLogged = true;
+        startupCoverStartTime = 0;
+        return false;
+    }
+    return true;
+}
+
+uint32_t ConnectionSocket::nextAppDataPayloadSize(uint32_t remaining) {
+    int mode = gDpiRecordSizingMode.load();
+    if (dpiStartupCoverActive()) {
+        // Startup cover forces at least a conservative shape, strict escalates to varied.
+        int coverMode = gDpiStartupCoverMode.load();
+        mode = coverMode == 2 ? 2 : (mode == 0 ? 1 : mode);
+    }
+    uint32_t cap = 2878;
+    if (mode == 1) {
+        static const uint32_t caps[] = {1440, 1728, 2016, 2304, 2580, 2878};
+        cap = caps[rand() % (sizeof(caps) / sizeof(caps[0]))];
+    } else if (mode == 2) {
+        uint32_t minCap = firstAppDataFrameSent ? 768 : 1200;
+        uint32_t maxCap = firstAppDataFrameSent ? 2878 : 2016;
+        cap = minCap + (rand() % (maxCap - minCap + 1));
+    }
+    if (cap > 2878) cap = 2878;
+    if (cap < 256) cap = 256;
+    if (remaining < cap) cap = remaining;
+    // Skipped for bulk transfers (upload/download): would be thousands of lines per file
+    // for a knob that, unlike timing jitter, doesn't hurt their throughput anyway.
+    if (mode != 0 && !isBulkTransferConnection() && LOGS_ENABLED) {
+        DEBUG_D("connection(%p) dpi_shape record_sizing mode=%d cap=%u remaining=%u first_sent=%d", this, mode, cap, remaining, firstAppDataFrameSent ? 1 : 0);
+    }
+    return cap;
+}
+
+uint32_t ConnectionSocket::dpiInterPacketDelayMs() {
+    if (isBulkTransferConnection()) {
+        // Upload/download connections carry large payloads (voice, media, files) as a
+        // long back-to-back frame sequence; per-frame jitter here isn't stealth, it's a
+        // serial throughput cap (thousands of frames * tens of ms = a very slow send).
+        return 0;
+    }
+    int mode = gDpiTimingMode.load();
+    if (dpiStartupCoverActive()) {
+        int coverMode = gDpiStartupCoverMode.load();
+        mode = coverMode == 2 ? 2 : (mode == 0 ? 1 : mode);
+    }
+    if (mode == 2) {
+        return 20 + (rand() % 28) + (rand() % 54);
+    }
+    if (mode == 1) {
+        return 8 + (rand() % 14) + (rand() % 25);
+    }
+    return 0;
+}
+
+void ConnectionSocket::onDpiTimingTimerFired() {
+    nextAppDataWriteTime = 0;
     adjustWriteOp();
 }
 

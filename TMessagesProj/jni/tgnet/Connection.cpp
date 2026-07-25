@@ -744,6 +744,10 @@ bool Connection::hasPendingRequests() {
     return ConnectionsManager::getInstance(currentDatacenter->instanceNum).hasPendingRequestsForConnection(this);
 }
 
+bool Connection::isBulkTransferConnection() {
+    return connectionType == ConnectionTypeUpload || connectionType == ConnectionTypeDownload;
+}
+
 Datacenter *Connection::getDatacenter() {
     return currentDatacenter;
 }
