@@ -21619,6 +21619,19 @@ public class MessagesController extends BaseController implements NotificationCe
         getGlobalMainSettings().edit().putBoolean("mute_screenshot_ping_enabled", enabled).commit();
     }
 
+    // TGX: proactively download incoming voice messages as soon as they arrive (any open chat
+    // or not), instead of only starting the download when the user opens the chat. Off by
+    // default -- stock autodownload treats voice as AUTODOWNLOAD_TYPE_AUDIO but that type is
+    // excluded from the default preset masks, so this is a deliberate opt-in, independent of
+    // the general photo/video/document autodownload settings.
+    public static boolean isVoicePreloadEnabled() {
+        return getGlobalMainSettings().getBoolean("voice_preload_enabled", false);
+    }
+
+    public static void setVoicePreloadEnabled(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("voice_preload_enabled", enabled).commit();
+    }
+
     // TGX: cloud view-once / TTL media (TL_message with media.ttl_seconds != 0) this client
     // deliberately keeps. Deliberately does NOT cover secret-chat (TL_message_secret) TTL --
     // that destruction is a core part of the secret-chat guarantee shown to the other party, not

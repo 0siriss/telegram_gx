@@ -39,6 +39,7 @@ public class GramBasSettingsActivity extends BaseFragment {
     private static final int ID_KEEP_EPHEMERAL = 3;
     private static final int ID_ALLOW_SCREENSHOTS = 4;
     private static final int ID_MUTE_SCREENSHOT_PING = 5;
+    private static final int ID_VOICE_PRELOAD = 6;
 
     @Override
     public View createView(Context context) {
@@ -73,6 +74,10 @@ public class GramBasSettingsActivity extends BaseFragment {
         items.add(UItem.asCheck(ID_MUTE_SCREENSHOT_PING, "Не сообщать о скриншоте (секретные чаты)").setChecked(MessagesController.isMuteScreenshotPingEnabled()));
         items.add(UItem.asShadow(null));
 
+        items.add(UItem.asHeader("Медиа"));
+        items.add(UItem.asCheck(ID_VOICE_PRELOAD, "Загружать входящие голосовые в фоне").setChecked(MessagesController.isVoicePreloadEnabled()));
+        items.add(UItem.asShadow("Голосовые сообщения начинают загружаться сразу по получении, не дожидаясь открытия диалога."));
+
         items.add(UItem.asHeader("Соединение"));
         items.add(UItem.asCheck(ID_KEEP_ALIVE, "Держать соединение в фоне").setChecked(MessagesController.isKeepAliveEnabled()));
         items.add(UItem.asShadow("Настоящие push-уведомления недоступны для этой сборки (FCM не работает с самоподписанным APK). Держит соединение открытым, пока приложение свёрнуто, чтобы сообщения приходили без задержки — расходует больше заряда батареи. Рекомендуется также разрешить автозапуск и отключить оптимизацию батареи для приложения в настройках системы."));
@@ -100,6 +105,12 @@ public class GramBasSettingsActivity extends BaseFragment {
         } else if (item.id == ID_MUTE_SCREENSHOT_PING) {
             boolean enabled = !MessagesController.isMuteScreenshotPingEnabled();
             MessagesController.setMuteScreenshotPingEnabled(enabled);
+            if (view instanceof TextCheckCell) {
+                ((TextCheckCell) view).setChecked(enabled);
+            }
+        } else if (item.id == ID_VOICE_PRELOAD) {
+            boolean enabled = !MessagesController.isVoicePreloadEnabled();
+            MessagesController.setVoicePreloadEnabled(enabled);
             if (view instanceof TextCheckCell) {
                 ((TextCheckCell) view).setChecked(enabled);
             }

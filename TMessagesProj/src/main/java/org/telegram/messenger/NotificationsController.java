@@ -1051,6 +1051,26 @@ public class NotificationsController extends BaseController implements Notificat
             return;
         }
 
+        // TGX: preload incoming voice messages in the background as soon as they arrive,
+        // independent of whether the chat is open (this method already runs for every genuinely
+        // new message regardless of UI state) and independent of the general autodownload
+        // settings, which don't cover voice by default. One-time (view-once) voice is skipped --
+        // the file doesn't exist server-side until the reveal RPC, so there's nothing to fetch.
+        if (MessagesController.isVoicePreloadEnabled()) {
+            for (int i = 0; i < messageObjects.size(); i++) {
+                MessageObject messageObject = messageObjects.get(i);
+                if (messageObject == null || messageObject.messageOwner == null || messageObject.isOut() || messageObject.isVoiceOnce()) {
+                    continue;
+                }
+                if (MessageObject.isVoiceMessage(messageObject.messageOwner)) {
+                    TLRPC.Document document = messageObject.getDocument();
+                    if (document != null) {
+                        getFileLoader().loadFile(document, messageObject, FileLoader.PRIORITY_LOW, 0);
+                    }
+                }
+            }
+        }
+
         ArrayList<MessageObject> popupArrayAdd = new ArrayList<>(0);
         notificationsQueue.postRunnable(() -> {
             boolean added = false;
