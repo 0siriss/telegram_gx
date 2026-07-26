@@ -1,8 +1,84 @@
+diff --git a/TMessagesProj/build.gradle b/TMessagesProj/build.gradle
+index 61a653057..aea0a38a3 100644
+--- a/TMessagesProj/build.gradle
++++ b/TMessagesProj/build.gradle
+@@ -2,6 +2,23 @@ import org.gradle.nativeplatform.platform.internal.DefaultNativePlatform
+ 
+ apply plugin: 'com.android.library'
+ 
++def getForkVersionTag() {
++    def envTag = System.getenv("FORK_VERSION_TAG")
++    if (envTag != null && !envTag.isEmpty()) {
++        return envTag
++    }
++    try {
++        def stdout = new ByteArrayOutputStream()
++        exec {
++            commandLine 'git', 'describe', '--tags', '--abbrev=0'
++            standardOutput = stdout
++        }
++        return stdout.toString().trim()
++    } catch (Exception ignored) {
++        return "v0.0"
++    }
++}
++
+ repositories {
+     mavenCentral()
+     google()
+@@ -134,6 +151,7 @@ android {
+             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
+             ndk.debugSymbolLevel = 'FULL'
+             buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
++            buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
+             buildConfigField "String", "APP_CENTER_HASH", "\"\""
+             buildConfigField "String", "BETA_URL", "\"" + getProps("BETA_PRIVATE_URL") + "\""
+             buildConfigField "boolean", "DEBUG_VERSION", "true"
+@@ -150,6 +168,7 @@ android {
+             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
+             ndk.debugSymbolLevel = 'FULL'
+             buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
++            buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
+             buildConfigField "String", "APP_CENTER_HASH", "\"" + getProps("APP_CENTER_HASH_PRIVATE") + "\""
+             buildConfigField "String", "BETA_URL", "\"" + getProps("BETA_PRIVATE_URL") + "\""
+             buildConfigField "boolean", "DEBUG_VERSION", "true"
+@@ -166,6 +185,7 @@ android {
+             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
+             ndk.debugSymbolLevel = 'FULL'
+             buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
++            buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
+             buildConfigField "String", "APP_CENTER_HASH", "\"" + getProps("APP_CENTER_HASH_PUBLIC") + "\""
+             buildConfigField "String", "BETA_URL", "\"" + getProps("BETA_PUBLIC_URL") + "\""
+             buildConfigField "boolean", "DEBUG_VERSION", "true"
+@@ -182,6 +202,7 @@ android {
+             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
+             ndk.debugSymbolLevel = 'FULL'
+             buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
++            buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
+             buildConfigField "String", "APP_CENTER_HASH", "\"" + getProps("APP_CENTER_HASH_HARDCORE") + "\""
+             buildConfigField "String", "BETA_URL", "\"" + getProps("BETA_HARDCORE_URL") + "\""
+             buildConfigField "boolean", "DEBUG_VERSION", "true"
+@@ -198,6 +219,7 @@ android {
+             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro'
+             ndk.debugSymbolLevel = 'FULL'
+             buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
++            buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
+             buildConfigField "String", "APP_CENTER_HASH", "\"\""
+             buildConfigField "String", "BETA_URL", "\"\""
+             buildConfigField "boolean", "DEBUG_VERSION", "false"
+@@ -215,6 +237,7 @@ android {
+             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro'
+             ndk.debugSymbolLevel = 'FULL'
+             buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
++            buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
+             buildConfigField "String", "APP_CENTER_HASH", "\"\""
+             buildConfigField "String", "BETA_URL", "\"\""
+             buildConfigField "boolean", "DEBUG_VERSION", "false"
 diff --git a/TMessagesProj/jni/TgNetWrapper.cpp b/TMessagesProj/jni/TgNetWrapper.cpp
-index 0f8bc556d..264b632e0 100644
+index 0f8bc556d..1101d8040 100644
 --- a/TMessagesProj/jni/TgNetWrapper.cpp
 +++ b/TMessagesProj/jni/TgNetWrapper.cpp
-@@ -12,6 +12,17 @@
+@@ -12,6 +12,21 @@
  #include <openssl/bn.h>
  #include <openssl/pem.h>
  #include <openssl/aes.h>
@@ -17,10 +93,14 @@ index 0f8bc556d..264b632e0 100644
 +std::atomic<int>     gTlsCurrentRandomProfile{0};
 +std::atomic<int64_t> gTlsLastRotationSec{0};
 +std::atomic<int>     gTlsEchExtensionId{0xfe0d};
++// DPI shaping — accessed by ConnectionSocket.cpp (FakeTLS app-data path only)
++std::atomic<int>     gDpiRecordSizingMode{0};  // 0=Off,1=Conservative,2=Varied
++std::atomic<int>     gDpiTimingMode{0};        // 0=Off,1=Gentle,2=Balanced
++std::atomic<int>     gDpiStartupCoverMode{0};  // 0=Off,1=Soft,2=Strict
  
  JavaVM *java;
  
-@@ -223,6 +234,24 @@ void applyDatacenterAddress(JNIEnv *env, jclass c, jint instanceNum, jint datace
+@@ -223,6 +238,30 @@ void applyDatacenterAddress(JNIEnv *env, jclass c, jint instanceNum, jint datace
      }
  }
  
@@ -42,21 +122,55 @@ index 0f8bc556d..264b632e0 100644
 +    gTlsEchExtensionId = (int) extensionId & 0xffff;
 +}
 +
++void setDpiShapingConfig(JNIEnv *env, jclass c, jint recordSizingMode, jint timingMode, jint startupCoverMode) {
++    gDpiRecordSizingMode = (int) recordSizingMode;
++    gDpiTimingMode = (int) timingMode;
++    gDpiStartupCoverMode = (int) startupCoverMode;
++}
++
  void setProxySettings(JNIEnv *env, jclass c, jint instanceNum, jstring address, jint port, jstring username, jstring password, jstring secret) {
      const char *addressStr = env->GetStringUTFChars(address, 0);
      const char *usernameStr = env->GetStringUTFChars(username, 0);
-@@ -537,6 +566,9 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
+@@ -537,6 +576,10 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
          {"native_bindRequestToGuid", "(III)V", (void *) bindRequestToGuid},
          {"native_applyDatacenterAddress", "(IILjava/lang/String;I)V", (void *) applyDatacenterAddress},
          {"native_setProxySettings", "(ILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void *) setProxySettings},
 +        {"native_setTlsFragmentConfig", "(ZII)V", (void *) setTlsFragmentConfig},
 +        {"native_setTlsFingerprintProfile", "(II)V", (void *) setTlsFingerprintProfile},
 +        {"native_setTlsEchExtensionId", "(I)V", (void *) setTlsEchExtensionId},
++        {"native_setDpiShapingConfig", "(III)V", (void *) setDpiShapingConfig},
          {"native_getConnectionState", "(I)I", (void *) getConnectionState},
          {"native_setUserId", "(IJ)V", (void *) setUserId},
          {"native_init", "(IIIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IJZZZII)V", (void *) init},
+diff --git a/TMessagesProj/jni/tgnet/Connection.cpp b/TMessagesProj/jni/tgnet/Connection.cpp
+index 3ce0c222d..40dfb3d15 100644
+--- a/TMessagesProj/jni/tgnet/Connection.cpp
++++ b/TMessagesProj/jni/tgnet/Connection.cpp
+@@ -744,6 +744,10 @@ bool Connection::hasPendingRequests() {
+     return ConnectionsManager::getInstance(currentDatacenter->instanceNum).hasPendingRequestsForConnection(this);
+ }
+ 
++bool Connection::isBulkTransferConnection() {
++    return connectionType == ConnectionTypeUpload || connectionType == ConnectionTypeDownload;
++}
++
+ Datacenter *Connection::getDatacenter() {
+     return currentDatacenter;
+ }
+diff --git a/TMessagesProj/jni/tgnet/Connection.h b/TMessagesProj/jni/tgnet/Connection.h
+index 81e4d5edc..8dce10b33 100644
+--- a/TMessagesProj/jni/tgnet/Connection.h
++++ b/TMessagesProj/jni/tgnet/Connection.h
+@@ -49,6 +49,7 @@ protected:
+     void onDisconnected(int32_t reason, int32_t error) override;
+     void onConnected() override;
+     bool hasPendingRequests() override;
++    bool isBulkTransferConnection() override;
+     void reconnect();
+ 
+ private:
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
-index 4605c2fc5..3659ca23c 100644
+index 4605c2fc5..41accaa34 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 @@ -31,6 +31,8 @@
@@ -68,7 +182,7 @@ index 4605c2fc5..3659ca23c 100644
  
  #ifndef EPOLLRDHUP
  #define EPOLLRDHUP 0x2000
-@@ -38,6 +40,17 @@
+@@ -38,6 +40,21 @@
  
  #define MAX_GREASE 8
  
@@ -82,11 +196,15 @@ index 4605c2fc5..3659ca23c 100644
 +extern std::atomic<int>  gTlsCurrentRandomProfile;
 +extern std::atomic<int64_t> gTlsLastRotationSec;
 +extern std::atomic<int>  gTlsEchExtensionId; // default 0xfe0d
++// DPI shaping — FakeTLS app-data path only (tlsState != 0)
++extern std::atomic<int>  gDpiRecordSizingMode; // 0=Off,1=Conservative,2=Varied
++extern std::atomic<int>  gDpiTimingMode;       // 0=Off,1=Gentle,2=Balanced
++extern std::atomic<int>  gDpiStartupCoverMode; // 0=Off,1=Soft,2=Strict
 +
  static BIGNUM *get_y2(BIGNUM *x, const BIGNUM *mod, BN_CTX *big_num_context) {
      // returns y^2 = x^3 + 486662 * x^2 + x
      BIGNUM *y = BN_dup(x);
-@@ -163,7 +176,7 @@ public:
+@@ -163,7 +180,7 @@ public:
  
      struct Op {
          enum class Type {
@@ -95,7 +213,7 @@ index 4605c2fc5..3659ca23c 100644
          };
          Type type;
          size_t length;
-@@ -249,6 +262,12 @@ public:
+@@ -249,6 +266,12 @@ public:
              return res;
          }
  
@@ -108,7 +226,7 @@ index 4605c2fc5..3659ca23c 100644
      };
  
      static const TlsHello &getDefault() {
-@@ -311,12 +330,13 @@ public:
+@@ -311,12 +334,13 @@ public:
                          },
                          { Op::string("\x44\xcd\x00\x05\x00\x03\x02\x68\x32", 9) },
                          {
@@ -126,7 +244,7 @@ index 4605c2fc5..3659ca23c 100644
                              Op::begin_scope(),
                              Op::E(),
                              Op::end_scope(),
-@@ -336,6 +356,284 @@ public:
+@@ -336,6 +360,284 @@ public:
          return result;
      }
  
@@ -411,7 +529,7 @@ index 4605c2fc5..3659ca23c 100644
      uint32_t writeToBuffer(uint8_t *data) {
          uint32_t offset = 0;
          for (auto op : ops) {
-@@ -392,6 +690,13 @@ private:
+@@ -392,6 +694,13 @@ private:
                  offset += 2;
                  break;
              }
@@ -425,7 +543,7 @@ index 4605c2fc5..3659ca23c 100644
              case Type::BeginScope:
                  scopeOffset.push_back(offset);
                  offset += 2;
-@@ -415,11 +720,14 @@ private:
+@@ -415,11 +724,14 @@ private:
              }
              case Type::P: {
                  auto length = offset;
@@ -445,7 +563,41 @@ index 4605c2fc5..3659ca23c 100644
                  }
                  break;
              }
-@@ -920,7 +1228,7 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -451,6 +763,7 @@ ConnectionSocket::ConnectionSocket(int32_t instance) {
+     outgoingByteStream = new ByteStream();
+     lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
+     eventObject = new EventObject(this, EventObjectTypeConnection);
++    dpiTimingTimer = new Timer(instanceNum, [this] { onDpiTimingTimerFired(); });
+ }
+ 
+ ConnectionSocket::~ConnectionSocket() {
+@@ -470,6 +783,10 @@ ConnectionSocket::~ConnectionSocket() {
+         tlsBuffer->reuse();
+         tlsBuffer = nullptr;
+     }
++    if (dpiTimingTimer != nullptr) {
++        delete dpiTimingTimer;
++        dpiTimingTimer = nullptr;
++    }
+ }
+ 
+ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::string secret, bool ipv6, int32_t networkType) {
+@@ -775,6 +1092,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
+                             tlsState = 1;
+                             proxyAuthState = 0;
+                             bytesRead = 0;
++                            startupCoverStartTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
++                            startupCoverFrameCount = 0;
++                            startupCoverEndedLogged = false;
++                            firstAppDataFrameSent = false;
++                            nextAppDataWriteTime = 0;
++                            if (gDpiStartupCoverMode.load() != 0 && LOGS_ENABLED) {
++                                DEBUG_D("connection(%p) dpi_shape startup_cover_start mode=%d record_sizing=%d timing=%d", this, gDpiStartupCoverMode.load(), gDpiRecordSizingMode.load(), gDpiTimingMode.load());
++                            }
+                             adjustWriteOp();
+                         } else {
+                             std::memcpy(tempBuffer->bytes + bytesRead, buffer->bytes(), (size_t) readCount);
+@@ -920,7 +1245,7 @@ void ConnectionSocket::onEvent(uint32_t events) {
                          lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
                          tlsHashMismatch = false;
                          proxyAuthState = 11;
@@ -454,7 +606,7 @@ index 4605c2fc5..3659ca23c 100644
                          hello.setDomain(currentSecretDomain);
                          uint32_t size = hello.writeToBuffer(tempBuffer->bytes);
                          uint32_t outLength;
-@@ -933,7 +1241,21 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -933,7 +1258,21 @@ void ConnectionSocket::onEvent(uint32_t events) {
                          memcpy(tempBuffer->bytes + 11, tempBuffer->bytes + 64 * 1024, 32);
                          bytesRead = 0;
  
@@ -477,6 +629,174 @@ index 4605c2fc5..3659ca23c 100644
                              if (LOGS_ENABLED) DEBUG_E("connection(%p) send failed", this);
                              closeSocket(1, -1);
                              return;
+@@ -1011,9 +1350,20 @@ void ConnectionSocket::onEvent(uint32_t events) {
+                 if (remaining) {
+                     ssize_t sentLength;
+                     if (tlsState != 0) {
+-                        if (remaining > 2878) {
+-                            remaining = 2878;
+-                        }
++                        int64_t dpiNow = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
++                        if (nextAppDataWriteTime != 0 && dpiNow < nextAppDataWriteTime) {
++                            // Timing jitter is holding this connection's next app-data frame;
++                            // don't send early, let dpiTimingTimer wake us via adjustWriteOp().
++                            if (LOGS_ENABLED) {
++                                DEBUG_D("connection(%p) dpi_shape timing_delay remaining=%lld", this, (long long) (nextAppDataWriteTime - dpiNow));
++                            }
++                            if (dpiTimingTimer != nullptr) {
++                                dpiTimingTimer->setTimeout((uint32_t) std::min<int64_t>(250, nextAppDataWriteTime - dpiNow), false);
++                                dpiTimingTimer->start();
++                            }
++                        } else {
++                        nextAppDataWriteTime = 0;
++                        remaining = nextAppDataPayloadSize(remaining);
+                         size_t headersSize = 0;
+                         if (tlsState == 1) {
+                             static std::string header1 = std::string("\x14\x03\x03\x00\x01\x01", 6);
+@@ -1040,8 +1390,22 @@ void ConnectionSocket::onEvent(uint32_t events) {
+                                 ConnectionsManager::getInstance(instanceNum).delegate->onBytesSent((int32_t) sentLength, currentNetworkType, instanceNum);
+                             }
+                             outgoingByteStream->discard((uint32_t) (sentLength - headersSize));
++                            firstAppDataFrameSent = true;
++                            if (dpiStartupCoverActive()) {
++                                startupCoverFrameCount++;
++                            }
++                            if (outgoingByteStream->hasData()) {
++                                uint32_t dpiDelay = dpiInterPacketDelayMs();
++                                if (dpiDelay > 0) {
++                                    nextAppDataWriteTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis() + dpiDelay;
++                                    if (LOGS_ENABLED) {
++                                        DEBUG_D("connection(%p) dpi_shape timing_next delay=%u", this, dpiDelay);
++                                    }
++                                }
++                            }
+                             adjustWriteOp();
+                         }
++                        }
+                     } else {
+                         if ((sentLength = send(socketFd, buffer->bytes(), remaining, 0)) < 0) {
+                             if (LOGS_ENABLED) DEBUG_D("connection(%p) send failed", this);
+@@ -1086,6 +1450,78 @@ void ConnectionSocket::writeBuffer(NativeByteBuffer *buffer) {
+     adjustWriteOp();
+ }
+ 
++bool ConnectionSocket::dpiStartupCoverActive() {
++    int mode = gDpiStartupCoverMode.load();
++    if (mode == 0 || startupCoverStartTime == 0) {
++        return false;
++    }
++    int64_t windowMs = mode == 2 ? 20000 : 12000;
++    uint32_t maxFrames = mode == 2 ? 14 : 8;
++    int64_t now = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
++    if (now - startupCoverStartTime > windowMs || startupCoverFrameCount >= maxFrames) {
++        if (!startupCoverEndedLogged && LOGS_ENABLED) {
++            DEBUG_D("connection(%p) dpi_shape startup_cover_end mode=%d elapsed=%lld frames=%u", this, mode, (long long) (now - startupCoverStartTime), startupCoverFrameCount);
++        }
++        startupCoverEndedLogged = true;
++        startupCoverStartTime = 0;
++        return false;
++    }
++    return true;
++}
++
++uint32_t ConnectionSocket::nextAppDataPayloadSize(uint32_t remaining) {
++    int mode = gDpiRecordSizingMode.load();
++    if (dpiStartupCoverActive()) {
++        // Startup cover forces at least a conservative shape, strict escalates to varied.
++        int coverMode = gDpiStartupCoverMode.load();
++        mode = coverMode == 2 ? 2 : (mode == 0 ? 1 : mode);
++    }
++    uint32_t cap = 2878;
++    if (mode == 1) {
++        static const uint32_t caps[] = {1440, 1728, 2016, 2304, 2580, 2878};
++        cap = caps[rand() % (sizeof(caps) / sizeof(caps[0]))];
++    } else if (mode == 2) {
++        uint32_t minCap = firstAppDataFrameSent ? 768 : 1200;
++        uint32_t maxCap = firstAppDataFrameSent ? 2878 : 2016;
++        cap = minCap + (rand() % (maxCap - minCap + 1));
++    }
++    if (cap > 2878) cap = 2878;
++    if (cap < 256) cap = 256;
++    if (remaining < cap) cap = remaining;
++    // Skipped for bulk transfers (upload/download): would be thousands of lines per file
++    // for a knob that, unlike timing jitter, doesn't hurt their throughput anyway.
++    if (mode != 0 && !isBulkTransferConnection() && LOGS_ENABLED) {
++        DEBUG_D("connection(%p) dpi_shape record_sizing mode=%d cap=%u remaining=%u first_sent=%d", this, mode, cap, remaining, firstAppDataFrameSent ? 1 : 0);
++    }
++    return cap;
++}
++
++uint32_t ConnectionSocket::dpiInterPacketDelayMs() {
++    if (isBulkTransferConnection()) {
++        // Upload/download connections carry large payloads (voice, media, files) as a
++        // long back-to-back frame sequence; per-frame jitter here isn't stealth, it's a
++        // serial throughput cap (thousands of frames * tens of ms = a very slow send).
++        return 0;
++    }
++    int mode = gDpiTimingMode.load();
++    if (dpiStartupCoverActive()) {
++        int coverMode = gDpiStartupCoverMode.load();
++        mode = coverMode == 2 ? 2 : (mode == 0 ? 1 : mode);
++    }
++    if (mode == 2) {
++        return 20 + (rand() % 28) + (rand() % 54);
++    }
++    if (mode == 1) {
++        return 8 + (rand() % 14) + (rand() % 25);
++    }
++    return 0;
++}
++
++void ConnectionSocket::onDpiTimingTimerFired() {
++    nextAppDataWriteTime = 0;
++    adjustWriteOp();
++}
++
+ void ConnectionSocket::adjustWriteOp() {
+     if (!waitingForHostResolve.empty()) {
+         adjustWriteOpAfterResolve = true;
+diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.h b/TMessagesProj/jni/tgnet/ConnectionSocket.h
+index 15ffee898..6d048c501 100644
+--- a/TMessagesProj/jni/tgnet/ConnectionSocket.h
++++ b/TMessagesProj/jni/tgnet/ConnectionSocket.h
+@@ -18,6 +18,7 @@ class ConnectionsManager;
+ class ByteStream;
+ class EventObject;
+ class ByteArray;
++class Timer;
+ 
+ class ConnectionSocket {
+ 
+@@ -45,6 +46,9 @@ protected:
+     virtual void onDisconnected(int32_t reason, int32_t error) = 0;
+     virtual void onConnected() = 0;
+     virtual bool hasPendingRequests() = 0;
++    // Bulk transfer connections (upload/download) must not get DPI timing jitter —
++    // it turns per-frame delay into a serial throughput cap on large files/voice messages.
++    virtual bool isBulkTransferConnection() { return false; }
+ 
+     std::string overrideProxyUser = "";
+     std::string overrideProxyPassword = "";
+@@ -82,6 +86,19 @@ private:
+ 
+     uint8_t proxyAuthState;
+ 
++    // DPI shaping state — only meaningful while tlsState != 0 (FakeTLS app-data path)
++    int64_t startupCoverStartTime = 0;
++    uint32_t startupCoverFrameCount = 0;
++    bool startupCoverEndedLogged = false;
++    bool firstAppDataFrameSent = false;
++    int64_t nextAppDataWriteTime = 0;
++    Timer *dpiTimingTimer = nullptr;
++
++    bool dpiStartupCoverActive();
++    uint32_t nextAppDataPayloadSize(uint32_t remaining);
++    uint32_t dpiInterPacketDelayMs();
++    void onDpiTimingTimerFired();
++
+     int32_t checkSocketError(int32_t *error);
+     void closeSocket(int32_t reason, int32_t error);
+     void openConnectionInternal(bool ipv6);
 diff --git a/TMessagesProj/proguard-rules.pro b/TMessagesProj/proguard-rules.pro
 index aeab02b29..fae6790df 100644
 --- a/TMessagesProj/proguard-rules.pro
@@ -518,12 +838,14 @@ index 6f6d377d0..132e484bf 100644
              android:name=".voip.VoIPService"
              android:enabled="true"
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
-index b1caaddb4..46121505a 100644
+index b1caaddb4..08a513544 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
-@@ -26,8 +26,8 @@ public class BuildVars {
+@@ -25,9 +25,10 @@ public class BuildVars {
+     public static boolean CHECK_UPDATES = true;
      public static boolean NO_SCOPED_STORAGE = Build.VERSION.SDK_INT <= 29;
      public static String BUILD_VERSION_STRING = BuildConfig.BUILD_VERSION_STRING;
++    public static String FORK_VERSION_TAG = BuildConfig.FORK_VERSION_TAG;
  
 -    public static int APP_ID = 4;
 -    public static String APP_HASH = "014b35b6184100b085b0d0572f9b5103";
@@ -637,6 +959,21 @@ index 91fefa223..2759efdb7 100644
  
          return version;
      }
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
+index fea32835f..636cb9001 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
+@@ -1805,7 +1805,9 @@ public class MediaController implements AudioManager.OnAudioFocusChangeListener,
+         }
+         if (send) {
+             if (lastSecretChat != null) {
+-                SecretChatHelper.getInstance(lastChatAccount).sendScreenshotMessage(lastSecretChat, lastChatVisibleMessages, null);
++                if (!MessagesController.isMuteScreenshotPingEnabled()) {
++                    SecretChatHelper.getInstance(lastChatAccount).sendScreenshotMessage(lastSecretChat, lastChatVisibleMessages, null);
++                }
+             } else {
+                 SendMessagesHelper.getInstance(lastChatAccount).sendScreenshotMessage(lastUser, lastMessageId, null);
+             }
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
 index 80374e50c..2b8a14643 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
@@ -651,10 +988,69 @@ index 80374e50c..2b8a14643 100644
      public float forceSeekTo = -1;
      public int audioProgressMs;
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
-index 2e65a2ca4..2dcb9fde3 100644
+index 2e65a2ca4..44e822c0b 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
-@@ -18370,6 +18370,10 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -8298,13 +8298,17 @@ public class MessagesController extends BaseController implements NotificationCe
+             LongSparseArray<ArrayList<Integer>> task = currentDeletingTaskMids != null ? currentDeletingTaskMids.clone() : null;
+             LongSparseArray<ArrayList<Integer>> taskMedia = currentDeletingTaskMediaMids != null ? currentDeletingTaskMediaMids.clone() : null;
+             AndroidUtilities.runOnUIThread(() -> {
+-                if (task != null) {
++                // TGX: keep-ephemeral -- skip the scheduled self-destruct/TTL purge so the
++                // message/media stays in local storage instead of being deleted. This only
++                // affects what THIS client keeps locally; it doesn't change TTL/view-once
++                // semantics on the sending side or other participants' clients.
++                if (!isKeepEphemeralEnabled() && task != null) {
+                     for (int a = 0, N = task.size(); a < N; a++) {
+                         ArrayList<Integer> mids = task.valueAt(a);
+                         deleteMessages(mids, null, null, task.keyAt(a), 0, true, 0, !mids.isEmpty() && mids.get(0) > 0);
+                     }
+                 }
+-                if (taskMedia != null) {
++                if (!isKeepEphemeralEnabled() && taskMedia != null) {
+                     final boolean checkViewer = SecretMediaViewer.hasInstance() && SecretMediaViewer.getInstance().isVisible();
+                     final MessageObject viewerObject = checkViewer ? SecretMediaViewer.getInstance().getCurrentMessageObject() : null;
+                     for (int a = 0, N = taskMedia.size(); a < N; a++) {
+@@ -14346,6 +14350,10 @@ public class MessagesController extends BaseController implements NotificationCe
+         long dialogId = messageObject.getDialogId();
+         getMessagesStorage().markMessagesContentAsRead(dialogId, arrayList, 0, 0);
+         getNotificationCenter().postNotificationName(NotificationCenter.messagesReadContent, dialogId, arrayList);
++        if (isEphemeralMediaKept(messageObject)) {
++            // Mark locally read but never signal the server -- no view receipt, no destruction.
++            return;
++        }
+         if (messageObject.getId() < 0) {
+             markMessageAsRead(messageObject.getDialogId(), messageObject.messageOwner.random_id, Integer.MIN_VALUE);
+         } else {
+@@ -14411,6 +14419,11 @@ public class MessagesController extends BaseController implements NotificationCe
+ 
+     public void doDeleteShowOnceTask(long taskId, long dialogId, int mid) {
+         getMessagesStorage().removePendingTask(taskId);
++        if (isKeepEphemeralEnabled()) {
++            // Defuse a show-once task that was already scheduled (e.g. before the toggle was
++            // turned on): drop the task bookkeeping, but keep the media.
++            return;
++        }
+         ArrayList<Integer> mids = new ArrayList<>();
+         mids.add(mid);
+         getMessagesStorage().emptyMessagesMedia(dialogId, mids);
+@@ -14421,6 +14434,15 @@ public class MessagesController extends BaseController implements NotificationCe
+     }
+ 
+     public void markMessageAsRead2(long dialogId, int mid, TLRPC.InputChannel inputChannel, int ttl, long taskId, boolean createDeleteTask) {
++        if (isKeepEphemeralEnabled()) {
++            // Never read-and-destroy: skip the server readMessageContents call and don't
++            // schedule a local delete task. Still clean up a pending task passed in from a
++            // caller that already created one before reaching here.
++            if (taskId != 0) {
++                getMessagesStorage().removePendingTask(taskId);
++            }
++            return;
++        }
+         if (mid == 0 || ttl < 0) {
+             return;
+         }
+@@ -18370,6 +18392,10 @@ public class MessagesController extends BaseController implements NotificationCe
          LongSparseArray<ArrayList<Integer>> markContentAsReadMessages = null;
          SparseIntArray markAsReadEncrypted = null;
          LongSparseArray<ArrayList<Integer>> deletedMessages = null;
@@ -665,7 +1061,7 @@ index 2e65a2ca4..2dcb9fde3 100644
          LongSparseArray<ArrayList<Integer>> deletedQuickReplyMessages = null;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessages = null;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSent = null;
-@@ -18758,6 +18762,11 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -18758,6 +18784,11 @@ public class MessagesController extends BaseController implements NotificationCe
                  dialogs_read_outbox_max.put(dialogId, Math.max(value, update.max_id));
              } else if (baseUpdate instanceof TL_update.TL_updateDeleteMessages) {
                  TL_update.TL_updateDeleteMessages update = (TL_update.TL_updateDeleteMessages) baseUpdate;
@@ -677,7 +1073,7 @@ index 2e65a2ca4..2dcb9fde3 100644
                  if (deletedMessages == null) {
                      deletedMessages = new LongSparseArray<>();
                  }
-@@ -19283,16 +19292,33 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -19283,16 +19314,33 @@ public class MessagesController extends BaseController implements NotificationCe
                  if (BuildVars.LOGS_ENABLED) {
                      FileLog.d(baseUpdate + " channelId = " + update.channel_id);
                  }
@@ -719,7 +1115,7 @@ index 2e65a2ca4..2dcb9fde3 100644
              } else if (baseUpdate instanceof TL_update.TL_updateChannel) {
                  if (BuildVars.LOGS_ENABLED) {
                      TL_update.TL_updateChannel update = (TL_update.TL_updateChannel) baseUpdate;
-@@ -20910,6 +20936,7 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -20910,6 +20958,7 @@ public class MessagesController extends BaseController implements NotificationCe
          LongSparseArray<ArrayList<Integer>> markContentAsReadMessagesFinal = markContentAsReadMessages;
          SparseIntArray markAsReadEncryptedFinal = markAsReadEncrypted;
          LongSparseArray<ArrayList<Integer>> deletedMessagesFinal = deletedMessages;
@@ -727,7 +1123,7 @@ index 2e65a2ca4..2dcb9fde3 100644
          LongSparseArray<ArrayList<Integer>> deletedQuickRepliesMessagesFinal = deletedQuickReplyMessages;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesFinal = scheduledDeletedMessages;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSentFinal = scheduledDeletedMessagesSent;
-@@ -21034,6 +21061,35 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21034,6 +21083,35 @@ public class MessagesController extends BaseController implements NotificationCe
                  }
                  getNotificationsController().removeDeletedMessagesFromNotifications(deletedMessagesFinal, false);
              }
@@ -763,7 +1159,7 @@ index 2e65a2ca4..2dcb9fde3 100644
              if (deletedQuickRepliesMessagesFinal != null) {
                  for (int a = 0, size = deletedQuickRepliesMessagesFinal.size(); a < size; a++) {
                      long topicId = deletedQuickRepliesMessagesFinal.keyAt(a);
-@@ -21120,6 +21176,20 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21120,6 +21198,20 @@ public class MessagesController extends BaseController implements NotificationCe
              for (int a = 0, size = deletedMessages.size(); a < size; a++) {
                  long key = deletedMessages.keyAt(a);
                  ArrayList<Integer> arrayList = deletedMessages.valueAt(a);
@@ -784,7 +1180,7 @@ index 2e65a2ca4..2dcb9fde3 100644
                  getMessagesStorage().getStorageQueue().postRunnable(() -> {
                      ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, arrayList, false, true, 0, 0);
                      getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, arrayList, dialogIds);
-@@ -21458,6 +21528,78 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21458,6 +21550,136 @@ public class MessagesController extends BaseController implements NotificationCe
          return false;
      }
  
@@ -822,6 +1218,64 @@ index 2e65a2ca4..2dcb9fde3 100644
 +
 +    public static void setKeepAliveEnabled(boolean enabled) {
 +        getGlobalMainSettings().edit().putBoolean("keep_alive_enabled", enabled).commit();
++    }
++
++    // TGX: retain view-once / self-destructing (TTL) media locally instead of running the local
++    // destruction -- the remote side's own TTL/one-time semantics on their client are unaffected,
++    // this only stops this client from discarding its own already-received copy.
++    public static boolean isKeepEphemeralEnabled() {
++        return getGlobalMainSettings().getBoolean("keep_ephemeral_enabled", false);
++    }
++
++    public static void setKeepEphemeralEnabled(boolean enabled) {
++        getGlobalMainSettings().edit().putBoolean("keep_ephemeral_enabled", enabled).commit();
++    }
++
++    // TGX: don't apply FLAG_SECURE in secret chats / protected-content viewers, i.e. allow
++    // screenshots there. Off by default -- this is a deliberate opt-in privacy tradeoff for the
++    // user's own device, not a default behavior change.
++    public static boolean isAllowScreenshotsEnabled() {
++        return getGlobalMainSettings().getBoolean("allow_screenshots_enabled", false);
++    }
++
++    public static void setAllowScreenshotsEnabled(boolean enabled) {
++        getGlobalMainSettings().edit().putBoolean("allow_screenshots_enabled", enabled).commit();
++    }
++
++    // TGX: suppress the "took a screenshot" service message sent to the other party in secret
++    // chats. Independent of isAllowScreenshotsEnabled -- a user may still want FLAG_SECURE (e.g.
++    // to keep the OS-level screenshot block) while not notifying the peer, or vice versa.
++    public static boolean isMuteScreenshotPingEnabled() {
++        return getGlobalMainSettings().getBoolean("mute_screenshot_ping_enabled", false);
++    }
++
++    public static void setMuteScreenshotPingEnabled(boolean enabled) {
++        getGlobalMainSettings().edit().putBoolean("mute_screenshot_ping_enabled", enabled).commit();
++    }
++
++    // TGX: proactively download incoming voice messages as soon as they arrive (any open chat
++    // or not), instead of only starting the download when the user opens the chat. Off by
++    // default -- stock autodownload treats voice as AUTODOWNLOAD_TYPE_AUDIO but that type is
++    // excluded from the default preset masks, so this is a deliberate opt-in, independent of
++    // the general photo/video/document autodownload settings.
++    public static boolean isVoicePreloadEnabled() {
++        return getGlobalMainSettings().getBoolean("voice_preload_enabled", false);
++    }
++
++    public static void setVoicePreloadEnabled(boolean enabled) {
++        getGlobalMainSettings().edit().putBoolean("voice_preload_enabled", enabled).commit();
++    }
++
++    // TGX: cloud view-once / TTL media (TL_message with media.ttl_seconds != 0) this client
++    // deliberately keeps. Deliberately does NOT cover secret-chat (TL_message_secret) TTL --
++    // that destruction is a core part of the secret-chat guarantee shown to the other party, not
++    // just a local cleanup step, so it's left untouched here.
++    public static boolean isEphemeralMediaKept(MessageObject messageObject) {
++        if (!isKeepEphemeralEnabled() || messageObject == null || messageObject.messageOwner == null) {
++            return false;
++        }
++        TLRPC.MessageMedia media = MessageObject.getMedia(messageObject.messageOwner);
++        return media != null && media.ttl_seconds != 0;
 +    }
 +
 +    // TGX: anti-recall — session-lifetime cache of "this mid was recalled" (mid -> unix seconds it was recalled
@@ -1019,17 +1473,49 @@ index cdefac769..d62564b4f 100644
      public static final int historyCleared = totalEvents++;
      public static final int messagesRead = totalEvents++;
      public static final int threadMessagesRead = totalEvents++;
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
+index 0a8a9bd08..7b8656dc2 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
+@@ -1051,6 +1051,26 @@ public class NotificationsController extends BaseController implements Notificat
+             return;
+         }
+ 
++        // TGX: preload incoming voice messages in the background as soon as they arrive,
++        // independent of whether the chat is open (this method already runs for every genuinely
++        // new message regardless of UI state) and independent of the general autodownload
++        // settings, which don't cover voice by default. One-time (view-once) voice is skipped --
++        // the file doesn't exist server-side until the reveal RPC, so there's nothing to fetch.
++        if (MessagesController.isVoicePreloadEnabled()) {
++            for (int i = 0; i < messageObjects.size(); i++) {
++                MessageObject messageObject = messageObjects.get(i);
++                if (messageObject == null || messageObject.messageOwner == null || messageObject.isOut() || messageObject.isVoiceOnce()) {
++                    continue;
++                }
++                if (MessageObject.isVoiceMessage(messageObject.messageOwner)) {
++                    TLRPC.Document document = messageObject.getDocument();
++                    if (document != null) {
++                        getFileLoader().loadFile(document, messageObject, FileLoader.PRIORITY_LOW, 0);
++                    }
++                }
++            }
++        }
++
+         ArrayList<MessageObject> popupArrayAdd = new ArrayList<>(0);
+         notificationsQueue.postRunnable(() -> {
+             boolean added = false;
 diff --git a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
-index 470e3c4a6..9f3bd8980 100644
+index 470e3c4a6..9ba590be9 100644
 --- a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
 +++ b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
-@@ -999,6 +999,21 @@ public class ConnectionsManager extends BaseController {
+@@ -999,6 +999,28 @@ public class ConnectionsManager extends BaseController {
      public static native void native_setUserId(int currentAccount, long id);
      public static native void native_init(int currentAccount, int version, int layer, int apiId, String deviceModel, String systemVersion, String appVersion, String langCode, String systemLangCode, String configPath, String logPath, String regId, String cFingerprint, String installer, String packageId, int timezoneOffset, long userId, boolean userPremium, boolean enablePushConnection, boolean hasNetwork, int networkType, int performanceClass);
      public static native void native_setProxySettings(int currentAccount, String address, int port, String username, String password, String secret);
 +    public static native void native_setTlsFragmentConfig(boolean enabled, int minBytes, int maxBytes);
 +    public static native void native_setTlsFingerprintProfile(int profile, int rotationIntervalSec);
 +    public static native void native_setTlsEchExtensionId(int extensionId);
++    public static native void native_setDpiShapingConfig(int recordSizingMode, int timingMode, int startupCoverMode);
 +
 +    public static void setTlsFragmentConfig(boolean enabled, int minBytes, int maxBytes) {
 +        native_setTlsFragmentConfig(enabled, minBytes, maxBytes);
@@ -1039,6 +1525,12 @@ index 470e3c4a6..9f3bd8980 100644
 +        native_setTlsFingerprintProfile(profile, rotationIntervalSec);
 +    }
 +
++    // recordSizingMode: 0=Off,1=Conservative,2=Varied. timingMode: 0=Off,1=Gentle,2=Balanced.
++    // startupCoverMode: 0=Off,1=Soft,2=Strict. All three only affect FakeTLS (MTProto) proxies.
++    public static void setDpiShapingConfig(int recordSizingMode, int timingMode, int startupCoverMode) {
++        native_setDpiShapingConfig(recordSizingMode, timingMode, startupCoverMode);
++    }
++
 +    public static void setTlsEchExtensionId(int extensionId) {
 +        native_setTlsEchExtensionId(extensionId);
 +    }
@@ -1046,7 +1538,7 @@ index 470e3c4a6..9f3bd8980 100644
      public static native void native_setRegId(int currentAccount, String regId);
      public static native void native_setSystemLangCode(int currentAccount, String langCode);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java b/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
-index 7d7291c05..15c86810b 100644
+index 7d7291c05..c5d9d3cd4 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
 @@ -70,6 +70,7 @@ import android.text.TextUtils;
@@ -1057,7 +1549,15 @@ index 7d7291c05..15c86810b 100644
  import android.text.style.LeadingMarginSpan;
  import android.text.style.StrikethroughSpan;
  import android.text.style.URLSpan;
-@@ -18394,6 +18395,15 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+@@ -12014,6 +12015,7 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+             Window window = activity == null ? null : activity.getWindow();
+             if (window != null) {
+                 flagSecure = new FlagSecureReason(window, () ->
++                    !MessagesController.isAllowScreenshotsEnabled() &&
+                     currentMessageObject != null && currentMessageObject.messageOwner != null && (
+                         currentMessageObject.type == MessageObject.TYPE_PAID_MEDIA && (groupMedia == null || !groupMedia.hidden) ||
+                         currentMessageObject.messageOwner.noforwards ||
+@@ -18394,6 +18396,15 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
              timeString = LocaleController.formatSmallDateChat(currentMessageObject.realDate) + ", " + LocaleController.getInstance().getFormatterDay().format((long) (currentMessageObject.realDate) * 1000);
          } else if (currentMessageObject.isRepostPreview) {
              timeString = LocaleController.formatSmallDateChat(messageObject.messageOwner.date) + ", " + LocaleController.getInstance().getFormatterDay().format((long) (messageObject.messageOwner.date) * 1000);
@@ -1073,7 +1573,7 @@ index 7d7291c05..15c86810b 100644
          } else if (edited) {
              timeString = AppGlobalConfig.getInstance(currentAccount).messagePrimaryEditedDate.get() ?
                  LocaleController.formatPmEditedDate(currentMessagesGroup != null ? currentMessagesGroup.getMaxEditDate() : messageObject.messageOwner.edit_date) :
-@@ -18421,6 +18431,18 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+@@ -18421,6 +18432,18 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
          } else {
              currentTimeString = timeString;
          }
@@ -1093,7 +1593,7 @@ index 7d7291c05..15c86810b 100644
              currentTimeString = TextUtils.concat("💎", StarsIntroActivity.formatTON(currentMessageObject.getStakedDiceAmount()), "  ", currentTimeString);
              currentTimeString = StarsIntroActivity.replaceDiamond(currentTimeString, 0.55f, null, 0, dp(-.33f), 1.05f);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
-index f2ccd7e90..cc20f0600 100644
+index f2ccd7e90..1c490d28c 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
 @@ -487,6 +487,7 @@ public class ChatActivity extends BaseFragment implements
@@ -1140,7 +1640,20 @@ index f2ccd7e90..cc20f0600 100644
              if (currentUser != null && currentUser.self && getDialogId() != UserObject.VERIFY) {
                  headerItem.lazilyAddSubItem(add_shortcut, R.drawable.msg_home, LocaleController.getString(R.string.AddShortcut));
              }
-@@ -16485,6 +16494,22 @@ public class ChatActivity extends BaseFragment implements
+@@ -8622,8 +8631,10 @@ public class ChatActivity extends BaseFragment implements
+         chatScrollHelper.setAnimationCallback(chatScrollHelperCallback);
+ 
+         flagSecure = new FlagSecureReason(getParentActivity().getWindow(), () ->
+-            currentEncryptedChat != null ||
+-            isPeerNoForwards()
++            !MessagesController.isAllowScreenshotsEnabled() && (
++                currentEncryptedChat != null ||
++                isPeerNoForwards()
++            )
+         );
+ 
+         if (oldMessage != null) {
+@@ -16485,6 +16496,22 @@ public class ChatActivity extends BaseFragment implements
          }
      }
  
@@ -1163,7 +1676,7 @@ index f2ccd7e90..cc20f0600 100644
      private void toggleMute(boolean instant) {
          boolean muted = getMessagesController().isDialogMuted(dialog_id, getTopicId());
          if (!muted) {
-@@ -19481,6 +19506,9 @@ public class ChatActivity extends BaseFragment implements
+@@ -19481,6 +19508,9 @@ public class ChatActivity extends BaseFragment implements
              leftIcon = avatarContainer.getBotVerificationDrawable(DialogObject.getBotVerificationIcon(currentUser), false);
          }
          avatarContainer.setTitleIcons(leftIcon, rightIcon);
@@ -1173,7 +1686,7 @@ index f2ccd7e90..cc20f0600 100644
          if (!forceToggleMuted && muteItem != null) {
              if (isMuted) {
                  muteItem.setRightIconVisibility(View.GONE);
-@@ -22102,6 +22130,44 @@ public class ChatActivity extends BaseFragment implements
+@@ -22102,6 +22132,44 @@ public class ChatActivity extends BaseFragment implements
                  return;
              }
              ArrayList<Integer> markAsDeletedMessages = (ArrayList<Integer>) args[0];
@@ -1218,7 +1731,7 @@ index f2ccd7e90..cc20f0600 100644
              long channelId = (Long) args[1];
              boolean update = args.length > 2 && (boolean) args[2];
              boolean sent = args.length > 3 && (boolean) args[3];
-@@ -22165,6 +22231,29 @@ public class ChatActivity extends BaseFragment implements
+@@ -22165,6 +22233,29 @@ public class ChatActivity extends BaseFragment implements
                      removeSelfFromStack();
                  }
              }
@@ -1248,8 +1761,21 @@ index f2ccd7e90..cc20f0600 100644
          } else if (id == NotificationCenter.quickRepliesDeleted) {
              if (chatMode != MODE_QUICK_REPLIES) return;
              if ((Long) args[1] != getQuickReplyId()) return;
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Components/TranslateAlert2.java b/TMessagesProj/src/main/java/org/telegram/ui/Components/TranslateAlert2.java
+index b31069f25..371967fb3 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Components/TranslateAlert2.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Components/TranslateAlert2.java
+@@ -1034,7 +1034,7 @@ public class TranslateAlert2 extends BottomSheet implements NotificationCenter.N
+         if (textView != null) {
+             textView.setTextIsSelectable(!noforwards);
+         }
+-        if (noforwards) {
++        if (noforwards && !MessagesController.isAllowScreenshotsEnabled()) {
+             getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+             AndroidUtilities.logFlagSecure();
+         } else {
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java
-index 910de86ec..f904d42b6 100644
+index 910de86ec..b66687c31 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java
 @@ -11,6 +11,7 @@ package org.telegram.ui;
@@ -1270,143 +1796,266 @@ index 910de86ec..f904d42b6 100644
  import org.telegram.messenger.DownloadController;
  import org.telegram.messenger.ImageLoader;
  import org.telegram.messenger.LocaleController;
-@@ -113,6 +116,14 @@ public class DataSettingsActivity extends BaseFragment {
-     private int saveToGalleryGroupsRow;
-     private int saveToGalleryDividerRow;
- 
-+    private int antiRecallSectionRow;
-+    private int antiRecallEnabledRow;
-+    private int antiRecallSection2Row;
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java
+new file mode 100644
+index 000000000..33640f611
+--- /dev/null
++++ b/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java
+@@ -0,0 +1,140 @@
++package org.telegram.ui;
 +
-+    private int keepAliveSectionRow;
-+    private int keepAliveEnabledRow;
-+    private int keepAliveInfoRow;
++import static org.telegram.messenger.LocaleController.getString;
 +
-     private int rowCount;
- 
-     private boolean updateVoipUseLessData;
-@@ -174,6 +185,14 @@ public class DataSettingsActivity extends BaseFragment {
-         saveToGalleryChannelsRow = rowCount++;
-         saveToGalleryDividerRow = rowCount++;
- 
-+        antiRecallSectionRow = rowCount++;
-+        antiRecallEnabledRow = rowCount++;
-+        antiRecallSection2Row = rowCount++;
++import android.content.Context;
++import android.content.Intent;
++import android.net.Uri;
++import android.os.PowerManager;
++import android.view.Gravity;
++import android.view.View;
++import android.widget.FrameLayout;
 +
-+        keepAliveSectionRow = rowCount++;
-+        keepAliveEnabledRow = rowCount++;
-+        keepAliveInfoRow = rowCount++;
++import org.telegram.messenger.ApplicationLoader;
++import org.telegram.messenger.FileLog;
++import org.telegram.messenger.MessagesController;
++import org.telegram.messenger.R;
++import org.telegram.ui.ActionBar.ActionBar;
++import org.telegram.ui.ActionBar.BaseFragment;
++import org.telegram.ui.ActionBar.Theme;
++import org.telegram.ui.Cells.TextCheckCell;
++import org.telegram.ui.Components.LayoutHelper;
++import org.telegram.ui.Components.UItem;
++import org.telegram.ui.Components.UniversalAdapter;
++import org.telegram.ui.Components.UniversalRecyclerView;
 +
- //        autoplayHeaderRow = rowCount++;
- //        autoplayGifsRow = rowCount++;
- //        autoplayVideoRow = rowCount++;
-@@ -550,6 +569,31 @@ public class DataSettingsActivity extends BaseFragment {
-                 showDialog(builder.create());
-             } else if (position == proxyRow) {
-                 presentFragment(new ProxyListActivity());
-+            } else if (position == antiRecallEnabledRow) {
-+                boolean enabled = !MessagesController.isAntiRecallEnabledGlobally();
-+                MessagesController.setAntiRecallEnabledGlobally(enabled);
-+                TextCheckCell textCheckCell = (TextCheckCell) view;
-+                textCheckCell.setChecked(enabled);
-+            } else if (position == keepAliveEnabledRow) {
-+                boolean enabled = !MessagesController.isKeepAliveEnabled();
-+                MessagesController.setKeepAliveEnabled(enabled);
-+                TextCheckCell textCheckCell = (TextCheckCell) view;
-+                textCheckCell.setChecked(enabled);
-+                if (enabled) {
-+                    android.os.PowerManager powerManager = (android.os.PowerManager) ApplicationLoader.applicationContext.getSystemService(Context.POWER_SERVICE);
-+                    String packageName = ApplicationLoader.applicationContext.getPackageName();
-+                    if (powerManager != null && !powerManager.isIgnoringBatteryOptimizations(packageName)) {
-+                        try {
-+                            Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-+                            intent.setData(android.net.Uri.parse("package:" + packageName));
-+                            if (getParentActivity() != null) {
-+                                getParentActivity().startActivity(intent);
-+                            }
-+                        } catch (Exception e) {
-+                            FileLog.e(e);
++import java.util.ArrayList;
++
++/**
++ * Consolidated settings screen for this fork's own features (GramBas), separate from
++ * upstream Data/Chat/Privacy settings. Proxy settings are intentionally not included here --
++ * they stay at their existing entry point.
++ */
++public class GramBasSettingsActivity extends BaseFragment {
++
++    private UniversalRecyclerView listView;
++
++    private static final int ID_ANTI_RECALL = 1;
++    private static final int ID_KEEP_ALIVE = 2;
++    private static final int ID_KEEP_EPHEMERAL = 3;
++    private static final int ID_ALLOW_SCREENSHOTS = 4;
++    private static final int ID_MUTE_SCREENSHOT_PING = 5;
++    private static final int ID_VOICE_PRELOAD = 6;
++
++    @Override
++    public View createView(Context context) {
++        actionBar.setBackButtonImage(R.drawable.ic_ab_back);
++        actionBar.setAllowOverlayTitle(true);
++        actionBar.setTitle("GramBas");
++        actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
++            @Override
++            public void onItemClick(int id) {
++                if (id == -1) {
++                    finishFragment();
++                }
++            }
++        });
++
++        FrameLayout contentView = new FrameLayout(context);
++        contentView.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
++
++        listView = new UniversalRecyclerView(this, this::fillItems, this::onItemClick, null);
++        listView.setSections();
++        contentView.addView(listView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT, Gravity.FILL));
++        actionBar.setAdaptiveBackground(listView);
++
++        return fragmentView = contentView;
++    }
++
++    private void fillItems(ArrayList<UItem> items, UniversalAdapter adapter) {
++        items.add(UItem.asHeader("Приватность"));
++        items.add(UItem.asCheck(ID_ANTI_RECALL, "Показывать удалённые сообщения").setChecked(MessagesController.isAntiRecallEnabledGlobally()));
++        items.add(UItem.asCheck(ID_KEEP_EPHEMERAL, "Сохранять самоуничтожающиеся медиа").setChecked(MessagesController.isKeepEphemeralEnabled()));
++        items.add(UItem.asCheck(ID_ALLOW_SCREENSHOTS, "Разрешать скриншоты").setChecked(MessagesController.isAllowScreenshotsEnabled()));
++        items.add(UItem.asCheck(ID_MUTE_SCREENSHOT_PING, "Не сообщать о скриншоте (секретные чаты)").setChecked(MessagesController.isMuteScreenshotPingEnabled()));
++        items.add(UItem.asShadow(null));
++
++        items.add(UItem.asHeader("Медиа"));
++        items.add(UItem.asCheck(ID_VOICE_PRELOAD, "Загружать входящие голосовые в фоне").setChecked(MessagesController.isVoicePreloadEnabled()));
++        items.add(UItem.asShadow("Голосовые сообщения начинают загружаться сразу по получении, не дожидаясь открытия диалога."));
++
++        items.add(UItem.asHeader("Соединение"));
++        items.add(UItem.asCheck(ID_KEEP_ALIVE, "Держать соединение в фоне").setChecked(MessagesController.isKeepAliveEnabled()));
++        items.add(UItem.asShadow("Настоящие push-уведомления недоступны для этой сборки (FCM не работает с самоподписанным APK). Держит соединение открытым, пока приложение свёрнуто, чтобы сообщения приходили без задержки — расходует больше заряда батареи. Рекомендуется также разрешить автозапуск и отключить оптимизацию батареи для приложения в настройках системы."));
++    }
++
++    private void onItemClick(UItem item, View view, int position, float x, float y) {
++        if (item.id == ID_ANTI_RECALL) {
++            boolean enabled = !MessagesController.isAntiRecallEnabledGlobally();
++            MessagesController.setAntiRecallEnabledGlobally(enabled);
++            if (view instanceof TextCheckCell) {
++                ((TextCheckCell) view).setChecked(enabled);
++            }
++        } else if (item.id == ID_KEEP_EPHEMERAL) {
++            boolean enabled = !MessagesController.isKeepEphemeralEnabled();
++            MessagesController.setKeepEphemeralEnabled(enabled);
++            if (view instanceof TextCheckCell) {
++                ((TextCheckCell) view).setChecked(enabled);
++            }
++        } else if (item.id == ID_ALLOW_SCREENSHOTS) {
++            boolean enabled = !MessagesController.isAllowScreenshotsEnabled();
++            MessagesController.setAllowScreenshotsEnabled(enabled);
++            if (view instanceof TextCheckCell) {
++                ((TextCheckCell) view).setChecked(enabled);
++            }
++        } else if (item.id == ID_MUTE_SCREENSHOT_PING) {
++            boolean enabled = !MessagesController.isMuteScreenshotPingEnabled();
++            MessagesController.setMuteScreenshotPingEnabled(enabled);
++            if (view instanceof TextCheckCell) {
++                ((TextCheckCell) view).setChecked(enabled);
++            }
++        } else if (item.id == ID_VOICE_PRELOAD) {
++            boolean enabled = !MessagesController.isVoicePreloadEnabled();
++            MessagesController.setVoicePreloadEnabled(enabled);
++            if (view instanceof TextCheckCell) {
++                ((TextCheckCell) view).setChecked(enabled);
++            }
++        } else if (item.id == ID_KEEP_ALIVE) {
++            boolean enabled = !MessagesController.isKeepAliveEnabled();
++            MessagesController.setKeepAliveEnabled(enabled);
++            if (view instanceof TextCheckCell) {
++                ((TextCheckCell) view).setChecked(enabled);
++            }
++            if (enabled) {
++                PowerManager powerManager = (PowerManager) ApplicationLoader.applicationContext.getSystemService(Context.POWER_SERVICE);
++                String packageName = ApplicationLoader.applicationContext.getPackageName();
++                if (powerManager != null && !powerManager.isIgnoringBatteryOptimizations(packageName)) {
++                    try {
++                        Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
++                        intent.setData(Uri.parse("package:" + packageName));
++                        if (getParentActivity() != null) {
++                            getParentActivity().startActivity(intent);
 +                        }
++                    } catch (Exception e) {
++                        FileLog.e(e);
 +                    }
 +                }
-             } else if (position == enableStreamRow) {
-                 SharedConfig.toggleStreamMedia();
-                 TextCheckCell textCheckCell = (TextCheckCell) view;
-@@ -739,6 +783,10 @@ public class DataSettingsActivity extends BaseFragment {
-                         headerCell.setText(LocaleController.getString(R.string.Calls));
-                     } else if (position == proxySectionRow) {
-                         headerCell.setText(LocaleController.getString(R.string.Proxy));
-+                    } else if (position == antiRecallSectionRow) {
-+                        headerCell.setText("Anti-recall");
-+                    } else if (position == keepAliveSectionRow) {
-+                        headerCell.setText("Поддержание соединения");
-                     } else if (position == streamSectionRow) {
-                         headerCell.setText(LocaleController.getString(R.string.Streaming));
-                     } else if (position == autoplayHeaderRow) {
-@@ -750,7 +798,11 @@ public class DataSettingsActivity extends BaseFragment {
-                 }
-                 case 3: {
-                     TextCheckCell checkCell = (TextCheckCell) holder.itemView;
--                    if (position == enableStreamRow) {
-+                    if (position == antiRecallEnabledRow) {
-+                        checkCell.setTextAndCheck("Показывать удалённые сообщения", MessagesController.isAntiRecallEnabledGlobally(), false);
-+                    } else if (position == keepAliveEnabledRow) {
-+                        checkCell.setTextAndCheck("Держать соединение в фоне", MessagesController.isKeepAliveEnabled(), false);
-+                    } else if (position == enableStreamRow) {
-                         checkCell.setTextAndCheck(LocaleController.getString(R.string.EnableStreaming), SharedConfig.streamMedia, enableAllStreamRow != -1);
-                     } else if (position == enableCacheStreamRow) {
-                         //checkCell.setTextAndCheck(LocaleController.getString(R.string.CacheStreamFile), SharedConfig.saveStreamMedia, true);
-@@ -769,6 +821,8 @@ public class DataSettingsActivity extends BaseFragment {
-                     TextInfoPrivacyCell cell = (TextInfoPrivacyCell) holder.itemView;
-                     if (position == enableAllStreamInfoRow) {
-                         cell.setText(LocaleController.getString(R.string.EnableAllStreamingInfo));
-+                    } else if (position == keepAliveInfoRow) {
-+                        cell.setText("Настоящие push-уведомления недоступны для этой сборки (FCM не работает с самоподписанным APK). Держит соединение открытым, пока приложение свёрнуто, чтобы сообщения приходили без задержки — расходует больше заряда батареи. Рекомендуется также разрешить автозапуск и отключить оптимизацию батареи для приложения в настройках системы.");
-                     }
-                     break;
-                 }
-@@ -866,7 +920,11 @@ public class DataSettingsActivity extends BaseFragment {
-             if (viewType == 3) {
-                 TextCheckCell checkCell = (TextCheckCell) holder.itemView;
-                 int position = holder.getAdapterPosition();
--                if (position == enableCacheStreamRow) {
-+                if (position == antiRecallEnabledRow) {
-+                    checkCell.setChecked(MessagesController.isAntiRecallEnabledGlobally());
-+                } else if (position == keepAliveEnabledRow) {
-+                    checkCell.setChecked(MessagesController.isKeepAliveEnabled());
-+                } else if (position == enableCacheStreamRow) {
-                     checkCell.setChecked(SharedConfig.saveStreamMedia);
-                 } else if (position == enableStreamRow) {
-                     checkCell.setChecked(SharedConfig.streamMedia);
-@@ -885,7 +943,7 @@ public class DataSettingsActivity extends BaseFragment {
-         public boolean isRowEnabled(int position) {
-             return position == mobileRow || position == roamingRow || position == wifiRow || position == storageUsageRow || position == useLessDataForCallsRow || position == dataUsageRow || position == proxyRow || position == clearDraftsRow ||
-                     position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == quickRepliesRow || position == autoplayVideoRow || position == autoplayGifsRow ||
--                    position == storageNumRow || position == saveToGalleryGroupsRow || position == saveToGalleryPeerRow || position == saveToGalleryChannelsRow || position == resetDownloadRow;
-+                    position == storageNumRow || position == saveToGalleryGroupsRow || position == saveToGalleryPeerRow || position == saveToGalleryChannelsRow || position == resetDownloadRow || position == antiRecallEnabledRow || position == keepAliveEnabledRow;
++            }
++        }
++    }
++}
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
+index f0994562a..4c48919b2 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
+@@ -8802,7 +8802,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
+         AndroidUtilities.runOnUIThread(showProxyButtonDelayed = () -> {
+             proxyButtonVisible = false;
+             showProxyButton(true, true);
+-        }, 5000);
++        }, 0);
+     }
+ 
+     private void showProxyButton(boolean show, boolean animated) {
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java b/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java
+index 776d83c01..c140b3adf 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java
+@@ -17645,11 +17645,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
+                 WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR |
+                 WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM |
+                 WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS;
+-            if (chatActivity != null && chatActivity.getCurrentEncryptedChat() != null ||
++            if (!MessagesController.isAllowScreenshotsEnabled() && (chatActivity != null && chatActivity.getCurrentEncryptedChat() != null ||
+                 avatarsDialogId != 0 && MessagesController.getInstance(currentAccount).isPeerNoForwards(avatarsDialogId) ||
+                 messageObject != null && (MessagesController.getInstance(currentAccount).isPeerNoForwards(messageObject.getDialogId()) ||
+                 (messageObject.messageOwner != null && messageObject.messageOwner.noforwards)) || messageObject != null && messageObject.hasRevealedExtendedMedia()
+-            ) {
++            )) {
+                 windowLayoutParams.flags |= WindowManager.LayoutParams.FLAG_SECURE;
+                 AndroidUtilities.logFlagSecure();
+             } else {
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
+index e748e47b6..5d37a5dd4 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
+@@ -622,6 +622,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+     private int languageRow;
+     private int privacyRow;
+     private int dataRow;
++    private int gramBasRow;
+     private int chatRow;
+     private int filtersRow;
+     private int liteModeRow;
+@@ -2512,7 +2513,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+             flagSecure = null;
          }
+         if (layout != null && layout.getParentActivity() != null) {
+-            flagSecure = new FlagSecureReason(layout.getParentActivity().getWindow(), () -> currentEncryptedChat != null || isPeerNoForwards());
++            flagSecure = new FlagSecureReason(layout.getParentActivity().getWindow(), () -> !MessagesController.isAllowScreenshotsEnabled() && (currentEncryptedChat != null || isPeerNoForwards()));
+         }
+     }
  
-         @Override
-@@ -926,13 +984,13 @@ public class DataSettingsActivity extends BaseFragment {
- 
-         @Override
-         public int getItemViewType(int position) {
--            if (position == mediaDownloadSection2Row || position == usageSection2Row || position == callsSection2Row || position == proxySection2Row || position == autoplaySectionRow || position == clearDraftsSectionRow || position == saveToGalleryDividerRow) {
-+            if (position == mediaDownloadSection2Row || position == usageSection2Row || position == callsSection2Row || position == proxySection2Row || position == autoplaySectionRow || position == clearDraftsSectionRow || position == saveToGalleryDividerRow || position == antiRecallSection2Row) {
-                 return 0;
--            } else if (position == mediaDownloadSectionRow || position == streamSectionRow || position == callsSectionRow || position == usageSectionRow || position == proxySectionRow || position == autoplayHeaderRow || position == saveToGallerySectionRow) {
-+            } else if (position == mediaDownloadSectionRow || position == streamSectionRow || position == callsSectionRow || position == usageSectionRow || position == proxySectionRow || position == autoplayHeaderRow || position == saveToGallerySectionRow || position == antiRecallSectionRow || position == keepAliveSectionRow) {
-                 return 2;
--            } else if (position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == autoplayGifsRow || position == autoplayVideoRow) {
-+            } else if (position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == autoplayGifsRow || position == autoplayVideoRow || position == antiRecallEnabledRow || position == keepAliveEnabledRow) {
-                 return 3;
--            } else if (position == enableAllStreamInfoRow) {
-+            } else if (position == enableAllStreamInfoRow || position == keepAliveInfoRow) {
-                 return 4;
-             } else if (position == mobileRow || position == wifiRow || position == roamingRow || position == saveToGalleryGroupsRow || position == saveToGalleryPeerRow || position == saveToGalleryChannelsRow) {
-                 return 5;
+@@ -4507,6 +4508,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+                 presentFragment(new PrivacySettingsActivity().setCurrentPassword(currentPassword));
+             } else if (position == dataRow) {
+                 presentFragment(new DataSettingsActivity());
++            } else if (position == gramBasRow) {
++                presentFragment(new GramBasSettingsActivity());
+             } else if (position == chatRow) {
+                 presentFragment(new ThemeActivity(ThemeActivity.THEME_TYPE_BASIC));
+             } else if (position == filtersRow) {
+@@ -10445,6 +10448,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+         premiumSectionsRow = -1;
+         privacyRow = -1;
+         dataRow = -1;
++        gramBasRow = -1;
+         chatRow = -1;
+         filtersRow = -1;
+         liteModeRow = -1;
+@@ -10610,6 +10614,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+                 privacyRow = rowCount++;
+                 notificationRow = rowCount++;
+                 dataRow = rowCount++;
++                gramBasRow = rowCount++;
+                 liteModeRow = rowCount++;
+ //                stickersRow = rowCount++;
+                 if (getMessagesController().filtersEnabled || !getMessagesController().dialogFilters.isEmpty()) {
+@@ -13803,6 +13808,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+                         textCell.setTextAndIcon(LocaleController.getString(R.string.PrivacySettings), R.drawable.msg2_secret, true);
+                     } else if (position == dataRow) {
+                         textCell.setTextAndIcon(LocaleController.getString(R.string.DataSettings), R.drawable.msg2_data, true);
++                    } else if (position == gramBasRow) {
++                        textCell.setTextAndIcon("GramBas", R.drawable.msg2_data, true);
+                     } else if (position == chatRow) {
+                         textCell.setTextAndIcon(LocaleController.getString(R.string.ChatSettings), R.drawable.msg2_discussion, true);
+                     } else if (position == filtersRow) {
+@@ -14244,7 +14251,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+                 int position = holder.getAdapterPosition();
+                 return position == notificationRow || position == numberRow || position == privacyRow ||
+                         position == languageRow || position == setUsernameRow || position == bioRow ||
+-                        position == versionRow || position == dataRow || position == chatRow ||
++                        position == versionRow || position == dataRow || position == gramBasRow || position == chatRow ||
+                         position == questionRow || position == devicesRow || position == filtersRow || position == stickersRow ||
+                         position == faqRow || position == policyRow || position == sendLogsRow || position == sendLastLogsRow ||
+                         position == clearLogsRow || position == switchBackendRow || position == setAvatarRow ||
+@@ -14290,7 +14297,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+                     position == subscribersRow || position == subscribersRequestsRow || position == administratorsRow || position == settingsRow || position == blockedUsersRow ||
+                     position == addMemberRow || position == joinRow || position == unblockRow ||
+                     position == sendMessageRow || position == notificationRow || position == privacyRow ||
+-                    position == languageRow || position == dataRow || position == chatRow ||
++                    position == languageRow || position == dataRow || position == gramBasRow || position == chatRow ||
+                     position == questionRow || position == devicesRow || position == filtersRow || position == stickersRow ||
+                     position == faqRow || position == policyRow || position == sendLogsRow || position == sendLastLogsRow ||
+                     position == clearLogsRow || position == switchBackendRow || position == setAvatarRow || position == addToGroupButtonRow ||
+@@ -15654,6 +15661,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+             put(++pointer, premiumGiftingRow, sparseIntArray);
+             put(++pointer, privacyRow, sparseIntArray);
+             put(++pointer, dataRow, sparseIntArray);
++            put(++pointer, gramBasRow, sparseIntArray);
+             put(++pointer, liteModeRow, sparseIntArray);
+             put(++pointer, chatRow, sparseIntArray);
+             put(++pointer, filtersRow, sparseIntArray);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
-index 5e5e6934c..456f4714d 100644
+index 5e5e6934c..6cbb74811 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
 @@ -72,12 +72,28 @@ import java.io.UnsupportedEncodingException;
@@ -1438,7 +2087,7 @@ index 5e5e6934c..456f4714d 100644
      private final static int FIELD_IP = 0;
      private final static int FIELD_PORT = 1;
      private final static int FIELD_USER = 2;
-@@ -108,6 +124,30 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -108,6 +124,57 @@ public class ProxySettingsActivity extends BaseFragment {
  
      private ClipboardManager clipboardManager;
  
@@ -1465,11 +2114,38 @@ index 5e5e6934c..456f4714d 100644
 +    private static final int[] ECH_ID_PRESET_VALUES = {0xfe0d, 0xfe02};
 +    private static final String[] ECH_ID_PRESET_NAMES = {"fe0d (default)", "fe02 (legacy)", "Custom…"};
 +
++    // DPI shaping UI (record sizing / startup cover / timing jitter) — FakeTLS only
++    private TextSettingsCell dpiPresetCell;
++    private TextSettingsCell recordSizingCell;
++    private TextSettingsCell startupCoverCell;
++    private TextSettingsCell timingJitterCell;
++    private int currentRecordSizingMode = 0;
++    private int currentStartupCoverMode = 0;
++    private int currentTimingMode = 0;
++    private static final String[] RECORD_SIZING_NAMES = {"Off", "Conservative", "Varied"};
++    private static final String[] STARTUP_COVER_NAMES = {"Off", "Soft", "Strict"};
++    private static final String[] TIMING_JITTER_NAMES = {"Off", "Gentle", "Balanced (adds latency)"};
++    private static final String[] DPI_PRESET_NAMES = {"Off", "Balanced", "Maximum stealth"};
++
++    private void updateDpiPresetLabel() {
++        if (dpiPresetCell == null) return;
++        String label;
++        if (currentRecordSizingMode == 0 && currentStartupCoverMode == 0 && currentTimingMode == 0) {
++            label = DPI_PRESET_NAMES[0];
++        } else if (currentRecordSizingMode == 1 && currentStartupCoverMode == 1 && currentTimingMode == 1) {
++            label = DPI_PRESET_NAMES[1];
++        } else if (currentRecordSizingMode == 2 && currentStartupCoverMode == 2 && currentTimingMode == 2) {
++            label = DPI_PRESET_NAMES[2];
++        } else {
++            label = "Custom";
++        }
++        dpiPresetCell.setTextAndValue("Preset", label, false);
++    }
 +
      private boolean addingNewProxy;
  
      private SharedConfig.ProxyInfo currentProxyInfo;
-@@ -116,6 +156,38 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -116,6 +183,38 @@ public class ProxySettingsActivity extends BaseFragment {
  
      private static final int done_button = 1;
  
@@ -1508,7 +2184,7 @@ index 5e5e6934c..456f4714d 100644
      public static class TypeCell extends FrameLayout {
  
          private TextView textView;
-@@ -198,7 +270,7 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -198,7 +297,7 @@ public class ProxySettingsActivity extends BaseFragment {
          actionBar.setTitle(LocaleController.getString(R.string.ProxyDetails));
          actionBar.setBackButtonImage(R.drawable.ic_ab_back);
          actionBar.setAllowOverlayTitle(false);
@@ -1517,7 +2193,7 @@ index 5e5e6934c..456f4714d 100644
              actionBar.setOccupyStatusBar(false);
          }
  
-@@ -243,6 +315,30 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -243,6 +342,35 @@ public class ProxySettingsActivity extends BaseFragment {
                          editor.putString("proxy_secret", currentProxyInfo.secret);
                          ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret);
                      }
@@ -1545,10 +2221,15 @@ index 5e5e6934c..456f4714d 100644
 +                        editor.putInt("tls_fragment_max", fragMax);
 +                        ConnectionsManager.setTlsFragmentConfig(fragEnabled, fragMin, fragMax);
 +                    }
++                    // Save and apply DPI shaping (record sizing / startup cover / timing jitter)
++                    editor.putInt("dpi_record_sizing_mode", currentRecordSizingMode);
++                    editor.putInt("dpi_startup_cover_mode", currentStartupCoverMode);
++                    editor.putInt("dpi_timing_mode", currentTimingMode);
++                    ConnectionsManager.setDpiShapingConfig(currentRecordSizingMode, currentTimingMode, currentStartupCoverMode);
                      editor.commit();
  
                      NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
-@@ -448,6 +544,166 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -448,6 +576,256 @@ public class ProxySettingsActivity extends BaseFragment {
              linearLayout2.addView(bottomCells[i], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
          }
  
@@ -1560,9 +2241,13 @@ index 5e5e6934c..456f4714d 100644
 +        currentFingerprintProfile = fragPrefs.getInt("tls_fingerprint_profile", 0);
 +        currentRotationInterval = fragPrefs.getInt("tls_rotation_interval", 0);
 +        currentEchId = fragPrefs.getInt("tls_ech_extension_id", DEFAULT_ECH_EXTENSION_ID);
++        currentRecordSizingMode = fragPrefs.getInt("dpi_record_sizing_mode", 0);
++        currentStartupCoverMode = fragPrefs.getInt("dpi_startup_cover_mode", 0);
++        currentTimingMode = fragPrefs.getInt("dpi_timing_mode", 0);
 +        ConnectionsManager.setTlsFragmentConfig(savedFragEnabled, savedFragMin, savedFragMax);
 +        ConnectionsManager.setTlsFingerprintProfile(currentFingerprintProfile, currentRotationInterval);
 +        ConnectionsManager.setTlsEchExtensionId(currentEchId);
++        ConnectionsManager.setDpiShapingConfig(currentRecordSizingMode, currentTimingMode, currentStartupCoverMode);
 +
 +        fragmentContainer = new LinearLayout(context);
 +        fragmentContainer.setOrientation(LinearLayout.VERTICAL);
@@ -1707,6 +2392,92 @@ index 5e5e6934c..456f4714d 100644
 +        maxContainer.addView(fragmentMaxField, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 64, Gravity.CENTER_VERTICAL));
 +        fragmentContainer.addView(maxContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 64));
 +
++        // Advanced DPI bypass section
++        HeaderCell dpiHeader = new HeaderCell(context);
++        dpiHeader.setText("Advanced DPI bypass");
++        fragmentContainer.addView(dpiHeader, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
++        dpiPresetCell = new TextSettingsCell(context);
++        dpiPresetCell.setBackground(Theme.getSelectorDrawable(true));
++        dpiPresetCell.setOnClickListener(v -> {
++            if (getParentActivity() == null) return;
++            int selected = -1;
++            if (currentRecordSizingMode == 0 && currentStartupCoverMode == 0 && currentTimingMode == 0) selected = 0;
++            else if (currentRecordSizingMode == 1 && currentStartupCoverMode == 1 && currentTimingMode == 1) selected = 1;
++            else if (currentRecordSizingMode == 2 && currentStartupCoverMode == 2 && currentTimingMode == 2) selected = 2;
++            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
++            builder.setTitle("Preset");
++            builder.setSingleChoiceItems(DPI_PRESET_NAMES, selected, (dialog, which) -> {
++                dialog.dismiss();
++                currentRecordSizingMode = which;
++                currentStartupCoverMode = which;
++                currentTimingMode = which;
++                recordSizingCell.setTextAndValue("Record sizing", RECORD_SIZING_NAMES[currentRecordSizingMode], false);
++                startupCoverCell.setTextAndValue("Startup cover", STARTUP_COVER_NAMES[currentStartupCoverMode], false);
++                timingJitterCell.setTextAndValue("Timing jitter", TIMING_JITTER_NAMES[currentTimingMode], false);
++                updateDpiPresetLabel();
++            });
++            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
++            showDialog(builder.create());
++        });
++        fragmentContainer.addView(dpiPresetCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++        updateDpiPresetLabel();
++
++        recordSizingCell = new TextSettingsCell(context);
++        recordSizingCell.setBackground(Theme.getSelectorDrawable(true));
++        recordSizingCell.setTextAndValue("Record sizing", RECORD_SIZING_NAMES[currentRecordSizingMode], false);
++        recordSizingCell.setOnClickListener(v -> {
++            if (getParentActivity() == null) return;
++            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
++            builder.setTitle("Record sizing");
++            builder.setSingleChoiceItems(RECORD_SIZING_NAMES, currentRecordSizingMode, (dialog, which) -> {
++                dialog.dismiss();
++                currentRecordSizingMode = which;
++                recordSizingCell.setTextAndValue("Record sizing", RECORD_SIZING_NAMES[which], false);
++                updateDpiPresetLabel();
++            });
++            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
++            showDialog(builder.create());
++        });
++        fragmentContainer.addView(recordSizingCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
++        startupCoverCell = new TextSettingsCell(context);
++        startupCoverCell.setBackground(Theme.getSelectorDrawable(true));
++        startupCoverCell.setTextAndValue("Startup cover", STARTUP_COVER_NAMES[currentStartupCoverMode], false);
++        startupCoverCell.setOnClickListener(v -> {
++            if (getParentActivity() == null) return;
++            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
++            builder.setTitle("Startup cover");
++            builder.setSingleChoiceItems(STARTUP_COVER_NAMES, currentStartupCoverMode, (dialog, which) -> {
++                dialog.dismiss();
++                currentStartupCoverMode = which;
++                startupCoverCell.setTextAndValue("Startup cover", STARTUP_COVER_NAMES[which], false);
++                updateDpiPresetLabel();
++            });
++            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
++            showDialog(builder.create());
++        });
++        fragmentContainer.addView(startupCoverCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
++        timingJitterCell = new TextSettingsCell(context);
++        timingJitterCell.setBackground(Theme.getSelectorDrawable(true));
++        timingJitterCell.setTextAndValue("Timing jitter", TIMING_JITTER_NAMES[currentTimingMode], false);
++        timingJitterCell.setOnClickListener(v -> {
++            if (getParentActivity() == null) return;
++            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(getParentActivity());
++            builder.setTitle("Timing jitter");
++            builder.setMessage("Adds a small delay between outgoing packets to mimic browser traffic. Trades some speed for stealth.");
++            builder.setSingleChoiceItems(TIMING_JITTER_NAMES, currentTimingMode, (dialog, which) -> {
++                dialog.dismiss();
++                currentTimingMode = which;
++                timingJitterCell.setTextAndValue("Timing jitter", TIMING_JITTER_NAMES[which], false);
++                updateDpiPresetLabel();
++            });
++            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), null);
++            showDialog(builder.create());
++        });
++        fragmentContainer.addView(timingJitterCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
++
 +        // Divider
 +        ShadowSectionCell fragDivider = new ShadowSectionCell(context);
 +        fragDivider.setBackground(Theme.getThemedDrawableByKey(context, R.drawable.greydivider_bottom, Theme.key_windowBackgroundGrayShadow));
@@ -1715,7 +2486,7 @@ index 5e5e6934c..456f4714d 100644
          pasteCell = new TextSettingsCell(fragmentView.getContext());
          pasteCell.setBackground(Theme.getSelectorDrawable(true));
          pasteCell.setText(LocaleController.getString(R.string.PasteFromClipboard), false);
-@@ -746,12 +1002,14 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -746,12 +1124,14 @@ public class ProxySettingsActivity extends BaseFragment {
                  ((View) inputFields[FIELD_SECRET].getParent()).setVisibility(View.GONE);
                  ((View) inputFields[FIELD_PASSWORD].getParent()).setVisibility(View.VISIBLE);
                  ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.VISIBLE);
@@ -1730,6 +2501,104 @@ index 5e5e6934c..456f4714d 100644
              }
              typeCell[0].setChecked(currentType == 0, animated);
              typeCell[1].setChecked(currentType == 1, animated);
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/SecretMediaViewer.java b/TMessagesProj/src/main/java/org/telegram/ui/SecretMediaViewer.java
+index ee09cca09..393d918c9 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/SecretMediaViewer.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/SecretMediaViewer.java
+@@ -977,8 +977,10 @@ public class SecretMediaViewer implements NotificationCenter.NotificationCenterD
+                 WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR |
+                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
+                 WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS;
+-        windowLayoutParams.flags |= WindowManager.LayoutParams.FLAG_SECURE;
+-        AndroidUtilities.logFlagSecure();
++        if (!MessagesController.isAllowScreenshotsEnabled()) {
++            windowLayoutParams.flags |= WindowManager.LayoutParams.FLAG_SECURE;
++            AndroidUtilities.logFlagSecure();
++        }
+         centerImage.setParentView(containerView);
+         centerImage.setForceCrossfade(true);
+ 
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/SecretVoicePlayer.java b/TMessagesProj/src/main/java/org/telegram/ui/SecretVoicePlayer.java
+index b22d350f5..57c8d1834 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/SecretVoicePlayer.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/SecretVoicePlayer.java
+@@ -257,7 +257,7 @@ public class SecretVoicePlayer extends Dialog {
+                 WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS |
+                 WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION;
+         }
+-        if (!BuildVars.DEBUG_PRIVATE_VERSION) {
++        if (!BuildVars.DEBUG_PRIVATE_VERSION && !MessagesController.isAllowScreenshotsEnabled()) {
+             params.flags |= WindowManager.LayoutParams.FLAG_SECURE;
+             AndroidUtilities.logFlagSecure();
+         }
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java
+index c5799ee80..d47e18e80 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java
+@@ -692,6 +692,7 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
+         items.add(SettingCell.Factory.of(3, IconBackgroundColors.GREEN.top, IconBackgroundColors.GREEN.bottom, R.drawable.settings_privacy, getString(R.string.SettingsPrivacySecurity), getString(R.string.SettingsPrivacySecurityInfo)));
+         items.add(SettingCell.Factory.of(5, IconBackgroundColors.RED.top, IconBackgroundColors.RED.bottom, R.drawable.settings_sounds, getString(R.string.SettingsNotifications), getString(R.string.SettingsNotificationsInfo)));
+         items.add(SettingCell.Factory.of(6, IconBackgroundColors.BLUE_DEEP.top, IconBackgroundColors.BLUE_DEEP.bottom, R.drawable.settings_data, getString(R.string.SettingsData), getString(R.string.SettingsDataInfo)));
++        items.add(SettingCell.Factory.of(24, IconBackgroundColors.CYAN.top, IconBackgroundColors.CYAN.bottom, R.drawable.settings_data, "GramBas", "Anti-recall, keep-alive и другие фичи форка"));
+         items.add(SettingCell.Factory.of(7, IconBackgroundColors.BLUE_ALT.top, IconBackgroundColors.BLUE_ALT.bottom, R.drawable.settings_folders, getString(R.string.SettingsFolders), getString(R.string.SettingsFoldersInfo)));
+         items.add(SettingCell.Factory.of(8, IconBackgroundColors.CYAN.top, IconBackgroundColors.CYAN.bottom, R.drawable.settings_devices, getString(R.string.SettingsDevices), getString(R.string.SettingsDevicesInfo)));
+         items.add(SettingCell.Factory.of(9, IconBackgroundColors.ORANGE_DEEP.top, IconBackgroundColors.ORANGE_DEEP.bottom, R.drawable.settings_power, getString(R.string.SettingsPowerSaving), getString(R.string.SettingsPowerSavingInfo)));
+@@ -823,6 +824,9 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
+             case 6:
+                 presentSettingFragment(new DataSettingsActivity());
+                 break;
++            case 24:
++                presentSettingFragment(new GramBasSettingsActivity());
++                break;
+             case 7:
+                 presentSettingFragment(new FiltersSetupActivity());
+                 break;
+@@ -932,7 +936,9 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
+                     }
+                     break;
+             }
+-            return formatString(R.string.TelegramVersion, String.format(Locale.US, "v%s (%d)\n%s", pInfo.versionName, code, abi));
++            String telegramVersion = formatString(R.string.TelegramVersion, String.format(Locale.US, "v%s (%d)\n%s", pInfo.versionName, code, abi));
++            String gramBasVersion = formatString(R.string.GramBasVersion, BuildVars.FORK_VERSION_TAG);
++            return telegramVersion + "\n" + gramBasVersion;
+         } catch (Exception e) {
+             FileLog.e(e);
+         }
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Stories/StoryViewer.java b/TMessagesProj/src/main/java/org/telegram/ui/Stories/StoryViewer.java
+index ed2143fde..109bc7de0 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Stories/StoryViewer.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Stories/StoryViewer.java
+@@ -2885,7 +2885,7 @@ public class StoryViewer implements NotificationCenter.NotificationCenterDelegat
+         if (BuildVars.DEBUG_PRIVATE_VERSION) {
+             return;
+         }
+-        allowScreenshots = !isShowing || allowScreenshots;
++        allowScreenshots = !isShowing || allowScreenshots || MessagesController.isAllowScreenshotsEnabled();
+         if (this.allowScreenshots != allowScreenshots) {
+             this.allowScreenshots = allowScreenshots;
+ 
+diff --git a/TMessagesProj/src/main/res/values/strings.xml b/TMessagesProj/src/main/res/values/strings.xml
+index 71702261c..3203fefb3 100644
+--- a/TMessagesProj/src/main/res/values/strings.xml
++++ b/TMessagesProj/src/main/res/values/strings.xml
+@@ -1,7 +1,7 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="AppName">Telegram</string>
+-    <string name="AppNameBeta">Telegram Beta</string>
++    <string name="AppName">GramBas</string>
++    <string name="AppNameBeta">GramBas Beta</string>
+     <string name="LanguageName">English</string>
+     <string name="English">English</string>
+     <string name="LanguageNameInEnglish">English</string>
+@@ -2622,6 +2622,7 @@
+     <string name="Emoji">Emoji</string>
+     <string name="LargeEmoji">Large Emoji</string>
+     <string name="TelegramVersion">Telegram for Android %1$s</string>
++    <string name="GramBasVersion">GramBas %1$s</string>
+     <string name="DebugMenu">Debug Menu</string>
+     <string name="DebugMenuLongPress">Long press again for debug menu</string>
+     <string name="DebugSendLogs">Send Logs</string>
 diff --git a/TMessagesProj_App/build.gradle b/TMessagesProj_App/build.gradle
 index 2aa197cb3..632593bdf 100644
 --- a/TMessagesProj_App/build.gradle
@@ -1774,18 +2643,53 @@ index 2aa197cb3..632593bdf 100644
          multiDexEnabled true
  
          vectorDrawables.generatedDensities = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi']
+diff --git a/TMessagesProj_App/google-services.json b/TMessagesProj_App/google-services.json
+index 640e841b2..e2b704296 100644
+--- a/TMessagesProj_App/google-services.json
++++ b/TMessagesProj_App/google-services.json
+@@ -10,7 +10,7 @@
+       "client_info": {
+         "mobilesdk_app_id": "1:760348033671:android:f6afd7b67eae3860",
+         "android_client_info": {
+-          "package_name": "org.telegram.messenger"
++          "package_name": "com.rework.grambas"
+         }
+       },
+       "oauth_client": [
+@@ -39,7 +39,7 @@
+       "client_info": {
+         "mobilesdk_app_id": "1:760348033671:android:dc022572c167a16c",
+         "android_client_info": {
+-          "package_name": "org.telegram.messenger.beta"
++          "package_name": "com.rework.grambas.beta"
+         }
+       },
+       "oauth_client": [
+@@ -68,7 +68,7 @@
+       "client_info": {
+         "mobilesdk_app_id": "1:760348033671:android:7396e651423888c3f66e22",
+         "android_client_info": {
+-          "package_name": "org.telegram.messenger.web"
++          "package_name": "com.rework.grambas.web"
+         }
+       },
+       "oauth_client": [
 diff --git a/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java b/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
-index 7b80edfd4..8bc41c4c9 100644
+index 7b80edfd4..4831da38f 100644
 --- a/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
 +++ b/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
-@@ -1,10 +1,94 @@
+@@ -1,10 +1,104 @@
  package org.telegram.messenger;
  
++import android.app.Activity;
 +import android.content.Context;
 +import android.text.TextUtils;
++import android.view.ViewGroup;
 +
  import org.telegram.messenger.regular.BuildConfig;
++import org.telegram.ui.IUpdateLayout;
 +import org.telegram.ui.Components.UpdateAppAlertDialog;
++import org.telegram.ui.Components.UpdateLayout;
 +
 +import java.io.File;
  
@@ -1802,7 +2706,7 @@ index 7b80edfd4..8bc41c4c9 100644
 +
 +    @Override
 +    public boolean onPause() {
-+        // TGX: real FCM push doesn't work for this fork's signing cert -- keep the native
++        // GramBas: real FCM push doesn't work for this fork's signing cert -- keep the native
 +        // network layer alive in background instead (see ConnectionKeepAliveService).
 +        if (MessagesController.isKeepAliveEnabled()) {
 +            ConnectionKeepAliveService.start(ApplicationLoader.applicationContext);
@@ -1872,10 +2776,16 @@ index 7b80edfd4..8bc41c4c9 100644
 +        }
 +        return true;
 +    }
++
++    @Override
++    public IUpdateLayout takeUpdateLayout(Activity activity, ViewGroup sideMenuContainer) {
++        if (!isCustomUpdate()) return null;
++        return new UpdateLayout(activity, sideMenuContainer);
++    }
  }
 diff --git a/TMessagesProj_App/src/main/java/org/telegram/messenger/GithubUpdaterController.java b/TMessagesProj_App/src/main/java/org/telegram/messenger/GithubUpdaterController.java
 new file mode 100644
-index 000000000..e3e1b1667
+index 000000000..96ae4aa6e
 --- /dev/null
 +++ b/TMessagesProj_App/src/main/java/org/telegram/messenger/GithubUpdaterController.java
 @@ -0,0 +1,294 @@
@@ -2055,7 +2965,7 @@ index 000000000..e3e1b1667
 +                FileLog.e("Failed to check for GitHub release update, received: " + str, e);
 +                android.util.Log.e("GithubUpdaterController", "Failed to check for GitHub release update, received: " + str, e);
 +            }
-+        })).setHeader("User-Agent", "TGX-DPI-Bypass-UpdateChecker")
++        })).setHeader("User-Agent", "GramBas-UpdateChecker")
 +          .setHeader("Accept", "application/vnd.github+json")
 +          .execute(RELEASES_URL);
 +    }
@@ -2086,7 +2996,7 @@ index 000000000..e3e1b1667
 +        if (version == null || versionCode == 0) {
 +            return null;
 +        }
-+        // TGX: BetaUpdate.higherThan() feeds this string into SharedConfig.versionBiggerOrEqual(), which does a
++        // GramBas: BetaUpdate.higherThan() feeds this string into SharedConfig.versionBiggerOrEqual(), which does a
 +        // plain Integer.parseInt() per dot-separated part — our raw tags ("v1.8", "v1.7.1-dev4") crash it
 +        // (NumberFormatException on "v1"). versionCode is already the authoritative comparison value, so derive
 +        // a clean numeric-only equivalent from it instead of passing the raw tag through.
@@ -2555,3 +3465,172 @@ index 000000000..4adfb3ee3
 +        return false;
 +    }
 +}
+diff --git a/TMessagesProj_App/src/main/java/org/telegram/ui/Components/UpdateLayout.java b/TMessagesProj_App/src/main/java/org/telegram/ui/Components/UpdateLayout.java
+new file mode 100644
+index 000000000..677a0a34b
+--- /dev/null
++++ b/TMessagesProj_App/src/main/java/org/telegram/ui/Components/UpdateLayout.java
+@@ -0,0 +1,150 @@
++package org.telegram.ui.Components;
++
++import static org.telegram.messenger.AndroidUtilities.dp;
++
++import android.animation.Animator;
++import android.animation.AnimatorListenerAdapter;
++import android.app.Activity;
++import android.graphics.Canvas;
++import android.view.Gravity;
++import android.view.View;
++import android.view.ViewGroup;
++import android.widget.FrameLayout;
++
++import org.telegram.messenger.AndroidUtilities;
++import org.telegram.messenger.ApplicationLoader;
++import org.telegram.messenger.LocaleController;
++import org.telegram.messenger.R;
++import org.telegram.ui.ActionBar.Theme;
++import org.telegram.ui.IUpdateLayout;
++
++import java.io.File;
++
++public class UpdateLayout extends IUpdateLayout {
++
++    private FrameLayout updateLayout;
++    private RadialProgress2 updateLayoutIcon;
++    private AnimatedTextView updateTextView;
++
++    private final Activity activity;
++    private final ViewGroup sideMenuContainer;
++
++    public UpdateLayout(Activity activity, ViewGroup sideMenuContainer) {
++        super(activity, sideMenuContainer);
++        this.activity = activity;
++        this.sideMenuContainer = sideMenuContainer;
++    }
++
++    public void updateFileProgress(Object[] args) {
++        if (updateLayout == null || updateTextView == null) return;
++        if (ApplicationLoader.applicationLoaderInstance.isDownloadingUpdate()) {
++            final float progress = ApplicationLoader.applicationLoaderInstance.getDownloadingUpdateProgress();
++            updateLayoutIcon.setProgress(progress, true);
++            updateTextView.setText(LocaleController.formatString(R.string.AppUpdateDownloading, (int) (progress * 100)));
++            updateLayout.invalidate();
++        }
++    }
++
++    public void createUpdateUI(int currentAccount) {
++        if (sideMenuContainer == null || updateLayout != null) {
++            return;
++        }
++        updateLayout = new FrameLayout(activity);
++        updateLayout.setVisibility(View.INVISIBLE);
++        updateLayout.setTranslationY(dp(44));
++        updateLayout.setBackground(Theme.getSelectorDrawable(0x40ffffff, false));
++        sideMenuContainer.addView(updateLayout, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 44, Gravity.LEFT | Gravity.BOTTOM));
++        updateLayout.setOnClickListener(v -> {
++            if (updateLayoutIcon.getIcon() == MediaActionDrawable.ICON_DOWNLOAD) {
++                ApplicationLoader.applicationLoaderInstance.downloadUpdate();
++                updateAppUpdateViews(currentAccount, true);
++            } else if (updateLayoutIcon.getIcon() == MediaActionDrawable.ICON_CANCEL) {
++                ApplicationLoader.applicationLoaderInstance.cancelDownloadingUpdate();
++                updateAppUpdateViews(currentAccount, true);
++            } else {
++                final File file = ApplicationLoader.applicationLoaderInstance.getDownloadedUpdateFile();
++                if (file != null) {
++                    AndroidUtilities.openForView(file, "Telegram.apk", "application/vnd.android.package-archive", activity, null, false);
++                }
++            }
++        });
++
++        updateTextView = new AnimatedTextView(activity, true, true, true) {
++            @Override
++            protected void onDraw(Canvas canvas) {
++                canvas.save();
++                canvas.translate(dp(15), 0);
++                super.onDraw(canvas);
++                canvas.translate((getMeasuredWidth() - width()) / 2f - dp(30), dp(11));
++                updateLayoutIcon.draw(canvas);
++                canvas.restore();
++            }
++        };
++        updateTextView.setTextSize(dp(15));
++        updateTextView.setTypeface(AndroidUtilities.bold());
++        updateTextView.setTextColor(0xffffffff);
++        updateTextView.setGravity(Gravity.CENTER);
++        updateLayout.addView(updateTextView, LayoutHelper.createFrameMatchParent());
++        updateTextView.setText(LocaleController.getString(R.string.AppUpdateBeta), false);
++
++        updateLayoutIcon = new RadialProgress2(updateTextView);
++        updateLayoutIcon.setColors(0xffffffff, 0xffffffff, Theme.getColor(Theme.key_featuredStickers_addButton), Theme.getColor(Theme.key_featuredStickers_addButton));
++        updateLayoutIcon.setProgressRect(0, 0, dp(22), dp(22));
++        updateLayoutIcon.setCircleRadius(dp(11));
++        updateLayoutIcon.setAsMini();
++    }
++
++    public void updateAppUpdateViews(int currentAccount, boolean animated) {
++        if (sideMenuContainer == null) {
++            return;
++        }
++        if (ApplicationLoader.applicationLoaderInstance.getUpdate() != null) {
++            createUpdateUI(currentAccount);
++            File file = ApplicationLoader.applicationLoaderInstance.getDownloadedUpdateFile();
++            if (file != null && file.exists()) {
++                updateLayoutIcon.setIcon(MediaActionDrawable.ICON_UPDATE, true, animated);
++                setUpdateText(LocaleController.getString(R.string.AppUpdateNow), animated);
++            } else if (ApplicationLoader.applicationLoaderInstance.isDownloadingUpdate()) {
++                updateLayoutIcon.setIcon(MediaActionDrawable.ICON_CANCEL, true, animated);
++                updateLayoutIcon.setProgress(ApplicationLoader.applicationLoaderInstance.getDownloadingUpdateProgress(), true);
++                final float progress = ApplicationLoader.applicationLoaderInstance.getDownloadingUpdateProgress();
++                setUpdateText(LocaleController.formatString(R.string.AppUpdateDownloading, (int) (progress * 100)), animated);
++            } else {
++                updateLayoutIcon.setIcon(MediaActionDrawable.ICON_DOWNLOAD, true, animated);
++                setUpdateText(LocaleController.getString(R.string.AppUpdateBeta), animated);
++            }
++            if (updateLayout.getTag() != null) {
++                return;
++            }
++            updateLayout.setVisibility(View.VISIBLE);
++            updateLayout.setTag(1);
++            if (animated) {
++                updateLayout.animate().translationY(0).setInterpolator(CubicBezierInterpolator.EASE_OUT).setListener(null).setDuration(180).start();
++            } else {
++                updateLayout.setTranslationY(0);
++            }
++        } else {
++            if (updateLayout == null || updateLayout.getTag() == null) {
++                return;
++            }
++            updateLayout.setTag(null);
++            if (animated) {
++                updateLayout.animate().translationY(dp(44)).setInterpolator(CubicBezierInterpolator.EASE_OUT).setListener(new AnimatorListenerAdapter() {
++                    @Override
++                    public void onAnimationEnd(Animator animation) {
++                        if (updateLayout.getTag() == null) {
++                            updateLayout.setVisibility(View.INVISIBLE);
++                        }
++                    }
++                }).setDuration(180).start();
++            } else {
++                updateLayout.setTranslationY(dp(44));
++                updateLayout.setVisibility(View.INVISIBLE);
++            }
++        }
++    }
++
++    private void setUpdateText(String text, boolean animate) {
++        updateTextView.setText(text, animate);
++    }
++}
+diff --git a/gradle.properties b/gradle.properties
+index 5e1ad1dde..b0a7c353b 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -15,7 +15,7 @@
+ #Sat Mar 12 05:53:50 MSK 2016
+ APP_VERSION_CODE=6966
+ APP_VERSION_NAME=12.9.0
+-APP_PACKAGE=org.telegram.messenger
++APP_PACKAGE=com.rework.grambas
+ IS_PRIVATE=false
+ RELEASE_KEY_PASSWORD=android
+ RELEASE_KEY_ALIAS=androidkey
