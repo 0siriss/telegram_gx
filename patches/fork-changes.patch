@@ -1,3 +1,287 @@
+diff --git a/.github/workflows/auto-update.yml b/.github/workflows/auto-update.yml
+new file mode 100644
+index 000000000..f19cb4316
+--- /dev/null
++++ b/.github/workflows/auto-update.yml
+@@ -0,0 +1,135 @@
++name: Auto-update from upstream
++
++on:
++  schedule:
++    - cron: '0 6 * * 1'  # Каждый понедельник в 06:00 UTC
++  workflow_dispatch:      # Ручной запуск
++
++jobs:
++  check-and-update:
++    runs-on: ubuntu-latest
++
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
++          token: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Fetch upstream
++        run: |
++          git remote add upstream https://github.com/DrKLO/Telegram.git
++          git fetch upstream master --depth=1
++
++      - name: Check upstream version
++        id: version
++        run: |
++          # Версия хранится в APP_VERSION_NAME в корневом gradle.properties, а не в
++          # TMessagesProj/build.gradle (там его нет вообще — старая проверка сравнивала
++          # две пустые строки и поэтому НИКОГДА не обнаруживала обновление).
++          UPSTREAM=$(git show upstream/master:gradle.properties \
++            | grep '^APP_VERSION_NAME=' | head -1 | cut -d= -f2-)
++          CURRENT=$(grep '^APP_VERSION_NAME=' gradle.properties \
++            | head -1 | cut -d= -f2-)
++          echo "upstream=$UPSTREAM" >> $GITHUB_OUTPUT
++          echo "current=$CURRENT"   >> $GITHUB_OUTPUT
++          echo "Upstream: $UPSTREAM | Current: $CURRENT"
++          if [ "$UPSTREAM" != "$CURRENT" ]; then
++            echo "changed=true" >> $GITHUB_OUTPUT
++          else
++            echo "changed=false" >> $GITHUB_OUTPUT
++          fi
++
++      - name: No update needed
++        if: steps.version.outputs.changed == 'false'
++        run: echo "Already up to date (${{ steps.version.outputs.current }}). Skipping."
++
++      - name: Apply patches on new upstream
++        if: steps.version.outputs.changed == 'true'
++        id: apply
++        run: |
++          git config user.email "github-actions@github.com"
++          git config user.name "GitHub Actions"
++
++          # Запоминаем текущий форк-коммит: upstream/master его не содержит,
++          # а .github/workflows и patches/ не существуют в апстриме вовсе —
++          # reset --hard их удалит, поэтому восстанавливаем их отдельно ниже.
++          PREV=$(git rev-parse HEAD)
++          echo "prev=$PREV" >> $GITHUB_OUTPUT
++
++          # upstream/master был получен с --depth=1 (shallow) для дешёвой проверки версии.
++          # Пуш shallow-коммита ломается на приёмной стороне ("did not receive expected
++          # object" / index-pack failed), т.к. у него нет полной цепочки родителей —
++          # донабираем полную историю перед тем, как на него переключаться.
++          git fetch upstream master --unshallow
++
++          # Сброс на чистый upstream
++          git reset --hard upstream/master
++
++          # Возвращаем CI-инфраструктуру и сам набор патчей (их нет в апстриме,
++          # поэтому конфликтовать с новым upstream-кодом им нечем)
++          git checkout "$PREV" -- .github/workflows patches
++
++          # Применяем единый патч со всеми доработками форка
++          # (TLS DPI bypass, ECH picker, updater, anti-recall и т.д.)
++          FAILED=""
++          if ! git apply --3way patches/fork-changes.patch; then
++            FAILED="patches/fork-changes.patch"
++          fi
++
++          if [ -n "$FAILED" ]; then
++            echo "patch_failed=true"  >> $GITHUB_OUTPUT
++            echo "failed_files=$FAILED" >> $GITHUB_OUTPUT
++          else
++            echo "patch_failed=false" >> $GITHUB_OUTPUT
++          fi
++
++      - name: Notify patch failure via Telegram
++        if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'true'
++        run: |
++          TEXT="❌ *Auto-update failed*%0A%0AНовая версия DrKLO: *${{ steps.version.outputs.upstream }}*%0AПатчи не применились автоматически — нужен ручной merge.%0A%0AФайлы:%0A${{ steps.apply.outputs.failed_files }}"
++          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
++            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
++            -d "text=$TEXT" \
++            -d "parse_mode=Markdown"
++          exit 1
++
++      - name: Commit, tag and push
++        if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'false'
++        id: push
++        run: |
++          git config user.email "github-actions@github.com"
++          git config user.name "GitHub Actions"
++
++          # Добавляем всё: patch может создавать новые файлы (updater, anti-recall и т.д.),
++          # а не только модифицировать уже существующие
++          git add -A
++
++          git commit -m "Auto-update to DrKLO ${{ steps.version.outputs.upstream }} with fork patches"
++
++          # Определяем новый тег
++          LATEST_TAG=$(git tag --sort=-v:refname | grep '^v' | head -1)
++          MAJOR=$(echo "$LATEST_TAG" | grep -oP '\d+' | head -1)
++          MINOR=$(echo "$LATEST_TAG" | grep -oP '\d+' | tail -1)
++          NEW_TAG="v$MAJOR.$((MINOR + 1))"
++          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
++
++          git tag "$NEW_TAG"
++          git push origin master --force
++          git push origin "$NEW_TAG"
++
++      - name: Trigger build workflow
++        if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'false'
++        run: |
++          gh workflow run build.yml --ref ${{ steps.push.outputs.new_tag }}
++        env:
++          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Notify update started via Telegram
++        if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'false'
++        run: |
++          TEXT="🔄 *Auto-update started*%0A%0AНовая версия DrKLO: *${{ steps.version.outputs.upstream }}*%0AТег: *${{ steps.push.outputs.new_tag }}*%0A%0AПатчи применены ✅ Сборка запущена..."
++          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
++            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
++            -d "text=$TEXT" \
++            -d "parse_mode=Markdown"
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+new file mode 100644
+index 000000000..38a5174be
+--- /dev/null
++++ b/.github/workflows/build.yml
+@@ -0,0 +1,137 @@
++name: Build Release APK
++
++on:
++  push:
++    tags:
++      - 'v*'
++
++jobs:
++  build:
++    runs-on: ubuntu-latest
++    permissions:
++      contents: write
++
++    steps:
++      - name: Notify build started via Telegram
++        run: |
++          TAG="${GITHUB_REF#refs/tags/}"
++          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
++            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
++            -d "text=🔨 <b>Сборка начата</b> — ${TAG}%0A%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
++            -d "parse_mode=HTML"
++
++      - name: Free disk space
++        run: |
++          sudo rm -rf /usr/share/dotnet
++          sudo rm -rf /opt/ghc
++          sudo rm -rf /usr/local/.ghcup
++          sudo rm -rf /usr/local/share/boost
++          sudo rm -rf /usr/share/swift
++          sudo rm -rf /opt/hostedtoolcache/CodeQL
++          sudo rm -rf /opt/hostedtoolcache/Ruby
++          sudo rm -rf /opt/hostedtoolcache/PyPy
++          sudo docker image prune -af || true
++          df -h
++
++      - name: Checkout code
++        uses: actions/checkout@v4
++
++      - name: Set up JDK 17
++        uses: actions/setup-java@v4
++        with:
++          java-version: '17'
++          distribution: 'temurin'
++
++      - name: Install NDK and build tools
++        run: |
++          echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
++            "ndk;23.2.8568313" \
++            "cmake;3.22.1" \
++            "build-tools;36.0.0" \
++            "platforms;android-36"
++
++      - name: Cache Gradle
++        uses: actions/cache@v4
++        with:
++          path: |
++            ~/.gradle/caches
++            ~/.gradle/wrapper
++          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
++          restore-keys: gradle-
++
++      - name: Cache NDK build
++        uses: actions/cache@v4
++        with:
++          path: |
++            TMessagesProj/.cxx
++            TMessagesProj/build/intermediates/cmake
++          key: ndk-${{ hashFiles('TMessagesProj/jni/**') }}
++          restore-keys: ndk-
++
++      - name: Create local.properties
++        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
++
++      - name: Build Release APK
++        run: ./gradlew :TMessagesProj_App:assembleRelease --no-daemon
++        env:
++          GRADLE_OPTS: "-Xmx6g -XX:MaxMetaspaceSize=512m"
++          FORK_VERSION_TAG: ${{ github.ref_name }}
++
++      - name: Get tag name
++        id: tag
++        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
++
++      - name: Create GitHub Release
++        id: release
++        uses: softprops/action-gh-release@v2
++        with:
++          tag_name: ${{ steps.tag.outputs.tag }}
++          name: "GramBas ${{ steps.tag.outputs.tag }}"
++          body: |
++            ## GramBas — ${{ steps.tag.outputs.tag }}
++
++            Telegram Android fork with TLS DPI bypass patches.
++
++            ### Что включено:
++            - TLS ECH fix (0xfe0d)
++            - Fingerprint profiles: Chrome 120+, Firefox 121+, Safari 17, Edge 120+, Random
++            - TLS ClientHello fragmentation
++            - Configurable rotation interval (30–240s)
++            - Anti-recall: сообщения, удалённые отправителем, сохраняются локально и помечаются "удалено отправителем" (настраивается глобально и отдельно для каждого чата)
++          files: |
++            TMessagesProj_App/build/outputs/apk/afat/release/app.apk
++          draft: false
++          prerelease: false
++        env:
++          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Send APK via Telegram
++        run: |
++          APK_PATH="TMessagesProj_App/build/outputs/apk/afat/release/app.apk"
++          APK_SIZE=$(stat -c%s "$APK_PATH" 2>/dev/null || echo 0)
++          MAX_SIZE=$((50 * 1024 * 1024))  # 50 MB
++
++          if [ "$APK_SIZE" -le "$MAX_SIZE" ]; then
++            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
++              -F "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
++              -F "document=@$APK_PATH" \
++              -F "caption=✅ <b>GramBas ${{ steps.tag.outputs.tag }}</b> готов!%0A%0A• TLS ECH 0xfe0d%0A• Fingerprint: Chrome/Firefox/Safari/Edge/Random%0A• Фрагментация ClientHello" \
++              -F "parse_mode=HTML"
++          else
++            RELEASE_URL="${{ steps.release.outputs.url }}"
++            SIZE_MB=$(echo "scale=1; $APK_SIZE / 1048576" | bc)
++            TEXT="✅ <b>GramBas ${{ steps.tag.outputs.tag }}</b> готов!%0A%0AAPK слишком большой для прямой отправки (${SIZE_MB} МБ).%0A%0A📥 <a href=\"$RELEASE_URL\">Скачать с GitHub Release</a>"
++            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
++              -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
++              -d "text=$TEXT" \
++              -d "parse_mode=HTML"
++          fi
++
++      - name: Notify build failure via Telegram
++        if: failure()
++        run: |
++          TEXT="❌ <b>Сборка упала</b> — ${{ steps.tag.outputs.tag }}%0A%0AПосмотри логи:%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
++          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
++            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
++            -d "text=$TEXT" \
++            -d "parse_mode=HTML"
 diff --git a/TMessagesProj/build.gradle b/TMessagesProj/build.gradle
 index 61a653057..aea0a38a3 100644
 --- a/TMessagesProj/build.gradle
@@ -2675,14 +2959,16 @@ index 640e841b2..e2b704296 100644
        },
        "oauth_client": [
 diff --git a/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java b/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
-index 7b80edfd4..4831da38f 100644
+index 7b80edfd4..a67fc533e 100644
 --- a/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
 +++ b/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
-@@ -1,10 +1,104 @@
+@@ -1,10 +1,117 @@
  package org.telegram.messenger;
  
 +import android.app.Activity;
 +import android.content.Context;
++import android.os.Handler;
++import android.os.Looper;
 +import android.text.TextUtils;
 +import android.view.ViewGroup;
 +
@@ -2704,12 +2990,22 @@ index 7b80edfd4..4831da38f 100644
 +        return true;
 +    }
 +
++    private final Handler keepAliveHandler = new Handler(Looper.getMainLooper());
++    private final Runnable startKeepAliveService = () -> ConnectionKeepAliveService.start(ApplicationLoader.applicationContext);
++
++    // GramBas: a fast onPause->onResume flicker (e.g. tapping a heads-up notification the
++    // instant it appears) used to start the service and stop it again within milliseconds,
++    // before onStartCommand's async startForeground() call landed -- Android then kills the
++    // process with ForegroundServiceDidNotStartInTimeException. Debouncing the start absorbs
++    // the flicker: if onResume cancels it in time, the service never actually starts.
++    private static final long KEEP_ALIVE_START_DELAY_MS = 1500;
++
 +    @Override
 +    public boolean onPause() {
 +        // GramBas: real FCM push doesn't work for this fork's signing cert -- keep the native
 +        // network layer alive in background instead (see ConnectionKeepAliveService).
 +        if (MessagesController.isKeepAliveEnabled()) {
-+            ConnectionKeepAliveService.start(ApplicationLoader.applicationContext);
++            keepAliveHandler.postDelayed(startKeepAliveService, KEEP_ALIVE_START_DELAY_MS);
 +            return true;
 +        }
 +        return false;
@@ -2717,6 +3013,7 @@ index 7b80edfd4..4831da38f 100644
 +
 +    @Override
 +    public void onResume() {
++        keepAliveHandler.removeCallbacks(startKeepAliveService);
 +        ConnectionKeepAliveService.stop(ApplicationLoader.applicationContext);
 +    }
 +
