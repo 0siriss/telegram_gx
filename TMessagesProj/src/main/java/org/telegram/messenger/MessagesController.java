@@ -21608,6 +21608,17 @@ public class MessagesController extends BaseController implements NotificationCe
         getGlobalMainSettings().edit().putBoolean("allow_screenshots_enabled", enabled).commit();
     }
 
+    // GramBas: hide sponsored (ad) messages for everyone, not just Telegram Premium users --
+    // gated at the single insertion point in ChatActivity.addSponsoredMessages() / VideoAds, so
+    // getSponsoredMessages() is never even called when this is on (no wasted RPC either).
+    public static boolean isSponsoredMessagesHidden() {
+        return getGlobalMainSettings().getBoolean("sponsored_messages_hidden", false);
+    }
+
+    public static void setSponsoredMessagesHidden(boolean hidden) {
+        getGlobalMainSettings().edit().putBoolean("sponsored_messages_hidden", hidden).commit();
+    }
+
     // TGX: suppress the "took a screenshot" service message sent to the other party in secret
     // chats. Independent of isAllowScreenshotsEnabled -- a user may still want FLAG_SECURE (e.g.
     // to keep the OS-level screenshot block) while not notifying the peer, or vice versa.
