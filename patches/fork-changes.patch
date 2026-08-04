@@ -1272,7 +1272,7 @@ index 80374e50c..2b8a14643 100644
      public float forceSeekTo = -1;
      public int audioProgressMs;
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
-index 2e65a2ca4..44e822c0b 100644
+index 2e65a2ca4..4bfa57dbe 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
 @@ -8298,13 +8298,17 @@ public class MessagesController extends BaseController implements NotificationCe
@@ -1464,7 +1464,7 @@ index 2e65a2ca4..44e822c0b 100644
                  getMessagesStorage().getStorageQueue().postRunnable(() -> {
                      ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, arrayList, false, true, 0, 0);
                      getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, arrayList, dialogIds);
-@@ -21458,6 +21550,136 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21458,6 +21550,147 @@ public class MessagesController extends BaseController implements NotificationCe
          return false;
      }
  
@@ -1524,6 +1524,17 @@ index 2e65a2ca4..44e822c0b 100644
 +
 +    public static void setAllowScreenshotsEnabled(boolean enabled) {
 +        getGlobalMainSettings().edit().putBoolean("allow_screenshots_enabled", enabled).commit();
++    }
++
++    // GramBas: hide sponsored (ad) messages for everyone, not just Telegram Premium users --
++    // gated at the single insertion point in ChatActivity.addSponsoredMessages() / VideoAds, so
++    // getSponsoredMessages() is never even called when this is on (no wasted RPC either).
++    public static boolean isSponsoredMessagesHidden() {
++        return getGlobalMainSettings().getBoolean("sponsored_messages_hidden", false);
++    }
++
++    public static void setSponsoredMessagesHidden(boolean hidden) {
++        getGlobalMainSettings().edit().putBoolean("sponsored_messages_hidden", hidden).commit();
 +    }
 +
 +    // TGX: suppress the "took a screenshot" service message sent to the other party in secret
@@ -1788,6 +1799,19 @@ index 0a8a9bd08..7b8656dc2 100644
          ArrayList<MessageObject> popupArrayAdd = new ArrayList<>(0);
          notificationsQueue.postRunnable(() -> {
              boolean added = false;
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java b/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java
+index e8ea5120e..3678770bf 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java
+@@ -182,7 +182,7 @@ public class VideoAds {
+     private void load() {
+         if (loading || loaded) return;
+ 
+-        if (UserConfig.getInstance(currentAccount).isPremium() && MessagesController.getInstance(currentAccount).isSponsoredDisabled()) {
++        if (UserConfig.getInstance(currentAccount).isPremium() && MessagesController.getInstance(currentAccount).isSponsoredDisabled() || MessagesController.isSponsoredMessagesHidden()) {
+             return;
+         }
+ 
 diff --git a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
 index 470e3c4a6..9ba590be9 100644
 --- a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
@@ -1877,7 +1901,7 @@ index 7d7291c05..c5d9d3cd4 100644
              currentTimeString = TextUtils.concat("💎", StarsIntroActivity.formatTON(currentMessageObject.getStakedDiceAmount()), "  ", currentTimeString);
              currentTimeString = StarsIntroActivity.replaceDiamond(currentTimeString, 0.55f, null, 0, dp(-.33f), 1.05f);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
-index f2ccd7e90..1c490d28c 100644
+index f2ccd7e90..e21779918 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
 @@ -487,6 +487,7 @@ public class ChatActivity extends BaseFragment implements
@@ -2045,6 +2069,15 @@ index f2ccd7e90..1c490d28c 100644
          } else if (id == NotificationCenter.quickRepliesDeleted) {
              if (chatMode != MODE_QUICK_REPLIES) return;
              if ((Long) args[1] != getQuickReplyId()) return;
+@@ -24746,7 +24837,7 @@ public class ChatActivity extends BaseFragment implements
+     private Pattern sponsoredUrlPattern;
+     private MessageObject botSponsoredMessage;
+     private void addSponsoredMessages(boolean animated) {
+-        if (sponsoredMessagesAdded || chatMode != 0 || !ChatObject.isChannel(currentChat) && !UserObject.isBot(currentUser) || !forwardEndReached[0] || getUserConfig().isPremium() && getMessagesController().isSponsoredDisabled() || isReport()) {
++        if (sponsoredMessagesAdded || chatMode != 0 || !ChatObject.isChannel(currentChat) && !UserObject.isBot(currentUser) || !forwardEndReached[0] || getUserConfig().isPremium() && getMessagesController().isSponsoredDisabled() || MessagesController.isSponsoredMessagesHidden() || isReport()) {
+             return;
+         }
+         MessagesController.SponsoredMessagesInfo res = getMessagesController().getSponsoredMessages(dialog_id);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Components/TranslateAlert2.java b/TMessagesProj/src/main/java/org/telegram/ui/Components/TranslateAlert2.java
 index b31069f25..371967fb3 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/Components/TranslateAlert2.java
@@ -2082,10 +2115,10 @@ index 910de86ec..b66687c31 100644
  import org.telegram.messenger.LocaleController;
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java
 new file mode 100644
-index 000000000..33640f611
+index 000000000..c33556875
 --- /dev/null
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,151 @@
 +package org.telegram.ui;
 +
 +import static org.telegram.messenger.LocaleController.getString;
@@ -2128,6 +2161,7 @@ index 000000000..33640f611
 +    private static final int ID_ALLOW_SCREENSHOTS = 4;
 +    private static final int ID_MUTE_SCREENSHOT_PING = 5;
 +    private static final int ID_VOICE_PRELOAD = 6;
++    private static final int ID_HIDE_SPONSORED = 7;
 +
 +    @Override
 +    public View createView(Context context) {
@@ -2166,6 +2200,10 @@ index 000000000..33640f611
 +        items.add(UItem.asCheck(ID_VOICE_PRELOAD, "Загружать входящие голосовые в фоне").setChecked(MessagesController.isVoicePreloadEnabled()));
 +        items.add(UItem.asShadow("Голосовые сообщения начинают загружаться сразу по получении, не дожидаясь открытия диалога."));
 +
++        items.add(UItem.asHeader("Реклама"));
++        items.add(UItem.asCheck(ID_HIDE_SPONSORED, "Скрывать рекламные сообщения").setChecked(MessagesController.isSponsoredMessagesHidden()));
++        items.add(UItem.asShadow("Скрывает спонсорские сообщения в каналах и рекламу в видео независимо от Telegram Premium."));
++
 +        items.add(UItem.asHeader("Соединение"));
 +        items.add(UItem.asCheck(ID_KEEP_ALIVE, "Держать соединение в фоне").setChecked(MessagesController.isKeepAliveEnabled()));
 +        items.add(UItem.asShadow("Настоящие push-уведомления недоступны для этой сборки (FCM не работает с самоподписанным APK). Держит соединение открытым, пока приложение свёрнуто, чтобы сообщения приходили без задержки — расходует больше заряда батареи. Рекомендуется также разрешить автозапуск и отключить оптимизацию батареи для приложения в настройках системы."));
@@ -2199,6 +2237,12 @@ index 000000000..33640f611
 +        } else if (item.id == ID_VOICE_PRELOAD) {
 +            boolean enabled = !MessagesController.isVoicePreloadEnabled();
 +            MessagesController.setVoicePreloadEnabled(enabled);
++            if (view instanceof TextCheckCell) {
++                ((TextCheckCell) view).setChecked(enabled);
++            }
++        } else if (item.id == ID_HIDE_SPONSORED) {
++            boolean enabled = !MessagesController.isSponsoredMessagesHidden();
++            MessagesController.setSponsoredMessagesHidden(enabled);
 +            if (view instanceof TextCheckCell) {
 +                ((TextCheckCell) view).setChecked(enabled);
 +            }
