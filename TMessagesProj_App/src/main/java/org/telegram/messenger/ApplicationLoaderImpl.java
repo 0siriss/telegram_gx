@@ -2,6 +2,8 @@ package org.telegram.messenger;
 
 import android.app.Activity;
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 import android.view.ViewGroup;
 
@@ -23,12 +25,22 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
         return true;
     }
 
+    private final Handler keepAliveHandler = new Handler(Looper.getMainLooper());
+    private final Runnable startKeepAliveService = () -> ConnectionKeepAliveService.start(ApplicationLoader.applicationContext);
+
+    // GramBas: a fast onPause->onResume flicker (e.g. tapping a heads-up notification the
+    // instant it appears) used to start the service and stop it again within milliseconds,
+    // before onStartCommand's async startForeground() call landed -- Android then kills the
+    // process with ForegroundServiceDidNotStartInTimeException. Debouncing the start absorbs
+    // the flicker: if onResume cancels it in time, the service never actually starts.
+    private static final long KEEP_ALIVE_START_DELAY_MS = 1500;
+
     @Override
     public boolean onPause() {
         // GramBas: real FCM push doesn't work for this fork's signing cert -- keep the native
         // network layer alive in background instead (see ConnectionKeepAliveService).
         if (MessagesController.isKeepAliveEnabled()) {
-            ConnectionKeepAliveService.start(ApplicationLoader.applicationContext);
+            keepAliveHandler.postDelayed(startKeepAliveService, KEEP_ALIVE_START_DELAY_MS);
             return true;
         }
         return false;
@@ -36,6 +48,7 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
 
     @Override
     public void onResume() {
+        keepAliveHandler.removeCallbacks(startKeepAliveService);
         ConnectionKeepAliveService.stop(ApplicationLoader.applicationContext);
     }
 
