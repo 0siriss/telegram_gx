@@ -81,29 +81,37 @@ jobs:
         id: tag
         run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      - name: Create GitHub Release
+      - name: Publish GitHub Release
         id: release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: "GramBas ${{ steps.tag.outputs.tag }}"
-          body: |
-            ## GramBas — ${{ steps.tag.outputs.tag }}
-
-            Telegram Android fork with TLS DPI bypass patches.
-
-            ### Что включено:
-            - TLS ECH fix (0xfe0d)
-            - Fingerprint profiles: Chrome 120+, Firefox 121+, Safari 17, Edge 120+, Random
-            - TLS ClientHello fragmentation
-            - Configurable rotation interval (30–240s)
-            - Anti-recall: сообщения, удалённые отправителем, сохраняются локально и помечаются "удалено отправителем" (настраивается глобально и отдельно для каждого чата)
-          files: |
-            TMessagesProj_App/build/outputs/apk/afat/release/app.apk
-          draft: false
-          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="${{ steps.tag.outputs.tag }}"
+          REPO="${{ github.repository }}"
+          APK="TMessagesProj_App/build/outputs/apk/afat/release/app.apk"
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — uploading APK only, leaving notes/prerelease flag untouched"
+            gh release upload "$TAG" "$APK" --repo "$REPO" --clobber
+          else
+            echo "No release for $TAG yet — creating with default notes"
+            gh release create "$TAG" "$APK" \
+              --repo "$REPO" \
+              --title "GramBas $TAG" \
+              --notes "## GramBas — $TAG
+
+          Telegram Android fork with TLS DPI bypass patches.
+
+          ### Что включено:
+          - TLS ECH fix (0xfe0d)
+          - Fingerprint profiles: Chrome 120+, Firefox 121+, Safari 17, Edge 120+, Random
+          - TLS ClientHello fragmentation
+          - Configurable rotation interval (30–240s)
+          - Anti-recall: сообщения, удалённые отправителем, сохраняются локально и помечаются \"удалено отправителем\" (настраивается глобально и отдельно для каждого чата)"
+          fi
+
+          echo "url=$(gh release view "$TAG" --repo "$REPO" --json url -q .url)" >> "$GITHUB_OUTPUT"
 
       - name: Send APK via Telegram
         run: |
