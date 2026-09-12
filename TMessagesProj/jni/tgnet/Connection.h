@@ -49,6 +49,7 @@ protected:
     void onDisconnected(int32_t reason, int32_t error) override;
     void onConnected() override;
     bool hasPendingRequests() override;
+    bool isBulkTransferConnection() override;
     void reconnect();
 
 private:

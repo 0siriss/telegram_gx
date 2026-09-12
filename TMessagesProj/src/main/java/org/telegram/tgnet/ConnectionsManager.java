@@ -990,6 +990,28 @@ public class ConnectionsManager extends BaseController {
     public static native void native_setUserId(int currentAccount, long id);
     public static native void native_init(int currentAccount, int version, int layer, int apiId, String deviceModel, String systemVersion, String appVersion, String langCode, String systemLangCode, String configPath, String logPath, String regId, String cFingerprint, String installer, String packageId, int timezoneOffset, long userId, boolean userPremium, boolean enablePushConnection, boolean hasNetwork, int networkType, int performanceClass);
     public static native void native_setProxySettings(int currentAccount, String address, int port, String username, String password, String secret);
+    public static native void native_setTlsFragmentConfig(boolean enabled, int minBytes, int maxBytes);
+    public static native void native_setTlsFingerprintProfile(int profile, int rotationIntervalSec);
+    public static native void native_setTlsEchExtensionId(int extensionId);
+    public static native void native_setDpiShapingConfig(int recordSizingMode, int timingMode, int startupCoverMode);
+
+    public static void setTlsFragmentConfig(boolean enabled, int minBytes, int maxBytes) {
+        native_setTlsFragmentConfig(enabled, minBytes, maxBytes);
+    }
+
+    public static void setTlsFingerprintProfile(int profile, int rotationIntervalSec) {
+        native_setTlsFingerprintProfile(profile, rotationIntervalSec);
+    }
+
+    // recordSizingMode: 0=Off,1=Conservative,2=Varied. timingMode: 0=Off,1=Gentle,2=Balanced.
+    // startupCoverMode: 0=Off,1=Soft,2=Strict. All three only affect FakeTLS (MTProto) proxies.
+    public static void setDpiShapingConfig(int recordSizingMode, int timingMode, int startupCoverMode) {
+        native_setDpiShapingConfig(recordSizingMode, timingMode, startupCoverMode);
+    }
+
+    public static void setTlsEchExtensionId(int extensionId) {
+        native_setTlsEchExtensionId(extensionId);
+    }
     public static native void native_setLangCode(int currentAccount, String langCode);
     public static native void native_setRegId(int currentAccount, String regId);
     public static native void native_setSystemLangCode(int currentAccount, String langCode);

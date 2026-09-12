@@ -31,12 +31,29 @@
 #include "BuffersStorage.h"
 #include "Connection.h"
 #include <random>
+#include <atomic>
+#include <chrono>
 
 #ifndef EPOLLRDHUP
 #define EPOLLRDHUP 0x2000
 #endif
 
 #define MAX_GREASE 8
+
+// TLS config — set via JNI from Java
+extern std::atomic<bool> gTlsFragmentEnabled;
+extern std::atomic<int>  gTlsFragmentMin;
+extern std::atomic<int>  gTlsFragmentMax;
+// 0=Chrome, 1=Firefox, 2=Safari, 3=Edge, 4=Random
+extern std::atomic<int>  gTlsFingerprintProfile;
+extern std::atomic<int>  gTlsRotationIntervalSec; // 0=per-connection, 30-240=timed
+extern std::atomic<int>  gTlsCurrentRandomProfile;
+extern std::atomic<int64_t> gTlsLastRotationSec;
+extern std::atomic<int>  gTlsEchExtensionId; // default 0xfe0d
+// DPI shaping — FakeTLS app-data path only (tlsState != 0)
+extern std::atomic<int>  gDpiRecordSizingMode; // 0=Off,1=Conservative,2=Varied
+extern std::atomic<int>  gDpiTimingMode;       // 0=Off,1=Gentle,2=Balanced
+extern std::atomic<int>  gDpiStartupCoverMode; // 0=Off,1=Soft,2=Strict
 
 static BIGNUM *get_y2(BIGNUM *x, const BIGNUM *mod, BN_CTX *big_num_context) {
     // returns y^2 = x^3 + 486662 * x^2 + x
@@ -163,7 +180,7 @@ public:
 
     struct Op {
         enum class Type {
-            String, Random, K, M, P, E, Zero, Domain, Grease, BeginScope, EndScope, Permutation
+            String, Random, K, M, P, E, Zero, Domain, Grease, BeginScope, EndScope, Permutation, EchId
         };
         Type type;
         size_t length;
@@ -249,6 +266,12 @@ public:
             return res;
         }
 
+        static Op echId() {
+            Op res;
+            res.type = Type::EchId;
+            return res;
+        }
+
     };
 
     static const TlsHello &getDefault() {
@@ -311,12 +334,13 @@ public:
                         },
                         { Op::string("\x44\xcd\x00\x05\x00\x03\x02\x68\x32", 9) },
                         {
-                            Op::string("\xfe\x0d", 2),
+                            Op::echId(),
                             Op::begin_scope(),
-                            Op::string("\x00\x00\x01\x00\x01", 5),
+                            Op::string("\x00\x01\x00\x01", 4),
                             Op::random(1),
-                            Op::string("\x00\x20", 2),
+                            Op::begin_scope(),
                             Op::K(),
+                            Op::end_scope(),
                             Op::begin_scope(),
                             Op::E(),
                             Op::end_scope(),
@@ -334,6 +358,284 @@ public:
             return res;
         }();
         return result;
+    }
+
+    // Firefox 121+ profile: CHACHA20 before AES-256, no ML-KEM, no compress_certificate, no SCT
+    static const TlsHello &getFirefox() {
+        static TlsHello result = [] {
+            TlsHello res;
+            res.ops = {
+                    Op::string("\x16\x03\x01", 3),
+                    Op::begin_scope(),
+                    Op::string("\x01\x00", 2),
+                    Op::begin_scope(),
+                    Op::string("\x03\x03", 2),
+                    Op::zero(32),
+                    Op::string("\x20", 1),
+                    Op::random(32),
+                    // Firefox cipher order: AES-128, CHACHA20, AES-256, then legacy
+                    Op::string("\x00\x1e", 2),
+                    Op::string("\x13\x01\x13\x03\x13\x02\xc0\x2b\xc0\x2f\xcc\xa9\xcc\xa8\xc0\x2c\xc0\x30\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x01\x00", 30),
+                    Op::begin_scope(),
+                    Op::string("\x00\x00", 2),
+                    Op::permutation({
+                        {
+                            Op::string("\x00\x00", 2),
+                            Op::begin_scope(),
+                            Op::begin_scope(),
+                            Op::string("\x00", 1),
+                            Op::begin_scope(),
+                            Op::domain(),
+                            Op::end_scope(),
+                            Op::end_scope(),
+                            Op::end_scope()
+                        },
+                        { Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9) },
+                        // supported_groups without ML-KEM (0x11ec)
+                        {
+                            Op::string("\x00\x0a\x00\x0a\x00\x08", 6),
+                            Op::string("\x00\x1d\x00\x17\x00\x18\x00\x19", 8)
+                        },
+                        { Op::string("\x00\x0b\x00\x02\x01\x00", 6) },
+                        // Firefox sig algs: includes rsa_pkcs1_sha1 (\x02\x01) and rsa_pkcs1_sha256 (\x04\x01)
+                        { Op::string("\x00\x0d\x00\x14\x00\x12\x04\x03\x08\x04\x04\x01\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01", 24) },
+                        { Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31", 18) },
+                        { Op::string("\x00\x17\x00\x00", 4) },
+                        { Op::string("\x00\x23\x00\x00", 4) },
+                        {
+                            Op::string("\x00\x2b\x00\x05\x04", 5),
+                            Op::string("\x03\x04\x03\x03", 4)
+                        },
+                        { Op::string("\x00\x2d\x00\x02\x01\x01", 6) },
+                        // key_share: X25519 only (no ML-KEM)
+                        {
+                            Op::string("\x00\x33\x00\x26\x00\x24", 6),
+                            Op::string("\x00\x1d\x00\x20", 4),
+                            Op::K(),
+                        },
+                        {
+                            Op::echId(),
+                            Op::begin_scope(),
+                            Op::string("\x00\x01\x00\x01", 4),
+                            Op::random(1),
+                            Op::begin_scope(),
+                            Op::K(),
+                            Op::end_scope(),
+                            Op::begin_scope(),
+                            Op::E(),
+                            Op::end_scope(),
+                            Op::end_scope()
+                        },
+                        { Op::string("\xff\x01\x00\x01\x00", 5) }
+                    }),
+                    Op::string("\x00\x01\x00", 3),
+                    Op::P(),
+                    Op::end_scope(),
+                    Op::end_scope(),
+                    Op::end_scope()
+            };
+            return res;
+        }();
+        return result;
+    }
+
+    // Safari 17 — no GREASE ciphers, different groups (incl. secp521r1), fixed extension order
+    static const TlsHello &getSafari() {
+        static TlsHello result = [] {
+            TlsHello res;
+            res.ops = {
+                    Op::string("\x16\x03\x01", 3),
+                    Op::begin_scope(),
+                    Op::string("\x01\x00", 2),
+                    Op::begin_scope(),
+                    Op::string("\x03\x03", 2),
+                    Op::zero(32),
+                    Op::string("\x20", 1),
+                    Op::random(32),
+                    // Safari cipher suites: 17 ciphers × 2 = 34 bytes, no GREASE
+                    Op::string("\x00\x22", 2),
+                    Op::string("\x13\x01\x13\x02\x13\x03\xc0\x2c\xc0\x2b\xc0\x30\xc0\x2f"
+                               "\xcc\xa9\xcc\xa8\xc0\x0a\xc0\x09\xc0\x14\xc0\x13"
+                               "\x00\x9d\x00\x9c\x00\x35\x00\x2f", 34),
+                    Op::begin_scope(), // extensions total length
+                    // renegotiation_info (ff01)
+                    Op::string("\xff\x01\x00\x01\x00", 5),
+                    // server_name (0000)
+                    Op::string("\x00\x00", 2),
+                    Op::begin_scope(),
+                    Op::begin_scope(),
+                    Op::string("\x00", 1),
+                    Op::begin_scope(),
+                    Op::domain(),
+                    Op::end_scope(),
+                    Op::end_scope(),
+                    Op::end_scope(),
+                    // extended_master_secret (0017)
+                    Op::string("\x00\x17\x00\x00", 4),
+                    // session_ticket (0023)
+                    Op::string("\x00\x23\x00\x00", 4),
+                    // ALPN (0010): h2, http/1.1
+                    Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31", 18),
+                    // status_request (0005)
+                    Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9),
+                    // supported_groups (000a): X25519, secp256r1, secp384r1, secp521r1 — no GREASE, no ML-KEM
+                    Op::string("\x00\x0a\x00\x0a\x00\x08\x00\x1d\x00\x17\x00\x18\x00\x19", 14),
+                    // ec_point_formats (000b)
+                    Op::string("\x00\x0b\x00\x02\x01\x00", 6),
+                    // signature_algorithms (000d) — Safari includes rsa_pkcs1_sha1
+                    Op::string("\x00\x0d\x00\x14\x00\x12\x04\x03\x08\x04\x04\x01\x05\x03"
+                               "\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01", 24),
+                    // supported_versions (002b): TLS 1.3 + TLS 1.2, no GREASE
+                    Op::string("\x00\x2b\x00\x05\x04\x03\x04\x03\x03", 9),
+                    // psk_key_exchange_modes (002d)
+                    Op::string("\x00\x2d\x00\x02\x01\x01", 6),
+                    // key_share (0033): X25519 only, no ML-KEM
+                    Op::string("\x00\x33\x00\x26\x00\x24\x00\x1d\x00\x20", 10),
+                    Op::K(),
+                    // compress_certificate (001b)
+                    Op::string("\x00\x1b\x00\x03\x02\x00\x02", 7),
+                    // ECH extension (configurable, default fe0d)
+                    Op::echId(),
+                    Op::begin_scope(),
+                    Op::string("\x00\x01\x00\x01", 4),
+                    Op::random(1),
+                    Op::begin_scope(),
+                    Op::K(),
+                    Op::end_scope(),
+                    Op::begin_scope(),
+                    Op::E(),
+                    Op::end_scope(),
+                    Op::end_scope(),
+                    Op::P(),
+                    Op::end_scope(), // extensions
+                    Op::end_scope(), // ClientHello body
+                    Op::end_scope()  // TLS record
+            };
+            return res;
+        }();
+        return result;
+    }
+
+    // Edge 120+ — Chromium-based: GREASE like Chrome but different supported_versions order,
+    // no compress_certificate (0x001b), no SCT (0x0012), adds ApplicationSettings (0x4469)
+    static const TlsHello &getEdge() {
+        static TlsHello result = [] {
+            TlsHello res;
+            res.ops = {
+                    Op::string("\x16\x03\x01", 3),
+                    Op::begin_scope(),
+                    Op::string("\x01\x00", 2),
+                    Op::begin_scope(),
+                    Op::string("\x03\x03", 2),
+                    Op::zero(32),
+                    Op::string("\x20", 1),
+                    Op::random(32),
+                    Op::string("\x00\x20", 2),
+                    Op::grease(0),
+                    Op::string("\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30"
+                               "\xcc\xa9\xcc\xa8\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x01\x00", 32),
+                    Op::begin_scope(),
+                    Op::grease(2),
+                    Op::string("\x00\x00", 2),
+                    Op::permutation({
+                        {
+                            Op::string("\x00\x00", 2),
+                            Op::begin_scope(),
+                            Op::begin_scope(),
+                            Op::string("\x00", 1),
+                            Op::begin_scope(),
+                            Op::domain(),
+                            Op::end_scope(),
+                            Op::end_scope(),
+                            Op::end_scope()
+                        },
+                        { Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9) },
+                        {
+                            Op::string("\x00\x0a\x00\x0c\x00\x0a", 6),
+                            Op::grease(4),
+                            Op::string("\x11\xec\x00\x1d\x00\x17\x00\x18", 8)
+                        },
+                        { Op::string("\x00\x0b\x00\x02\x01\x00", 6) },
+                        { Op::string("\x00\x0d\x00\x12\x00\x10\x04\x03\x08\x04\x04\x01"
+                                     "\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01", 22) },
+                        { Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74"
+                                     "\x74\x70\x2f\x31\x2e\x31", 18) },
+                        { Op::string("\x00\x17\x00\x00", 4) },
+                        { Op::string("\x00\x23\x00\x00", 4) },
+                        {
+                            Op::string("\x00\x2b\x00\x07\x06", 5),
+                            Op::grease(6),
+                            Op::string("\x03\x04\x03\x03", 4)
+                        },
+                        { Op::string("\x00\x2d\x00\x02\x01\x01", 6) },
+                        {
+                            Op::string("\x00\x33\x04\xef\x04\xed", 6),
+                            Op::grease(4),
+                            Op::string("\x00\x01\x00\x11\xec\x04\xc0", 7),
+                            Op::M(),
+                            Op::K(),
+                            Op::string("\x00\x1d\x00\x20", 4),
+                            Op::K(),
+                        },
+                        // Edge-specific: ApplicationSettings (4469)
+                        { Op::string("\x44\x69\x00\x05\x00\x03\x02\x68\x32", 9) },
+                        {
+                            Op::echId(),
+                            Op::begin_scope(),
+                            Op::string("\x00\x01\x00\x01", 4),
+                            Op::random(1),
+                            Op::begin_scope(),
+                            Op::K(),
+                            Op::end_scope(),
+                            Op::begin_scope(),
+                            Op::E(),
+                            Op::end_scope(),
+                            Op::end_scope()
+                        },
+                        { Op::string("\xff\x01\x00\x01\x00", 5) }
+                    }),
+                    Op::grease(3),
+                    Op::string("\x00\x01\x00", 3),
+                    Op::P(),
+                    Op::end_scope(),
+                    Op::end_scope(),
+                    Op::end_scope()
+            };
+            return res;
+        }();
+        return result;
+    }
+
+    static const TlsHello &getForProfile(int profile) {
+        if (profile == 1) return getFirefox();
+        if (profile == 2) return getSafari();
+        if (profile == 3) return getEdge();
+        if (profile == 4) {
+            // Random profile: per-connection or timed rotation
+            int interval = gTlsRotationIntervalSec.load();
+            if (interval > 0) {
+                using namespace std::chrono;
+                int64_t now = duration_cast<seconds>(steady_clock::now().time_since_epoch()).count();
+                int64_t last = gTlsLastRotationSec.load();
+                if (now - last >= interval) {
+                    int next = rand() % 4; // pick from Chrome/Firefox/Safari/Edge
+                    gTlsCurrentRandomProfile.store(next);
+                    gTlsLastRotationSec.store(now);
+                }
+                int cur = gTlsCurrentRandomProfile.load();
+                if (cur == 1) return getFirefox();
+                if (cur == 2) return getSafari();
+                if (cur == 3) return getEdge();
+                return getDefault();
+            }
+            // per-connection random
+            int r = rand() % 4;
+            if (r == 1) return getFirefox();
+            if (r == 2) return getSafari();
+            if (r == 3) return getEdge();
+            return getDefault();
+        }
+        return getDefault();
     }
 
     uint32_t writeToBuffer(uint8_t *data) {
@@ -392,6 +694,13 @@ private:
                 offset += 2;
                 break;
             }
+            case Type::EchId: {
+                int id = gTlsEchExtensionId.load() & 0xffff;
+                data[offset] = static_cast<uint8_t>((id >> 8) & 0xff);
+                data[offset + 1] = static_cast<uint8_t>(id & 0xff);
+                offset += 2;
+                break;
+            }
             case Type::BeginScope:
                 scopeOffset.push_back(offset);
                 offset += 2;
@@ -415,11 +724,14 @@ private:
             }
             case Type::P: {
                 auto length = offset;
-                if (length <= 513) {
-                    writeOp(Op::string("\x00\x15", 2), data, offset);
-                    writeOp(Op::begin_scope(), data, offset);
-                    writeOp(Op::zero(513 - length), data, offset);
-                    writeOp(Op::end_scope(), data, offset);
+                if (length < 512) {
+                    uint32_t padSize = 512 - length - 4; // 4 = extension type (2) + scope length (2)
+                    if ((int32_t)padSize > 0) {
+                        writeOp(Op::string("\x00\x15", 2), data, offset);
+                        writeOp(Op::begin_scope(), data, offset);
+                        writeOp(Op::zero(padSize), data, offset);
+                        writeOp(Op::end_scope(), data, offset);
+                    }
                 }
                 break;
             }
@@ -451,6 +763,7 @@ ConnectionSocket::ConnectionSocket(int32_t instance) {
     outgoingByteStream = new ByteStream();
     lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
     eventObject = new EventObject(this, EventObjectTypeConnection);
+    dpiTimingTimer = new Timer(instanceNum, [this] { onDpiTimingTimerFired(); });
 }
 
 ConnectionSocket::~ConnectionSocket() {
@@ -469,6 +782,10 @@ ConnectionSocket::~ConnectionSocket() {
     if (tlsBuffer != nullptr) {
         tlsBuffer->reuse();
         tlsBuffer = nullptr;
+    }
+    if (dpiTimingTimer != nullptr) {
+        delete dpiTimingTimer;
+        dpiTimingTimer = nullptr;
     }
 }
 
@@ -775,6 +1092,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
                             tlsState = 1;
                             proxyAuthState = 0;
                             bytesRead = 0;
+                            startupCoverStartTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
+                            startupCoverFrameCount = 0;
+                            startupCoverEndedLogged = false;
+                            firstAppDataFrameSent = false;
+                            nextAppDataWriteTime = 0;
+                            if (gDpiStartupCoverMode.load() != 0 && LOGS_ENABLED) {
+                                DEBUG_D("connection(%p) dpi_shape startup_cover_start mode=%d record_sizing=%d timing=%d", this, gDpiStartupCoverMode.load(), gDpiRecordSizingMode.load(), gDpiTimingMode.load());
+                            }
                             adjustWriteOp();
                         } else {
                             std::memcpy(tempBuffer->bytes + bytesRead, buffer->bytes(), (size_t) readCount);
@@ -920,7 +1245,7 @@ void ConnectionSocket::onEvent(uint32_t events) {
                         lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
                         tlsHashMismatch = false;
                         proxyAuthState = 11;
-                        TlsHello hello = TlsHello::getDefault();
+                        TlsHello hello = TlsHello::getForProfile(gTlsFingerprintProfile.load());
                         hello.setDomain(currentSecretDomain);
                         uint32_t size = hello.writeToBuffer(tempBuffer->bytes);
                         uint32_t outLength;
@@ -933,7 +1258,21 @@ void ConnectionSocket::onEvent(uint32_t events) {
                         memcpy(tempBuffer->bytes + 11, tempBuffer->bytes + 64 * 1024, 32);
                         bytesRead = 0;
 
-                        if (send(socketFd, tempBuffer->bytes, size, 0) < 0) {
+                        bool sendOk;
+                        if (gTlsFragmentEnabled && size > 2) {
+                            int minB = gTlsFragmentMin.load();
+                            int maxB = gTlsFragmentMax.load();
+                            if (minB < 1) minB = 1;
+                            if (maxB < minB) maxB = minB;
+                            int range = maxB - minB;
+                            int splitAt = minB + (range > 0 ? rand() % (range + 1) : 0);
+                            if (splitAt >= (int)size) splitAt = 1;
+                            sendOk = (send(socketFd, tempBuffer->bytes, splitAt, 0) >= 0) &&
+                                     (send(socketFd, tempBuffer->bytes + splitAt, size - splitAt, 0) >= 0);
+                        } else {
+                            sendOk = (send(socketFd, tempBuffer->bytes, size, 0) >= 0);
+                        }
+                        if (!sendOk) {
                             if (LOGS_ENABLED) DEBUG_E("connection(%p) send failed", this);
                             closeSocket(1, -1);
                             return;
@@ -1011,9 +1350,20 @@ void ConnectionSocket::onEvent(uint32_t events) {
                 if (remaining) {
                     ssize_t sentLength;
                     if (tlsState != 0) {
-                        if (remaining > 2878) {
-                            remaining = 2878;
-                        }
+                        int64_t dpiNow = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
+                        if (nextAppDataWriteTime != 0 && dpiNow < nextAppDataWriteTime) {
+                            // Timing jitter is holding this connection's next app-data frame;
+                            // don't send early, let dpiTimingTimer wake us via adjustWriteOp().
+                            if (LOGS_ENABLED) {
+                                DEBUG_D("connection(%p) dpi_shape timing_delay remaining=%lld", this, (long long) (nextAppDataWriteTime - dpiNow));
+                            }
+                            if (dpiTimingTimer != nullptr) {
+                                dpiTimingTimer->setTimeout((uint32_t) std::min<int64_t>(250, nextAppDataWriteTime - dpiNow), false);
+                                dpiTimingTimer->start();
+                            }
+                        } else {
+                        nextAppDataWriteTime = 0;
+                        remaining = nextAppDataPayloadSize(remaining);
                         size_t headersSize = 0;
                         if (tlsState == 1) {
                             static std::string header1 = std::string("\x14\x03\x03\x00\x01\x01", 6);
@@ -1040,7 +1390,21 @@ void ConnectionSocket::onEvent(uint32_t events) {
                                 ConnectionsManager::getInstance(instanceNum).delegate->onBytesSent((int32_t) sentLength, currentNetworkType, instanceNum);
                             }
                             outgoingByteStream->discard((uint32_t) (sentLength - headersSize));
+                            firstAppDataFrameSent = true;
+                            if (dpiStartupCoverActive()) {
+                                startupCoverFrameCount++;
+                            }
+                            if (outgoingByteStream->hasData()) {
+                                uint32_t dpiDelay = dpiInterPacketDelayMs();
+                                if (dpiDelay > 0) {
+                                    nextAppDataWriteTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis() + dpiDelay;
+                                    if (LOGS_ENABLED) {
+                                        DEBUG_D("connection(%p) dpi_shape timing_next delay=%u", this, dpiDelay);
+                                    }
+                                }
+                            }
                             adjustWriteOp();
+                        }
                         }
                     } else {
                         if ((sentLength = send(socketFd, buffer->bytes(), remaining, 0)) < 0) {
@@ -1083,6 +1447,78 @@ void ConnectionSocket::writeBuffer(uint8_t *data, uint32_t size) {
 
 void ConnectionSocket::writeBuffer(NativeByteBuffer *buffer) {
     outgoingByteStream->append(buffer);
+    adjustWriteOp();
+}
+
+bool ConnectionSocket::dpiStartupCoverActive() {
+    int mode = gDpiStartupCoverMode.load();
+    if (mode == 0 || startupCoverStartTime == 0) {
+        return false;
+    }
+    int64_t windowMs = mode == 2 ? 20000 : 12000;
+    uint32_t maxFrames = mode == 2 ? 14 : 8;
+    int64_t now = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
+    if (now - startupCoverStartTime > windowMs || startupCoverFrameCount >= maxFrames) {
+        if (!startupCoverEndedLogged && LOGS_ENABLED) {
+            DEBUG_D("connection(%p) dpi_shape startup_cover_end mode=%d elapsed=%lld frames=%u", this, mode, (long long) (now - startupCoverStartTime), startupCoverFrameCount);
+        }
+        startupCoverEndedLogged = true;
+        startupCoverStartTime = 0;
+        return false;
+    }
+    return true;
+}
+
+uint32_t ConnectionSocket::nextAppDataPayloadSize(uint32_t remaining) {
+    int mode = gDpiRecordSizingMode.load();
+    if (dpiStartupCoverActive()) {
+        // Startup cover forces at least a conservative shape, strict escalates to varied.
+        int coverMode = gDpiStartupCoverMode.load();
+        mode = coverMode == 2 ? 2 : (mode == 0 ? 1 : mode);
+    }
+    uint32_t cap = 2878;
+    if (mode == 1) {
+        static const uint32_t caps[] = {1440, 1728, 2016, 2304, 2580, 2878};
+        cap = caps[rand() % (sizeof(caps) / sizeof(caps[0]))];
+    } else if (mode == 2) {
+        uint32_t minCap = firstAppDataFrameSent ? 768 : 1200;
+        uint32_t maxCap = firstAppDataFrameSent ? 2878 : 2016;
+        cap = minCap + (rand() % (maxCap - minCap + 1));
+    }
+    if (cap > 2878) cap = 2878;
+    if (cap < 256) cap = 256;
+    if (remaining < cap) cap = remaining;
+    // Skipped for bulk transfers (upload/download): would be thousands of lines per file
+    // for a knob that, unlike timing jitter, doesn't hurt their throughput anyway.
+    if (mode != 0 && !isBulkTransferConnection() && LOGS_ENABLED) {
+        DEBUG_D("connection(%p) dpi_shape record_sizing mode=%d cap=%u remaining=%u first_sent=%d", this, mode, cap, remaining, firstAppDataFrameSent ? 1 : 0);
+    }
+    return cap;
+}
+
+uint32_t ConnectionSocket::dpiInterPacketDelayMs() {
+    if (isBulkTransferConnection()) {
+        // Upload/download connections carry large payloads (voice, media, files) as a
+        // long back-to-back frame sequence; per-frame jitter here isn't stealth, it's a
+        // serial throughput cap (thousands of frames * tens of ms = a very slow send).
+        return 0;
+    }
+    int mode = gDpiTimingMode.load();
+    if (dpiStartupCoverActive()) {
+        int coverMode = gDpiStartupCoverMode.load();
+        mode = coverMode == 2 ? 2 : (mode == 0 ? 1 : mode);
+    }
+    if (mode == 2) {
+        return 20 + (rand() % 28) + (rand() % 54);
+    }
+    if (mode == 1) {
+        return 8 + (rand() % 14) + (rand() % 25);
+    }
+    return 0;
+}
+
+void ConnectionSocket::onDpiTimingTimerFired() {
+    nextAppDataWriteTime = 0;
     adjustWriteOp();
 }
 

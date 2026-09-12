@@ -8289,13 +8289,17 @@ public class MessagesController extends BaseController implements NotificationCe
             LongSparseArray<ArrayList<Integer>> task = currentDeletingTaskMids != null ? currentDeletingTaskMids.clone() : null;
             LongSparseArray<ArrayList<Integer>> taskMedia = currentDeletingTaskMediaMids != null ? currentDeletingTaskMediaMids.clone() : null;
             AndroidUtilities.runOnUIThread(() -> {
-                if (task != null) {
+                // TGX: keep-ephemeral -- skip the scheduled self-destruct/TTL purge so the
+                // message/media stays in local storage instead of being deleted. This only
+                // affects what THIS client keeps locally; it doesn't change TTL/view-once
+                // semantics on the sending side or other participants' clients.
+                if (!isKeepEphemeralEnabled() && task != null) {
                     for (int a = 0, N = task.size(); a < N; a++) {
                         ArrayList<Integer> mids = task.valueAt(a);
                         deleteMessages(mids, null, null, task.keyAt(a), 0, true, 0, !mids.isEmpty() && mids.get(0) > 0);
                     }
                 }
-                if (taskMedia != null) {
+                if (!isKeepEphemeralEnabled() && taskMedia != null) {
                     final boolean checkViewer = SecretMediaViewer.hasInstance() && SecretMediaViewer.getInstance().isVisible();
                     final MessageObject viewerObject = checkViewer ? SecretMediaViewer.getInstance().getCurrentMessageObject() : null;
                     for (int a = 0, N = taskMedia.size(); a < N; a++) {
@@ -14405,6 +14409,10 @@ public class MessagesController extends BaseController implements NotificationCe
         long dialogId = messageObject.getDialogId();
         getMessagesStorage().markMessagesContentAsRead(dialogId, arrayList, 0, 0);
         getNotificationCenter().postNotificationName(NotificationCenter.messagesReadContent, dialogId, arrayList);
+        if (isEphemeralMediaKept(messageObject)) {
+            // Mark locally read but never signal the server -- no view receipt, no destruction.
+            return;
+        }
         if (messageObject.getId() < 0) {
             markMessageAsRead(messageObject.getDialogId(), messageObject.messageOwner.random_id, Integer.MIN_VALUE);
         } else {
@@ -14470,6 +14478,11 @@ public class MessagesController extends BaseController implements NotificationCe
 
     public void doDeleteShowOnceTask(long taskId, long dialogId, int mid) {
         getMessagesStorage().removePendingTask(taskId);
+        if (isKeepEphemeralEnabled()) {
+            // Defuse a show-once task that was already scheduled (e.g. before the toggle was
+            // turned on): drop the task bookkeeping, but keep the media.
+            return;
+        }
         ArrayList<Integer> mids = new ArrayList<>();
         mids.add(mid);
         getMessagesStorage().emptyMessagesMedia(dialogId, mids);
@@ -14480,6 +14493,15 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     public void markMessageAsRead2(long dialogId, int mid, TLRPC.InputChannel inputChannel, int ttl, long taskId, boolean createDeleteTask) {
+        if (isKeepEphemeralEnabled()) {
+            // Never read-and-destroy: skip the server readMessageContents call and don't
+            // schedule a local delete task. Still clean up a pending task passed in from a
+            // caller that already created one before reaching here.
+            if (taskId != 0) {
+                getMessagesStorage().removePendingTask(taskId);
+            }
+            return;
+        }
         if (mid == 0 || ttl < 0) {
             return;
         }
@@ -18426,6 +18448,10 @@ public class MessagesController extends BaseController implements NotificationCe
         LongSparseArray<ArrayList<Integer>> markContentAsReadMessages = null;
         SparseIntArray markAsReadEncrypted = null;
         LongSparseArray<ArrayList<Integer>> deletedMessages = null;
+        // TGX: anti-recall — mids filtered out of deletedMessages at classification time (below), keyed by the
+        // *resolved* real dialogId (never 0, unlike deletedMessages' private/group bucket). Never reaches any
+        // deletedMessages consumer downstream, so no consumption point can be missed.
+        LongSparseArray<ArrayList<Integer>> recalledMessages = null;
         LongSparseArray<ArrayList<Integer>> deletedQuickReplyMessages = null;
         LongSparseArray<ArrayList<Integer>> scheduledDeletedMessages = null;
         LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSent = null;
@@ -18814,6 +18840,11 @@ public class MessagesController extends BaseController implements NotificationCe
                 dialogs_read_outbox_max.put(dialogId, Math.max(value, update.max_id));
             } else if (baseUpdate instanceof TL_update.TL_updateDeleteMessages) {
                 TL_update.TL_updateDeleteMessages update = (TL_update.TL_updateDeleteMessages) baseUpdate;
+                // TGX: anti-recall — dialogId isn't known here (TL_updateDeleteMessages doesn't carry one), so
+                // retention for this branch is decided later: MessagesStorage.filterRecalledMessages resolves
+                // mid -> uid against storage before the physical delete, and ChatActivity's own messagesDeleted
+                // observer separately keeps retained messages visible in whichever chat is currently open (it
+                // knows its own dialog_id unambiguously, unlike a lookup keyed only by mid at this level).
                 if (deletedMessages == null) {
                     deletedMessages = new LongSparseArray<>();
                 }
@@ -19339,16 +19370,33 @@ public class MessagesController extends BaseController implements NotificationCe
                 if (BuildVars.LOGS_ENABLED) {
                     FileLog.d(baseUpdate + " channelId = " + update.channel_id);
                 }
-                if (deletedMessages == null) {
-                    deletedMessages = new LongSparseArray<>();
-                }
                 long dialogId = -update.channel_id;
-                ArrayList<Integer> arrayList = deletedMessages.get(dialogId);
-                if (arrayList == null) {
-                    arrayList = new ArrayList<>();
-                    deletedMessages.put(dialogId, arrayList);
+                // TGX: anti-recall — channel/supergroup dialogId is known upfront (channel_id), so the whole
+                // batch is decided uniformly, same as the private/group branch above.
+                if (isAntiRecallEnabledForDialog(dialogId)) {
+                    if (recalledMessages == null) {
+                        recalledMessages = new LongSparseArray<>();
+                    }
+                    ArrayList<Integer> recalledList = recalledMessages.get(dialogId);
+                    if (recalledList == null) {
+                        recalledList = new ArrayList<>();
+                        recalledMessages.put(dialogId, recalledList);
+                    }
+                    recalledList.addAll(update.messages);
+                    for (int m = 0, msize = update.messages.size(); m < msize; m++) {
+                        markMidRecalled(dialogId, update.messages.get(m));
+                    }
+                } else {
+                    if (deletedMessages == null) {
+                        deletedMessages = new LongSparseArray<>();
+                    }
+                    ArrayList<Integer> arrayList = deletedMessages.get(dialogId);
+                    if (arrayList == null) {
+                        arrayList = new ArrayList<>();
+                        deletedMessages.put(dialogId, arrayList);
+                    }
+                    arrayList.addAll(update.messages);
                 }
-                arrayList.addAll(update.messages);
             } else if (baseUpdate instanceof TL_update.TL_updateChannel) {
                 if (BuildVars.LOGS_ENABLED) {
                     TL_update.TL_updateChannel update = (TL_update.TL_updateChannel) baseUpdate;
@@ -21001,6 +21049,7 @@ public class MessagesController extends BaseController implements NotificationCe
         LongSparseArray<ArrayList<Integer>> markContentAsReadMessagesFinal = markContentAsReadMessages;
         SparseIntArray markAsReadEncryptedFinal = markAsReadEncrypted;
         LongSparseArray<ArrayList<Integer>> deletedMessagesFinal = deletedMessages;
+        LongSparseArray<ArrayList<Integer>> recalledMessagesFinal = recalledMessages;
         LongSparseArray<ArrayList<Integer>> deletedQuickRepliesMessagesFinal = deletedQuickReplyMessages;
         LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesFinal = scheduledDeletedMessages;
         LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSentFinal = scheduledDeletedMessagesSent;
@@ -21125,6 +21174,35 @@ public class MessagesController extends BaseController implements NotificationCe
                 }
                 getNotificationsController().removeDeletedMessagesFromNotifications(deletedMessagesFinal, false);
             }
+            // TGX: anti-recall — mids filtered out of deletedMessages at classification time; obj.recalledBySender
+            // is set here (never obj.deleted), and messagesRecalled fires instead of messagesDeleted, so no
+            // downstream deletedMessages consumer (there were two, and this took a live bug to find both) ever
+            // sees these mids at all.
+            if (recalledMessagesFinal != null) {
+                for (int a = 0, size = recalledMessagesFinal.size(); a < size; a++) {
+                    long dialogId = recalledMessagesFinal.keyAt(a);
+                    ArrayList<Integer> arrayList = recalledMessagesFinal.valueAt(a);
+                    if (arrayList == null) {
+                        continue;
+                    }
+                    ArrayList<MessageObject> objs = dialogMessage.get(dialogId);
+                    if (objs != null) {
+                        for (int i = 0; i < objs.size(); ++i) {
+                            MessageObject obj = objs.get(i);
+                            if (obj != null) {
+                                for (int b = 0, size2 = arrayList.size(); b < size2; b++) {
+                                    if (obj.getId() == arrayList.get(b)) {
+                                        obj.recalledBySender = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    getMessagesStorage().saveRecalledMessages(dialogId, arrayList);
+                    getNotificationCenter().postNotificationName(NotificationCenter.messagesRecalled, arrayList, dialogId);
+                }
+            }
             if (deletedQuickRepliesMessagesFinal != null) {
                 for (int a = 0, size = deletedQuickRepliesMessagesFinal.size(); a < size; a++) {
                     long topicId = deletedQuickRepliesMessagesFinal.keyAt(a);
@@ -21211,6 +21289,20 @@ public class MessagesController extends BaseController implements NotificationCe
             for (int a = 0, size = deletedMessages.size(); a < size; a++) {
                 long key = deletedMessages.keyAt(a);
                 ArrayList<Integer> arrayList = deletedMessages.valueAt(a);
+                if (key == 0) {
+                    // TGX: anti-recall fallback — mids here already exclude anything resolved in-memory at
+                    // classification time above; this covers messages whose dialog isn't currently open, by
+                    // resolving mid -> uid against storage before deciding whether to actually delete them.
+                    getMessagesStorage().filterRecalledMessages(arrayList, remainingMids -> {
+                        if (remainingMids != null && !remainingMids.isEmpty()) {
+                            getMessagesStorage().getStorageQueue().postRunnable(() -> {
+                                ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, remainingMids, false, true, 0, 0);
+                                getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, remainingMids, dialogIds);
+                            });
+                        }
+                    });
+                    continue;
+                }
                 getMessagesStorage().getStorageQueue().postRunnable(() -> {
                     ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, arrayList, false, true, 0, 0);
                     getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, arrayList, dialogIds);
@@ -21547,6 +21639,147 @@ public class MessagesController extends BaseController implements NotificationCe
             }
         }
         return false;
+    }
+
+    // TGX: anti-recall — global default (DataSettingsActivity toggle) + per-dialog override,
+    // same override/inherit pattern as isDialogMuted (notify2_ / -1 = inherit).
+    public static boolean isAntiRecallEnabledGlobally() {
+        return getGlobalMainSettings().getBoolean("anti_recall_enabled", false);
+    }
+
+    public static void setAntiRecallEnabledGlobally(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("anti_recall_enabled", enabled).commit();
+    }
+
+    public boolean isAntiRecallEnabledForDialog(long dialogId) {
+        if (DialogObject.isEncryptedDialog(dialogId)) {
+            return false;
+        }
+        int override = notificationsPreferences.getInt("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0), -1);
+        if (override == -1) {
+            return isAntiRecallEnabledGlobally();
+        }
+        return override == 1;
+    }
+
+    public void setAntiRecallEnabledForDialog(long dialogId, boolean enabled) {
+        notificationsPreferences.edit().putInt("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0), enabled ? 1 : 0).commit();
+    }
+
+    // TGX: real FCM push is unavailable for this fork (signing cert isn't registered in Telegram's
+    // own Firebase project, see project notes), so this substitutes a foreground-service-held live
+    // MTProto connection instead. DataSettingsActivity toggle; off by default (battery cost).
+    public static boolean isKeepAliveEnabled() {
+        return getGlobalMainSettings().getBoolean("keep_alive_enabled", false);
+    }
+
+    public static void setKeepAliveEnabled(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("keep_alive_enabled", enabled).commit();
+    }
+
+    // TGX: retain view-once / self-destructing (TTL) media locally instead of running the local
+    // destruction -- the remote side's own TTL/one-time semantics on their client are unaffected,
+    // this only stops this client from discarding its own already-received copy.
+    public static boolean isKeepEphemeralEnabled() {
+        return getGlobalMainSettings().getBoolean("keep_ephemeral_enabled", false);
+    }
+
+    public static void setKeepEphemeralEnabled(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("keep_ephemeral_enabled", enabled).commit();
+    }
+
+    // TGX: don't apply FLAG_SECURE in secret chats / protected-content viewers, i.e. allow
+    // screenshots there. Off by default -- this is a deliberate opt-in privacy tradeoff for the
+    // user's own device, not a default behavior change.
+    public static boolean isAllowScreenshotsEnabled() {
+        return getGlobalMainSettings().getBoolean("allow_screenshots_enabled", false);
+    }
+
+    public static void setAllowScreenshotsEnabled(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("allow_screenshots_enabled", enabled).commit();
+    }
+
+    // GramBas: hide sponsored (ad) messages for everyone, not just Telegram Premium users --
+    // gated at the single insertion point in ChatActivity.addSponsoredMessages() / VideoAds, so
+    // getSponsoredMessages() is never even called when this is on (no wasted RPC either).
+    public static boolean isSponsoredMessagesHidden() {
+        return getGlobalMainSettings().getBoolean("sponsored_messages_hidden", false);
+    }
+
+    public static void setSponsoredMessagesHidden(boolean hidden) {
+        getGlobalMainSettings().edit().putBoolean("sponsored_messages_hidden", hidden).commit();
+    }
+
+    // TGX: suppress the "took a screenshot" service message sent to the other party in secret
+    // chats. Independent of isAllowScreenshotsEnabled -- a user may still want FLAG_SECURE (e.g.
+    // to keep the OS-level screenshot block) while not notifying the peer, or vice versa.
+    public static boolean isMuteScreenshotPingEnabled() {
+        return getGlobalMainSettings().getBoolean("mute_screenshot_ping_enabled", false);
+    }
+
+    public static void setMuteScreenshotPingEnabled(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("mute_screenshot_ping_enabled", enabled).commit();
+    }
+
+    // TGX: proactively download incoming voice messages as soon as they arrive (any open chat
+    // or not), instead of only starting the download when the user opens the chat. Off by
+    // default -- stock autodownload treats voice as AUTODOWNLOAD_TYPE_AUDIO but that type is
+    // excluded from the default preset masks, so this is a deliberate opt-in, independent of
+    // the general photo/video/document autodownload settings.
+    public static boolean isVoicePreloadEnabled() {
+        return getGlobalMainSettings().getBoolean("voice_preload_enabled", false);
+    }
+
+    public static void setVoicePreloadEnabled(boolean enabled) {
+        getGlobalMainSettings().edit().putBoolean("voice_preload_enabled", enabled).commit();
+    }
+
+    // TGX: cloud view-once / TTL media (TL_message with media.ttl_seconds != 0) this client
+    // deliberately keeps. Deliberately does NOT cover secret-chat (TL_message_secret) TTL --
+    // that destruction is a core part of the secret-chat guarantee shown to the other party, not
+    // just a local cleanup step, so it's left untouched here.
+    public static boolean isEphemeralMediaKept(MessageObject messageObject) {
+        if (!isKeepEphemeralEnabled() || messageObject == null || messageObject.messageOwner == null) {
+            return false;
+        }
+        TLRPC.MessageMedia media = MessageObject.getMedia(messageObject.messageOwner);
+        return media != null && media.ttl_seconds != 0;
+    }
+
+    // TGX: anti-recall — session-lifetime cache of "this mid was recalled" (mid -> unix seconds it was recalled
+    // at) that survives MessageObject being reconstructed (e.g. on a dialog/message-list reload), since
+    // recalledBySender on a specific MessageObject instance doesn't: a fresh deserialize from messages_v2 always
+    // starts with recalledBySender=false. Kept separately from the recalled_messages SQL table (which is the
+    // actual persistence across app restarts); this is just a fast synchronous read-through for UI code that
+    // can't do a DB query per render.
+    private final LongSparseArray<HashMap<Integer, Integer>> recalledMidsCache = new LongSparseArray<>();
+
+    public void markMidRecalled(long dialogId, int mid) {
+        markMidRecalled(dialogId, mid, (int) (System.currentTimeMillis() / 1000));
+    }
+
+    public void markMidRecalled(long dialogId, int mid, int recalledDate) {
+        HashMap<Integer, Integer> mids = recalledMidsCache.get(dialogId);
+        if (mids == null) {
+            mids = new HashMap<>();
+            recalledMidsCache.put(dialogId, mids);
+        }
+        mids.put(mid, recalledDate);
+    }
+
+    public boolean isMidRecalled(long dialogId, int mid) {
+        HashMap<Integer, Integer> mids = recalledMidsCache.get(dialogId);
+        return mids != null && mids.containsKey(mid);
+    }
+
+    public int getRecalledDate(long dialogId, int mid) {
+        HashMap<Integer, Integer> mids = recalledMidsCache.get(dialogId);
+        Integer date = mids != null ? mids.get(mid) : null;
+        return date != null ? date : 0;
+    }
+
+    public void clearAntiRecallOverrideForDialog(long dialogId) {
+        notificationsPreferences.edit().remove("anti_recall_" + NotificationsController.getSharedPrefKey(dialogId, 0)).commit();
     }
 
     public void markReactionsAsRead(long dialogId, long topicId) {

@@ -71,6 +71,7 @@ import android.text.TextUtils;
 import android.text.style.CharacterStyle;
 import android.text.style.ClickableSpan;
 import android.text.style.DynamicDrawableSpan;
+import android.text.style.ForegroundColorSpan;
 import android.text.style.LeadingMarginSpan;
 import android.text.style.StrikethroughSpan;
 import android.text.style.URLSpan;
@@ -12057,6 +12058,7 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
             Window window = activity == null ? null : activity.getWindow();
             if (window != null) {
                 flagSecure = new FlagSecureReason(window, () ->
+                    !MessagesController.isAllowScreenshotsEnabled() &&
                     currentMessageObject != null && currentMessageObject.messageOwner != null && (
                         currentMessageObject.type == MessageObject.TYPE_PAID_MEDIA && (groupMedia == null || !groupMedia.hidden) ||
                         currentMessageObject.messageOwner.noforwards && !currentMessageObject.isEphemeral() ||
@@ -18461,6 +18463,15 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
             timeString = LocaleController.formatSmallDateChat(currentMessageObject.realDate) + ", " + LocaleController.getInstance().getFormatterDay().format((long) (currentMessageObject.realDate) * 1000);
         } else if (currentMessageObject.isRepostPreview) {
             timeString = LocaleController.formatSmallDateChat(messageObject.messageOwner.date) + ", " + LocaleController.getInstance().getFormatterDay().format((long) (messageObject.messageOwner.date) * 1000);
+        } else if (currentMessageObject.recalledBySender || MessagesController.getInstance(currentAccount).isMidRecalled(currentMessageObject.getDialogId(), currentMessageObject.getId())) {
+            // TGX: anti-recall — message was deleted by the sender server-side but retained locally. Checks the
+            // session-lifetime cache too, not just the object's own field: a MessageObject for this mid can get
+            // reconstructed (e.g. on a dialog/message-list reload) with recalledBySender reset to false. Shows
+            // when it was recalled (falls back to the original send date if that timestamp isn't cached, e.g.
+            // right after a cold app restart before this dialog's cache is repopulated).
+            int recalledDate = MessagesController.getInstance(currentAccount).getRecalledDate(currentMessageObject.getDialogId(), currentMessageObject.getId());
+            long dateToShow = recalledDate != 0 ? recalledDate : messageObject.messageOwner.date;
+            timeString = "удалено отправителем" + " " + LocaleController.getInstance().getFormatterDay().format(dateToShow * 1000L);
         } else if (edited) {
             timeString = AppGlobalConfig.getInstance(currentAccount).messagePrimaryEditedDate.get() ?
                 LocaleController.formatPmEditedDate(currentMessagesGroup != null ? currentMessagesGroup.getMaxEditDate() : messageObject.messageOwner.edit_date) :
@@ -18487,6 +18498,18 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
             }
         } else {
             currentTimeString = timeString;
+        }
+        if (currentMessageObject.recalledBySender || MessagesController.getInstance(currentAccount).isMidRecalled(currentMessageObject.getDialogId(), currentMessageObject.getId())) {
+            // TGX: anti-recall — color just the "удалено отправителем" label red, leaving the date/signString
+            // part in the normal time color, same technique as EmptyStubSpan usage elsewhere in this file.
+            String label = "удалено отправителем";
+            String full = currentTimeString.toString();
+            int labelStart = full.indexOf(label);
+            if (labelStart >= 0) {
+                SpannableString colored = new SpannableString(currentTimeString);
+                colored.setSpan(new ForegroundColorSpan(getThemedColor(Theme.key_text_RedRegular)), labelStart, labelStart + label.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                currentTimeString = colored;
+            }
         }
         if (currentMessageObject.isStakedDice()) {
             currentTimeString = TextUtils.concat("💎", StarsIntroActivity.formatTON(currentMessageObject.getStakedDiceAmount()), "  ", currentTimeString);
