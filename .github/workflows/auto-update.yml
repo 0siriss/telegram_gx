@@ -52,7 +52,7 @@ jobs:
           git config user.name "GitHub Actions"
 
           # Запоминаем текущий форк-коммит: upstream/master его не содержит,
-          # а .github/workflows и patches/ не существуют в апстриме вовсе —
+          # а .github/workflows, patches/ и CLAUDE.md не существуют в апстриме вовсе —
           # reset --hard их удалит, поэтому восстанавливаем их отдельно ниже.
           PREV=$(git rev-parse HEAD)
           echo "prev=$PREV" >> $GITHUB_OUTPUT
@@ -66,9 +66,11 @@ jobs:
           # Сброс на чистый upstream
           git reset --hard upstream/master
 
-          # Возвращаем CI-инфраструктуру и сам набор патчей (их нет в апстриме,
+          # Возвращаем CI-инфраструктуру, набор патчей и заметки для Claude (их нет в апстриме,
           # поэтому конфликтовать с новым upstream-кодом им нечем)
           git checkout "$PREV" -- .github/workflows patches
+          # CLAUDE.md появился позже — не валим апдейт, если его нет в прошлом коммите
+          git checkout "$PREV" -- CLAUDE.md 2>/dev/null || true
 
           # Применяем единый патч со всеми доработками форка
           # (TLS DPI bypass, ECH picker, updater, anti-recall и т.д.)
