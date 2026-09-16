@@ -4602,6 +4602,7 @@ public class AndroidUtilities {
                 String port = null;
                 String address = null;
                 String secret = null;
+                boolean web = false;
                 String scheme = data.getScheme();
                 if (scheme != null) {
                     if ((scheme.equals("http") || scheme.equals("https"))) {
@@ -4609,7 +4610,14 @@ public class AndroidUtilities {
                         if (host.equals("telegram.me") || host.equals("t.me") || host.equals("telegram.dog")) {
                             String path = data.getPath();
                             if (path != null) {
-                                if (path.startsWith("/socks") || path.startsWith("/proxy")) {
+                                if (path.startsWith("/webproxy")) {
+                                    web = true;
+                                    address = data.getQueryParameter("server");
+                                    if (address == null) {
+                                        address = data.getQueryParameter("host");
+                                    }
+                                    secret = data.getQueryParameter("secret");
+                                } else if (path.startsWith("/socks") || path.startsWith("/proxy")) {
                                     address = data.getQueryParameter("server");
                                     if (AndroidUtilities.checkHostForPunycode(address)) {
                                         address = IDN.toASCII(address, IDN.ALLOW_UNASSIGNED);
@@ -4623,7 +4631,16 @@ public class AndroidUtilities {
                         }
                     } else if (scheme.equals("tg")) {
                         String url = data.toString();
-                        if (url.startsWith("tg:proxy") || url.startsWith("tg://proxy") || url.startsWith("tg:socks") || url.startsWith("tg://socks")) {
+                        if (url.startsWith("tg:webproxy") || url.startsWith("tg://webproxy")) {
+                            web = true;
+                            url = url.replace("tg://webproxy", "tg://telegram.org").replace("tg:webproxy", "tg://telegram.org");
+                            data = Uri.parse(url);
+                            address = data.getQueryParameter("server");
+                            if (address == null) {
+                                address = data.getQueryParameter("host");
+                            }
+                            secret = data.getQueryParameter("secret");
+                        } else if (url.startsWith("tg:proxy") || url.startsWith("tg://proxy") || url.startsWith("tg:socks") || url.startsWith("tg://socks")) {
                             url = url.replace("tg:proxy", "tg://telegram.org").replace("tg://proxy", "tg://telegram.org").replace("tg://socks", "tg://telegram.org").replace("tg:socks", "tg://telegram.org");
                             data = Uri.parse(url);
                             address = data.getQueryParameter("server");
@@ -4636,6 +4653,25 @@ public class AndroidUtilities {
                             secret = data.getQueryParameter("secret");
                         }
                     }
+                }
+                if (web) {
+                    // The link carries host, an optional base path, and a secret that is marked
+                    // base64url whenever a base path is present.
+                    String host = WebProxyTransport.hostOf(address);
+                    String basePath = WebProxyTransport.basePathOf(address);
+                    if (host == null || basePath == null) {
+                        return false;
+                    }
+                    if (AndroidUtilities.checkHostForPunycode(host)) {
+                        host = IDN.toASCII(host, IDN.ALLOW_UNASSIGNED);
+                    }
+                    secret = WebProxyTransport.decodeLinkSecret(secret, !basePath.isEmpty());
+                    if (secret == null) {
+                        return false;
+                    }
+                    address = basePath.isEmpty() ? host : host + "/" + basePath;
+                    if (invoked) showWebProxyAlert(activity, address, secret);
+                    return true;
                 }
                 if (!TextUtils.isEmpty(address) && !TextUtils.isEmpty(port)) {
                     if (user == null) {
@@ -4684,7 +4720,18 @@ public class AndroidUtilities {
         return true;
     }
 
+    public static void showWebProxyAlert(Activity activity, final String address, final String secret) {
+        showProxyAlert(activity, address, String.valueOf(SharedConfig.ProxyInfo.WEB_PORT), "", "", secret,
+                SharedConfig.ProxyInfo.TYPE_WEB);
+    }
+
     public static void showProxyAlert(Activity activity, final String address, final String port, final String user, final String password, final String secret) {
+        showProxyAlert(activity, address, port, user, password, secret,
+                TextUtils.isEmpty(secret) ? SharedConfig.ProxyInfo.TYPE_SOCKS5 : SharedConfig.ProxyInfo.TYPE_MTPROTO);
+    }
+
+    public static void showProxyAlert(Activity activity, final String address, final String port, final String user, final String password, final String secret, final int type) {
+        final boolean web = type == SharedConfig.ProxyInfo.TYPE_WEB;
         final BottomSheet.Builder builder = new BottomSheet.Builder(activity);
         builder.setApplyTopPadding(false);
         builder.setApplyBottomPadding(false);
@@ -4704,7 +4751,7 @@ public class AndroidUtilities {
         if (!TextUtils.isEmpty(address)) {
             tableView.addRow(getString(R.string.UseProxyAddress), address);
         }
-        if (!TextUtils.isEmpty(port)) {
+        if (!web && !TextUtils.isEmpty(port)) {
             tableView.addRow(getString(R.string.UseProxyPort), port);
         }
         if (!TextUtils.isEmpty(secret)) {
@@ -4716,6 +4763,9 @@ public class AndroidUtilities {
         if (!TextUtils.isEmpty(password)) {
             tableView.addRow(getString(R.string.UseProxyPassword), password);
         }
+        // A WEB entry has no independent reachability check: probing one would spin up the
+        // process-wide WebView carrier, so its state is only learned after the user connects.
+        if (!web) {
         final ButtonSpan.TextViewButtons[] statusTextView = new ButtonSpan.TextViewButtons[1];
         tableView.addRow(getString(R.string.ProxyStatus), "", statusTextView);
         ((View) statusTextView[0].getParent()).setPadding(0, 0, 0, 0);
@@ -4762,6 +4812,7 @@ public class AndroidUtilities {
                     .show();
             }
         }));
+        }
         if (!TextUtils.isEmpty(secret)) {
             final TableView.TableRowFullContent tableRow = tableView.addFullRow(getString(R.string.UseProxyTelegramInfo2));
             tableRow.setFilled(true);
@@ -4792,18 +4843,19 @@ public class AndroidUtilities {
                 } else {
                     editor.putString("proxy_user", user);
                 }
-                info = new SharedConfig.ProxyInfo(address, p, user, password, "");
+                info = new SharedConfig.ProxyInfo(address, p, user, password, "", type);
             } else {
                 editor.remove("proxy_pass");
                 editor.remove("proxy_user");
                 editor.putString("proxy_secret", secret);
-                info = new SharedConfig.ProxyInfo(address, p, "", "", secret);
+                info = new SharedConfig.ProxyInfo(address, p, "", "", secret, type);
             }
+            editor.putInt("proxy_type", type);
             editor.commit();
 
             SharedConfig.currentProxy = SharedConfig.addProxy(info);
 
-            ConnectionsManager.setProxySettings(true, address, p, user, password, secret);
+            ConnectionsManager.setProxySettings(true, address, p, user, password, secret, type);
             NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
             if (activity instanceof LaunchActivity) {
                 INavigationLayout layout = ((LaunchActivity) activity).getActionBarLayout();

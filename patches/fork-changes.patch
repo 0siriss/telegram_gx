@@ -141,10 +141,10 @@ index 000000000..f19cb4316
 +            -d "parse_mode=Markdown"
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
 new file mode 100644
-index 000000000..38a5174be
+index 000000000..964b72f64
 --- /dev/null
 +++ b/.github/workflows/build.yml
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,158 @@
 +name: Build Release APK
 +
 +on:
@@ -182,6 +182,8 @@ index 000000000..38a5174be
 +
 +      - name: Checkout code
 +        uses: actions/checkout@v4
++        with:
++          submodules: recursive
 +
 +      - name: Set up JDK 17
 +        uses: actions/setup-java@v4
@@ -228,29 +230,48 @@ index 000000000..38a5174be
 +        id: tag
 +        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 +
-+      - name: Create GitHub Release
++      - name: Publish GitHub Release
 +        id: release
-+        uses: softprops/action-gh-release@v2
-+        with:
-+          tag_name: ${{ steps.tag.outputs.tag }}
-+          name: "GramBas ${{ steps.tag.outputs.tag }}"
-+          body: |
-+            ## GramBas — ${{ steps.tag.outputs.tag }}
-+
-+            Telegram Android fork with TLS DPI bypass patches.
-+
-+            ### Что включено:
-+            - TLS ECH fix (0xfe0d)
-+            - Fingerprint profiles: Chrome 120+, Firefox 121+, Safari 17, Edge 120+, Random
-+            - TLS ClientHello fragmentation
-+            - Configurable rotation interval (30–240s)
-+            - Anti-recall: сообщения, удалённые отправителем, сохраняются локально и помечаются "удалено отправителем" (настраивается глобально и отдельно для каждого чата)
-+          files: |
-+            TMessagesProj_App/build/outputs/apk/afat/release/app.apk
-+          draft: false
-+          prerelease: false
 +        env:
 +          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++        run: |
++          set -e
++          TAG="${{ steps.tag.outputs.tag }}"
++          REPO="${{ github.repository }}"
++          APK="TMessagesProj_App/build/outputs/apk/afat/release/app.apk"
++
++          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
++            echo "Release $TAG already exists — uploading APK only, leaving notes/prerelease flag untouched"
++            gh release upload "$TAG" "$APK" --repo "$REPO" --clobber
++          else
++            echo "No release for $TAG yet — creating with default notes"
++            gh release create "$TAG" "$APK" \
++              --repo "$REPO" \
++              --title "GramBas $TAG" \
++              --notes "## GramBas — $TAG
++
++          Telegram с усиленным обходом блокировок и дополнительными настройками приватности.
++
++          ### Обход блокировок
++          - Улучшенная маскировка трафика — соединение труднее распознать и заблокировать
++          - Несколько профилей маскировки на выбор, с автоматической сменой
++
++          ### Приватность
++          - Показ сообщений, удалённых отправителем
++          - Сохранение исчезающих фото и видео
++          - Разрешить скриншоты в чатах, где они по умолчанию запрещены
++          - Не уведомлять собеседника о сделанном скриншоте в секретном чате
++
++          ### Удобство
++          - Голосовые сообщения загружаются заранее, ещё до открытия чата
++          - Скрытие рекламных сообщений в каналах и в видео
++          - Соединение не прерывается, когда приложение свёрнуто
++          - Приложение само проверяет и предлагает установить новые версии
++
++          ⚠ Неофициальная сборка, не связана с Telegram FZ-LLC."
++          fi
++
++          echo "url=$(gh release view "$TAG" --repo "$REPO" --json url -q .url)" >> "$GITHUB_OUTPUT"
 +
 +      - name: Send APK via Telegram
 +        run: |
@@ -283,12 +304,12 @@ index 000000000..38a5174be
 +            -d "text=$TEXT" \
 +            -d "parse_mode=HTML"
 diff --git a/TMessagesProj/build.gradle b/TMessagesProj/build.gradle
-index 61a653057..aea0a38a3 100644
+index 84b822602..47287a632 100644
 --- a/TMessagesProj/build.gradle
 +++ b/TMessagesProj/build.gradle
-@@ -2,6 +2,23 @@ import org.gradle.nativeplatform.platform.internal.DefaultNativePlatform
- 
- apply plugin: 'com.android.library'
+@@ -16,6 +16,23 @@ idea {
+     }
+ }
  
 +def getForkVersionTag() {
 +    def envTag = System.getenv("FORK_VERSION_TAG")
@@ -310,7 +331,15 @@ index 61a653057..aea0a38a3 100644
  repositories {
      mavenCentral()
      google()
-@@ -134,6 +151,7 @@ android {
+@@ -38,6 +55,7 @@ dependencies {
+     implementation "androidx.sharetarget:sharetarget:1.2.0"
+     implementation 'androidx.interpolator:interpolator:1.0.0'
+     implementation 'androidx.biometric:biometric:1.1.0'
++    implementation 'androidx.webkit:webkit:1.14.0'
+ 
+     implementation 'com.google.android.gms:play-services-cast-framework:21.4.0'
+     implementation "androidx.mediarouter:mediarouter:1.7.0"
+@@ -151,6 +169,7 @@ android {
              proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
              ndk.debugSymbolLevel = 'FULL'
              buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
@@ -318,7 +347,7 @@ index 61a653057..aea0a38a3 100644
              buildConfigField "String", "APP_CENTER_HASH", "\"\""
              buildConfigField "String", "BETA_URL", "\"" + getProps("BETA_PRIVATE_URL") + "\""
              buildConfigField "boolean", "DEBUG_VERSION", "true"
-@@ -150,6 +168,7 @@ android {
+@@ -167,6 +186,7 @@ android {
              proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
              ndk.debugSymbolLevel = 'FULL'
              buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
@@ -326,7 +355,7 @@ index 61a653057..aea0a38a3 100644
              buildConfigField "String", "APP_CENTER_HASH", "\"" + getProps("APP_CENTER_HASH_PRIVATE") + "\""
              buildConfigField "String", "BETA_URL", "\"" + getProps("BETA_PRIVATE_URL") + "\""
              buildConfigField "boolean", "DEBUG_VERSION", "true"
-@@ -166,6 +185,7 @@ android {
+@@ -183,6 +203,7 @@ android {
              proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
              ndk.debugSymbolLevel = 'FULL'
              buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
@@ -334,7 +363,7 @@ index 61a653057..aea0a38a3 100644
              buildConfigField "String", "APP_CENTER_HASH", "\"" + getProps("APP_CENTER_HASH_PUBLIC") + "\""
              buildConfigField "String", "BETA_URL", "\"" + getProps("BETA_PUBLIC_URL") + "\""
              buildConfigField "boolean", "DEBUG_VERSION", "true"
-@@ -182,6 +202,7 @@ android {
+@@ -199,6 +220,7 @@ android {
              proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
              ndk.debugSymbolLevel = 'FULL'
              buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
@@ -342,7 +371,7 @@ index 61a653057..aea0a38a3 100644
              buildConfigField "String", "APP_CENTER_HASH", "\"" + getProps("APP_CENTER_HASH_HARDCORE") + "\""
              buildConfigField "String", "BETA_URL", "\"" + getProps("BETA_HARDCORE_URL") + "\""
              buildConfigField "boolean", "DEBUG_VERSION", "true"
-@@ -198,6 +219,7 @@ android {
+@@ -215,6 +237,7 @@ android {
              proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro'
              ndk.debugSymbolLevel = 'FULL'
              buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
@@ -350,7 +379,7 @@ index 61a653057..aea0a38a3 100644
              buildConfigField "String", "APP_CENTER_HASH", "\"\""
              buildConfigField "String", "BETA_URL", "\"\""
              buildConfigField "boolean", "DEBUG_VERSION", "false"
-@@ -215,6 +237,7 @@ android {
+@@ -231,6 +254,7 @@ android {
              proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro'
              ndk.debugSymbolLevel = 'FULL'
              buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
@@ -454,7 +483,7 @@ index 81e4d5edc..8dce10b33 100644
  
  private:
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
-index 4605c2fc5..41accaa34 100644
+index 3f345ab65..110202353 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 @@ -31,6 +31,8 @@
@@ -510,28 +539,37 @@ index 4605c2fc5..41accaa34 100644
      };
  
      static const TlsHello &getDefault() {
-@@ -311,12 +334,13 @@ public:
+@@ -311,12 +334,259 @@ public:
                          },
                          { Op::string("\x44\xcd\x00\x05\x00\x03\x02\x68\x32", 9) },
                          {
 -                            Op::string("\xfe\x0d", 2),
 +                            Op::echId(),
-                             Op::begin_scope(),
--                            Op::string("\x00\x00\x01\x00\x01", 5),
++                            Op::begin_scope(),
 +                            Op::string("\x00\x01\x00\x01", 4),
-                             Op::random(1),
--                            Op::string("\x00\x20", 2),
--                            Op::random(32),
++                            Op::random(1),
 +                            Op::begin_scope(),
 +                            Op::K(),
 +                            Op::end_scope(),
-                             Op::begin_scope(),
-                             Op::E(),
-                             Op::end_scope(),
-@@ -336,6 +360,284 @@ public:
-         return result;
-     }
- 
++                            Op::begin_scope(),
++                            Op::E(),
++                            Op::end_scope(),
++                            Op::end_scope()
++                        },
++                        { Op::string("\xff\x01\x00\x01\x00", 5) }
++                    }),
++                    Op::grease(3),
++                    Op::string("\x00\x01\x00", 3),
++                    Op::P(),
++                    Op::end_scope(),
++                    Op::end_scope(),
++                    Op::end_scope()
++            };
++            return res;
++        }();
++        return result;
++    }
++
 +    // Firefox 121+ profile: CHACHA20 before AES-256, no ML-KEM, no compress_certificate, no SCT
 +    static const TlsHello &getFirefox() {
 +        static TlsHello result = [] {
@@ -715,7 +753,8 @@ index 4605c2fc5..41accaa34 100644
 +                            Op::begin_scope(),
 +                            Op::begin_scope(),
 +                            Op::string("\x00", 1),
-+                            Op::begin_scope(),
+                             Op::begin_scope(),
+-                            Op::string("\x00\x00\x01\x00\x01", 5),
 +                            Op::domain(),
 +                            Op::end_scope(),
 +                            Op::end_scope(),
@@ -755,29 +794,18 @@ index 4605c2fc5..41accaa34 100644
 +                            Op::echId(),
 +                            Op::begin_scope(),
 +                            Op::string("\x00\x01\x00\x01", 4),
-+                            Op::random(1),
+                             Op::random(1),
+-                            Op::string("\x00\x20", 2),
 +                            Op::begin_scope(),
-+                            Op::K(),
+                             Op::K(),
 +                            Op::end_scope(),
-+                            Op::begin_scope(),
-+                            Op::E(),
-+                            Op::end_scope(),
-+                            Op::end_scope()
-+                        },
-+                        { Op::string("\xff\x01\x00\x01\x00", 5) }
-+                    }),
-+                    Op::grease(3),
-+                    Op::string("\x00\x01\x00", 3),
-+                    Op::P(),
-+                    Op::end_scope(),
-+                    Op::end_scope(),
-+                    Op::end_scope()
-+            };
-+            return res;
-+        }();
-+        return result;
-+    }
-+
+                             Op::begin_scope(),
+                             Op::E(),
+                             Op::end_scope(),
+@@ -336,6 +606,38 @@ public:
+         return result;
+     }
+ 
 +    static const TlsHello &getForProfile(int profile) {
 +        if (profile == 1) return getFirefox();
 +        if (profile == 2) return getSafari();
@@ -1121,8 +1149,149 @@ index 6f6d377d0..132e484bf 100644
          <service
              android:name=".voip.VoIPService"
              android:enabled="true"
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/AndroidUtilities.java b/TMessagesProj/src/main/java/org/telegram/messenger/AndroidUtilities.java
+index 5a26f49b9..3103d2c88 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/AndroidUtilities.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/AndroidUtilities.java
+@@ -4602,6 +4602,7 @@ public class AndroidUtilities {
+                 String port = null;
+                 String address = null;
+                 String secret = null;
++                boolean web = false;
+                 String scheme = data.getScheme();
+                 if (scheme != null) {
+                     if ((scheme.equals("http") || scheme.equals("https"))) {
+@@ -4609,7 +4610,14 @@ public class AndroidUtilities {
+                         if (host.equals("telegram.me") || host.equals("t.me") || host.equals("telegram.dog")) {
+                             String path = data.getPath();
+                             if (path != null) {
+-                                if (path.startsWith("/socks") || path.startsWith("/proxy")) {
++                                if (path.startsWith("/webproxy")) {
++                                    web = true;
++                                    address = data.getQueryParameter("server");
++                                    if (address == null) {
++                                        address = data.getQueryParameter("host");
++                                    }
++                                    secret = data.getQueryParameter("secret");
++                                } else if (path.startsWith("/socks") || path.startsWith("/proxy")) {
+                                     address = data.getQueryParameter("server");
+                                     if (AndroidUtilities.checkHostForPunycode(address)) {
+                                         address = IDN.toASCII(address, IDN.ALLOW_UNASSIGNED);
+@@ -4623,7 +4631,16 @@ public class AndroidUtilities {
+                         }
+                     } else if (scheme.equals("tg")) {
+                         String url = data.toString();
+-                        if (url.startsWith("tg:proxy") || url.startsWith("tg://proxy") || url.startsWith("tg:socks") || url.startsWith("tg://socks")) {
++                        if (url.startsWith("tg:webproxy") || url.startsWith("tg://webproxy")) {
++                            web = true;
++                            url = url.replace("tg://webproxy", "tg://telegram.org").replace("tg:webproxy", "tg://telegram.org");
++                            data = Uri.parse(url);
++                            address = data.getQueryParameter("server");
++                            if (address == null) {
++                                address = data.getQueryParameter("host");
++                            }
++                            secret = data.getQueryParameter("secret");
++                        } else if (url.startsWith("tg:proxy") || url.startsWith("tg://proxy") || url.startsWith("tg:socks") || url.startsWith("tg://socks")) {
+                             url = url.replace("tg:proxy", "tg://telegram.org").replace("tg://proxy", "tg://telegram.org").replace("tg://socks", "tg://telegram.org").replace("tg:socks", "tg://telegram.org");
+                             data = Uri.parse(url);
+                             address = data.getQueryParameter("server");
+@@ -4637,6 +4654,25 @@ public class AndroidUtilities {
+                         }
+                     }
+                 }
++                if (web) {
++                    // The link carries host, an optional base path, and a secret that is marked
++                    // base64url whenever a base path is present.
++                    String host = WebProxyTransport.hostOf(address);
++                    String basePath = WebProxyTransport.basePathOf(address);
++                    if (host == null || basePath == null) {
++                        return false;
++                    }
++                    if (AndroidUtilities.checkHostForPunycode(host)) {
++                        host = IDN.toASCII(host, IDN.ALLOW_UNASSIGNED);
++                    }
++                    secret = WebProxyTransport.decodeLinkSecret(secret, !basePath.isEmpty());
++                    if (secret == null) {
++                        return false;
++                    }
++                    address = basePath.isEmpty() ? host : host + "/" + basePath;
++                    if (invoked) showWebProxyAlert(activity, address, secret);
++                    return true;
++                }
+                 if (!TextUtils.isEmpty(address) && !TextUtils.isEmpty(port)) {
+                     if (user == null) {
+                         user = "";
+@@ -4684,7 +4720,18 @@ public class AndroidUtilities {
+         return true;
+     }
+ 
++    public static void showWebProxyAlert(Activity activity, final String address, final String secret) {
++        showProxyAlert(activity, address, String.valueOf(SharedConfig.ProxyInfo.WEB_PORT), "", "", secret,
++                SharedConfig.ProxyInfo.TYPE_WEB);
++    }
++
+     public static void showProxyAlert(Activity activity, final String address, final String port, final String user, final String password, final String secret) {
++        showProxyAlert(activity, address, port, user, password, secret,
++                TextUtils.isEmpty(secret) ? SharedConfig.ProxyInfo.TYPE_SOCKS5 : SharedConfig.ProxyInfo.TYPE_MTPROTO);
++    }
++
++    public static void showProxyAlert(Activity activity, final String address, final String port, final String user, final String password, final String secret, final int type) {
++        final boolean web = type == SharedConfig.ProxyInfo.TYPE_WEB;
+         final BottomSheet.Builder builder = new BottomSheet.Builder(activity);
+         builder.setApplyTopPadding(false);
+         builder.setApplyBottomPadding(false);
+@@ -4704,7 +4751,7 @@ public class AndroidUtilities {
+         if (!TextUtils.isEmpty(address)) {
+             tableView.addRow(getString(R.string.UseProxyAddress), address);
+         }
+-        if (!TextUtils.isEmpty(port)) {
++        if (!web && !TextUtils.isEmpty(port)) {
+             tableView.addRow(getString(R.string.UseProxyPort), port);
+         }
+         if (!TextUtils.isEmpty(secret)) {
+@@ -4716,6 +4763,9 @@ public class AndroidUtilities {
+         if (!TextUtils.isEmpty(password)) {
+             tableView.addRow(getString(R.string.UseProxyPassword), password);
+         }
++        // A WEB entry has no independent reachability check: probing one would spin up the
++        // process-wide WebView carrier, so its state is only learned after the user connects.
++        if (!web) {
+         final ButtonSpan.TextViewButtons[] statusTextView = new ButtonSpan.TextViewButtons[1];
+         tableView.addRow(getString(R.string.ProxyStatus), "", statusTextView);
+         ((View) statusTextView[0].getParent()).setPadding(0, 0, 0, 0);
+@@ -4762,6 +4812,7 @@ public class AndroidUtilities {
+                     .show();
+             }
+         }));
++        }
+         if (!TextUtils.isEmpty(secret)) {
+             final TableView.TableRowFullContent tableRow = tableView.addFullRow(getString(R.string.UseProxyTelegramInfo2));
+             tableRow.setFilled(true);
+@@ -4792,18 +4843,19 @@ public class AndroidUtilities {
+                 } else {
+                     editor.putString("proxy_user", user);
+                 }
+-                info = new SharedConfig.ProxyInfo(address, p, user, password, "");
++                info = new SharedConfig.ProxyInfo(address, p, user, password, "", type);
+             } else {
+                 editor.remove("proxy_pass");
+                 editor.remove("proxy_user");
+                 editor.putString("proxy_secret", secret);
+-                info = new SharedConfig.ProxyInfo(address, p, "", "", secret);
++                info = new SharedConfig.ProxyInfo(address, p, "", "", secret, type);
+             }
++            editor.putInt("proxy_type", type);
+             editor.commit();
+ 
+             SharedConfig.currentProxy = SharedConfig.addProxy(info);
+ 
+-            ConnectionsManager.setProxySettings(true, address, p, user, password, secret);
++            ConnectionsManager.setProxySettings(true, address, p, user, password, secret, type);
+             NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
+             if (activity instanceof LaunchActivity) {
+                 INavigationLayout layout = ((LaunchActivity) activity).getActionBarLayout();
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
-index b1caaddb4..08a513544 100644
+index 4ed7e6491..8d3936da1 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
 @@ -25,9 +25,10 @@ public class BuildVars {
@@ -1227,27 +1396,23 @@ index 000000000..cde15c8ac
 +    }
 +}
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/DatabaseMigrationHelper.java b/TMessagesProj/src/main/java/org/telegram/messenger/DatabaseMigrationHelper.java
-index 91fefa223..2759efdb7 100644
+index cd11350c4..a68e9a6a7 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/DatabaseMigrationHelper.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/DatabaseMigrationHelper.java
-@@ -1679,6 +1679,12 @@ public class DatabaseMigrationHelper {
-             database.executeFast("PRAGMA user_version = 176").stepThis().dispose();
-             version = 176;
-         }
-+        if (version == 176) {
+@@ -1685,6 +1685,8 @@ public class DatabaseMigrationHelper {
+             database.executeFast("CREATE INDEX IF NOT EXISTS dialog_date_idx_welcome_messages ON welcome_messages(dialog_id, date);").stepThis().dispose();
+             database.executeFast("CREATE INDEX IF NOT EXISTS reply_to_idx_welcome_messages ON welcome_messages(mid, reply_to_message_id);").stepThis().dispose();
+             database.executeFast("CREATE INDEX IF NOT EXISTS idx_to_reply_welcome_messages ON welcome_messages(reply_to_message_id, mid);").stepThis().dispose();
 +            // TGX: locally-retained tombstones for messages recalled by the sender (anti-recall feature)
 +            database.executeFast("CREATE TABLE recalled_messages(uid INTEGER, mid INTEGER, recalled_date INTEGER, PRIMARY KEY(uid, mid))").stepThis().dispose();
-+            database.executeFast("PRAGMA user_version = 177").stepThis().dispose();
-+            version = 177;
-+        }
- 
-         return version;
-     }
+             database.executeFast("PRAGMA user_version = 177").stepThis().dispose();
+             version = 177;
+         }
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
-index fea32835f..636cb9001 100644
+index f39c6a1d5..0c786aee2 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
-@@ -1805,7 +1805,9 @@ public class MediaController implements AudioManager.OnAudioFocusChangeListener,
+@@ -1804,7 +1804,9 @@ public class MediaController implements AudioManager.OnAudioFocusChangeListener,
          }
          if (send) {
              if (lastSecretChat != null) {
@@ -1259,10 +1424,10 @@ index fea32835f..636cb9001 100644
                  SendMessagesHelper.getInstance(lastChatAccount).sendScreenshotMessage(lastUser, lastMessageId, null);
              }
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
-index 80374e50c..2b8a14643 100644
+index 12c669c43..fbe52d345 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
-@@ -222,6 +222,8 @@ public class MessageObject {
+@@ -224,6 +224,8 @@ public class MessageObject {
      public String monthKey;
      public boolean deleted;
      public boolean deletedByThanos;
@@ -1272,10 +1437,10 @@ index 80374e50c..2b8a14643 100644
      public float forceSeekTo = -1;
      public int audioProgressMs;
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
-index 2e65a2ca4..4bfa57dbe 100644
+index 7a0b35b13..18b2c52ab 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
-@@ -8298,13 +8298,17 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -8289,13 +8289,17 @@ public class MessagesController extends BaseController implements NotificationCe
              LongSparseArray<ArrayList<Integer>> task = currentDeletingTaskMids != null ? currentDeletingTaskMids.clone() : null;
              LongSparseArray<ArrayList<Integer>> taskMedia = currentDeletingTaskMediaMids != null ? currentDeletingTaskMediaMids.clone() : null;
              AndroidUtilities.runOnUIThread(() -> {
@@ -1295,7 +1460,7 @@ index 2e65a2ca4..4bfa57dbe 100644
                      final boolean checkViewer = SecretMediaViewer.hasInstance() && SecretMediaViewer.getInstance().isVisible();
                      final MessageObject viewerObject = checkViewer ? SecretMediaViewer.getInstance().getCurrentMessageObject() : null;
                      for (int a = 0, N = taskMedia.size(); a < N; a++) {
-@@ -14346,6 +14350,10 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -14405,6 +14409,10 @@ public class MessagesController extends BaseController implements NotificationCe
          long dialogId = messageObject.getDialogId();
          getMessagesStorage().markMessagesContentAsRead(dialogId, arrayList, 0, 0);
          getNotificationCenter().postNotificationName(NotificationCenter.messagesReadContent, dialogId, arrayList);
@@ -1306,7 +1471,7 @@ index 2e65a2ca4..4bfa57dbe 100644
          if (messageObject.getId() < 0) {
              markMessageAsRead(messageObject.getDialogId(), messageObject.messageOwner.random_id, Integer.MIN_VALUE);
          } else {
-@@ -14411,6 +14419,11 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -14470,6 +14478,11 @@ public class MessagesController extends BaseController implements NotificationCe
  
      public void doDeleteShowOnceTask(long taskId, long dialogId, int mid) {
          getMessagesStorage().removePendingTask(taskId);
@@ -1318,7 +1483,7 @@ index 2e65a2ca4..4bfa57dbe 100644
          ArrayList<Integer> mids = new ArrayList<>();
          mids.add(mid);
          getMessagesStorage().emptyMessagesMedia(dialogId, mids);
-@@ -14421,6 +14434,15 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -14480,6 +14493,15 @@ public class MessagesController extends BaseController implements NotificationCe
      }
  
      public void markMessageAsRead2(long dialogId, int mid, TLRPC.InputChannel inputChannel, int ttl, long taskId, boolean createDeleteTask) {
@@ -1334,7 +1499,7 @@ index 2e65a2ca4..4bfa57dbe 100644
          if (mid == 0 || ttl < 0) {
              return;
          }
-@@ -18370,6 +18392,10 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -18426,6 +18448,10 @@ public class MessagesController extends BaseController implements NotificationCe
          LongSparseArray<ArrayList<Integer>> markContentAsReadMessages = null;
          SparseIntArray markAsReadEncrypted = null;
          LongSparseArray<ArrayList<Integer>> deletedMessages = null;
@@ -1345,7 +1510,7 @@ index 2e65a2ca4..4bfa57dbe 100644
          LongSparseArray<ArrayList<Integer>> deletedQuickReplyMessages = null;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessages = null;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSent = null;
-@@ -18758,6 +18784,11 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -18814,6 +18840,11 @@ public class MessagesController extends BaseController implements NotificationCe
                  dialogs_read_outbox_max.put(dialogId, Math.max(value, update.max_id));
              } else if (baseUpdate instanceof TL_update.TL_updateDeleteMessages) {
                  TL_update.TL_updateDeleteMessages update = (TL_update.TL_updateDeleteMessages) baseUpdate;
@@ -1357,7 +1522,7 @@ index 2e65a2ca4..4bfa57dbe 100644
                  if (deletedMessages == null) {
                      deletedMessages = new LongSparseArray<>();
                  }
-@@ -19283,16 +19314,33 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -19339,16 +19370,33 @@ public class MessagesController extends BaseController implements NotificationCe
                  if (BuildVars.LOGS_ENABLED) {
                      FileLog.d(baseUpdate + " channelId = " + update.channel_id);
                  }
@@ -1399,7 +1564,7 @@ index 2e65a2ca4..4bfa57dbe 100644
              } else if (baseUpdate instanceof TL_update.TL_updateChannel) {
                  if (BuildVars.LOGS_ENABLED) {
                      TL_update.TL_updateChannel update = (TL_update.TL_updateChannel) baseUpdate;
-@@ -20910,6 +20958,7 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21001,6 +21049,7 @@ public class MessagesController extends BaseController implements NotificationCe
          LongSparseArray<ArrayList<Integer>> markContentAsReadMessagesFinal = markContentAsReadMessages;
          SparseIntArray markAsReadEncryptedFinal = markAsReadEncrypted;
          LongSparseArray<ArrayList<Integer>> deletedMessagesFinal = deletedMessages;
@@ -1407,7 +1572,7 @@ index 2e65a2ca4..4bfa57dbe 100644
          LongSparseArray<ArrayList<Integer>> deletedQuickRepliesMessagesFinal = deletedQuickReplyMessages;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesFinal = scheduledDeletedMessages;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSentFinal = scheduledDeletedMessagesSent;
-@@ -21034,6 +21083,35 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21125,6 +21174,35 @@ public class MessagesController extends BaseController implements NotificationCe
                  }
                  getNotificationsController().removeDeletedMessagesFromNotifications(deletedMessagesFinal, false);
              }
@@ -1443,7 +1608,7 @@ index 2e65a2ca4..4bfa57dbe 100644
              if (deletedQuickRepliesMessagesFinal != null) {
                  for (int a = 0, size = deletedQuickRepliesMessagesFinal.size(); a < size; a++) {
                      long topicId = deletedQuickRepliesMessagesFinal.keyAt(a);
-@@ -21120,6 +21198,20 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21211,6 +21289,20 @@ public class MessagesController extends BaseController implements NotificationCe
              for (int a = 0, size = deletedMessages.size(); a < size; a++) {
                  long key = deletedMessages.keyAt(a);
                  ArrayList<Integer> arrayList = deletedMessages.valueAt(a);
@@ -1464,7 +1629,7 @@ index 2e65a2ca4..4bfa57dbe 100644
                  getMessagesStorage().getStorageQueue().postRunnable(() -> {
                      ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, arrayList, false, true, 0, 0);
                      getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, arrayList, dialogIds);
-@@ -21458,6 +21550,147 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21549,6 +21641,147 @@ public class MessagesController extends BaseController implements NotificationCe
          return false;
      }
  
@@ -1613,19 +1778,10 @@ index 2e65a2ca4..4bfa57dbe 100644
          if (topicId == 0) {
              TLRPC.Dialog dialog = dialogs_dict.get(dialogId);
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
-index 4d719fab6..91d5ee211 100644
+index a6a0468fb..c068a2f65 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
-@@ -117,7 +117,7 @@ public class MessagesStorage extends BaseController {
-         }
-     }
- 
--    public final static int LAST_DB_VERSION = 176;
-+    public final static int LAST_DB_VERSION = 177;
-     private boolean databaseMigrationInProgress;
-     public boolean showClearDatabaseAlert;
- 
-@@ -548,6 +548,9 @@ public class MessagesStorage extends BaseController {
+@@ -549,6 +549,9 @@ public class MessagesStorage extends BaseController {
          database.executeFast("CREATE INDEX IF NOT EXISTS idx_to_reply_scheduled_messages_v2 ON scheduled_messages_v2(reply_to_message_id, mid);").stepThis().dispose();
  
          database.executeFast("CREATE TABLE messages_v2(mid INTEGER, uid INTEGER, read_state INTEGER, send_state INTEGER, date INTEGER, data BLOB, out INTEGER, ttl INTEGER, media INTEGER, replydata BLOB, imp INTEGER, mention INTEGER, forwards INTEGER, replies_data BLOB, thread_reply_id INTEGER, is_channel INTEGER, reply_to_message_id INTEGER, custom_params BLOB, group_id INTEGER, reply_to_story_id INTEGER, PRIMARY KEY(mid, uid))").stepThis().dispose();
@@ -1635,7 +1791,7 @@ index 4d719fab6..91d5ee211 100644
          database.executeFast("CREATE INDEX IF NOT EXISTS uid_mid_read_out_idx_messages_v2 ON messages_v2(uid, mid, read_state, out);").stepThis().dispose();
          database.executeFast("CREATE INDEX IF NOT EXISTS uid_date_mid_idx_messages_v2 ON messages_v2(uid, date, mid);").stepThis().dispose();
          database.executeFast("CREATE INDEX IF NOT EXISTS mid_out_idx_messages_v2 ON messages_v2(mid, out);").stepThis().dispose();
-@@ -14849,6 +14852,119 @@ public class MessagesStorage extends BaseController {
+@@ -15311,6 +15314,119 @@ public class MessagesStorage extends BaseController {
          executeInStorageQueue(() -> updateDialogsWithDeletedMessagesInternal(dialogId, channelId, messages, additionalDialogsToUpdate));
      }
  
@@ -1769,10 +1925,10 @@ index cdefac769..d62564b4f 100644
      public static final int messagesRead = totalEvents++;
      public static final int threadMessagesRead = totalEvents++;
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
-index 0a8a9bd08..7b8656dc2 100644
+index d6901d267..a219bb6d3 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
-@@ -1051,6 +1051,26 @@ public class NotificationsController extends BaseController implements Notificat
+@@ -1057,6 +1057,26 @@ public class NotificationsController extends BaseController implements Notificat
              return;
          }
  
@@ -1799,6 +1955,1136 @@ index 0a8a9bd08..7b8656dc2 100644
          ArrayList<MessageObject> popupArrayAdd = new ArrayList<>(0);
          notificationsQueue.postRunnable(() -> {
              boolean added = false;
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/ProxyRotationController.java b/TMessagesProj/src/main/java/org/telegram/messenger/ProxyRotationController.java
+index 9b5fb7713..f19a4e4a8 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/ProxyRotationController.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/ProxyRotationController.java
+@@ -26,7 +26,9 @@ public class ProxyRotationController implements NotificationCenter.NotificationC
+         boolean startedCheck = false;
+         for (int i = 0; i < SharedConfig.proxyList.size(); i++) {
+             SharedConfig.ProxyInfo proxyInfo = SharedConfig.proxyList.get(i);
+-            if (proxyInfo.checking || SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime < 2 * 60 * 1000) {
++            // WEB entries have no independent check and are excluded from rotation: probing one
++            // would churn the single process-wide WebView carrier.
++            if (proxyInfo.isWeb() || proxyInfo.checking || SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime < 2 * 60 * 1000) {
+                 continue;
+             }
+             startedCheck = true;
+@@ -66,7 +68,7 @@ public class ProxyRotationController implements NotificationCenter.NotificationC
+         List<SharedConfig.ProxyInfo> sortedList = new ArrayList<>(SharedConfig.proxyList);
+         Collections.sort(sortedList, (o1, o2) -> Long.compare(o1.ping, o2.ping));
+         for (SharedConfig.ProxyInfo info : sortedList) {
+-            if (info == SharedConfig.currentProxy || info.checking || !info.available) {
++            if (info == SharedConfig.currentProxy || info.isWeb() || info.checking || !info.available) {
+                 continue;
+             }
+ 
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java b/TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java
+index bbc3a939a..aee8584ca 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java
+@@ -55,7 +55,8 @@ public class SharedConfig {
+      * V2: Ping and check time serialized
+      */
+     private final static int PROXY_SCHEMA_V2 = 2;
+-    private final static int PROXY_CURRENT_SCHEMA_VERSION = PROXY_SCHEMA_V2;
++    private final static int PROXY_SCHEMA_V3 = 3;
++    private final static int PROXY_CURRENT_SCHEMA_VERSION = PROXY_SCHEMA_V3;
+ 
+     public final static int PASSCODE_TYPE_PIN = 0,
+             PASSCODE_TYPE_PASSWORD = 1;
+@@ -372,11 +373,18 @@ public class SharedConfig {
+ 
+     public static class ProxyInfo {
+ 
++        public final static int TYPE_SOCKS5 = 0;
++        public final static int TYPE_MTPROTO = 1;
++        public final static int TYPE_WEB = 2;
++
++        public final static int WEB_PORT = 443;
++
+         public String address;
+         public int port;
+         public String username;
+         public String password;
+         public String secret;
++        public int type;
+ 
+         public long proxyCheckPingId;
+         public long ping;
+@@ -385,6 +393,11 @@ public class SharedConfig {
+         public long availableCheckTime;
+ 
+         public ProxyInfo(String address, int port, String username, String password, String secret) {
++            this(address, port, username, password, secret, TextUtils.isEmpty(secret) ? TYPE_SOCKS5 : TYPE_MTPROTO);
++        }
++
++        public ProxyInfo(String address, int port, String username, String password, String secret, int type) {
++            this.type = type;
+             this.address = address;
+             this.port = port;
+             this.username = username;
+@@ -404,7 +417,20 @@ public class SharedConfig {
+             }
+         }
+ 
++        public boolean isWeb() {
++            return type == TYPE_WEB;
++        }
++
+         public String getLink() {
++            if (type == TYPE_WEB) {
++                StringBuilder url = new StringBuilder("https://t.me/webproxy?");
++                try {
++                    boolean hasBasePath = !TextUtils.isEmpty(WebProxyTransport.basePathOf(address));
++                    url.append("server=").append(URLEncoder.encode(address, "UTF-8"));
++                    url.append("&secret=").append(WebProxyTransport.encodeLinkSecret(secret, hasBasePath));
++                } catch (UnsupportedEncodingException ignored) {}
++                return url.toString();
++            }
+             StringBuilder url = new StringBuilder(!TextUtils.isEmpty(secret) ? "https://t.me/proxy?" : "https://t.me/socks?");
+             try {
+                 url.append("server=").append(URLEncoder.encode(address, "UTF-8")).append("&").append("port=").append(port);
+@@ -1416,6 +1442,7 @@ public class SharedConfig {
+         String proxyPassword = preferences.getString("proxy_pass", "");
+         String proxySecret = preferences.getString("proxy_secret", "");
+         int proxyPort = preferences.getInt("proxy_port", 1080);
++        int proxyType = preferences.getInt("proxy_type", TextUtils.isEmpty(proxySecret) ? ProxyInfo.TYPE_SOCKS5 : ProxyInfo.TYPE_MTPROTO);
+ 
+         proxyListLoaded = true;
+         proxyList.clear();
+@@ -1428,7 +1455,7 @@ public class SharedConfig {
+             if (count == -1) { // V2 or newer
+                 int version = data.readByte(false);
+ 
+-                if (version == PROXY_SCHEMA_V2) {
++                if (version == PROXY_SCHEMA_V2 || version == PROXY_SCHEMA_V3) {
+                     count = data.readInt32(false);
+ 
+                     for (int i = 0; i < count; i++) {
+@@ -1441,10 +1468,13 @@ public class SharedConfig {
+ 
+                         info.ping = data.readInt64(false);
+                         info.availableCheckTime = data.readInt64(false);
++                        if (version == PROXY_SCHEMA_V3) {
++                            info.type = data.readInt32(false);
++                        }
+ 
+                         proxyList.add(0, info);
+                         if (currentProxy == null && !TextUtils.isEmpty(proxyAddress)) {
+-                            if (proxyAddress.equals(info.address) && proxyPort == info.port && proxyUsername.equals(info.username) && proxyPassword.equals(info.password)) {
++                            if (proxyAddress.equals(info.address) && proxyPort == info.port && proxyUsername.equals(info.username) && proxyPassword.equals(info.password) && proxyType == info.type) {
+                                 currentProxy = info;
+                             }
+                         }
+@@ -1462,7 +1492,7 @@ public class SharedConfig {
+                             data.readString(false));
+                     proxyList.add(0, info);
+                     if (currentProxy == null && !TextUtils.isEmpty(proxyAddress)) {
+-                        if (proxyAddress.equals(info.address) && proxyPort == info.port && proxyUsername.equals(info.username) && proxyPassword.equals(info.password)) {
++                        if (proxyAddress.equals(info.address) && proxyPort == info.port && proxyUsername.equals(info.username) && proxyPassword.equals(info.password) && proxyType == info.type) {
+                             currentProxy = info;
+                         }
+                     }
+@@ -1471,7 +1501,7 @@ public class SharedConfig {
+             data.cleanup();
+         }
+         if (currentProxy == null && !TextUtils.isEmpty(proxyAddress)) {
+-            ProxyInfo info = currentProxy = new ProxyInfo(proxyAddress, proxyPort, proxyUsername, proxyPassword, proxySecret);
++            ProxyInfo info = currentProxy = new ProxyInfo(proxyAddress, proxyPort, proxyUsername, proxyPassword, proxySecret, proxyType);
+             proxyList.add(0, info);
+         }
+     }
+@@ -1504,6 +1534,7 @@ public class SharedConfig {
+ 
+             serializedData.writeInt64(info.ping);
+             serializedData.writeInt64(info.availableCheckTime);
++            serializedData.writeInt32(info.type);
+         }
+         SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("mainconfig", Activity.MODE_PRIVATE);
+         preferences.edit().putString("proxy_list", Base64.encodeToString(serializedData.toByteArray(), Base64.NO_WRAP)).apply();
+@@ -1515,7 +1546,7 @@ public class SharedConfig {
+         int count = proxyList.size();
+         for (int a = 0; a < count; a++) {
+             ProxyInfo info = proxyList.get(a);
+-            if (proxyInfo.address.equals(info.address) && proxyInfo.port == info.port && proxyInfo.username.equals(info.username) && proxyInfo.password.equals(info.password) && proxyInfo.secret.equals(info.secret)) {
++            if (proxyInfo.address.equals(info.address) && proxyInfo.port == info.port && proxyInfo.username.equals(info.username) && proxyInfo.password.equals(info.password) && proxyInfo.secret.equals(info.secret) && proxyInfo.type == info.type) {
+                 return info;
+             }
+         }
+@@ -1539,6 +1570,7 @@ public class SharedConfig {
+             editor.putString("proxy_user", "");
+             editor.putString("proxy_secret", "");
+             editor.putInt("proxy_port", 1080);
++            editor.remove("proxy_type");
+             editor.putBoolean("proxy_enabled", false);
+             editor.putBoolean("proxy_enabled_calls", false);
+             editor.apply();
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java b/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+new file mode 100644
+index 000000000..f09076d0c
+--- /dev/null
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+@@ -0,0 +1,959 @@
++package org.telegram.messenger;
++
++import android.annotation.SuppressLint;
++import android.net.Uri;
++import android.os.Handler;
++import android.os.HandlerThread;
++import android.os.Looper;
++import android.text.TextUtils;
++import android.util.Base64;
++import android.util.SparseArray;
++import android.webkit.RenderProcessGoneDetail;
++import android.webkit.WebResourceRequest;
++import android.webkit.WebResourceResponse;
++import android.webkit.WebSettings;
++import android.webkit.WebView;
++
++import androidx.annotation.NonNull;
++import androidx.annotation.Nullable;
++import androidx.webkit.JavaScriptReplyProxy;
++import androidx.webkit.WebMessageCompat;
++import androidx.webkit.WebViewClientCompat;
++import androidx.webkit.WebViewCompat;
++import androidx.webkit.WebViewFeature;
++
++import org.json.JSONObject;
++
++import java.io.ByteArrayInputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.net.InetAddress;
++import java.net.InetSocketAddress;
++import java.net.ServerSocket;
++import java.net.Socket;
++import java.nio.charset.StandardCharsets;
++import java.security.SecureRandom;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.HashSet;
++import java.util.Set;
++
++import javax.crypto.Mac;
++import javax.crypto.spec.SecretKeySpec;
++
++/**
++ * WEB proxy carrier: the MTProxy byte stream produced by tgnet is taken off a loopback
++ * socket, split into protocol v1 frames and multiplexed through a private WebView that
++ * talks HTTPS to the relay. See PROTOCOL.md of telegramdesktop/tproxy-server.
++ *
++ * tgnet is not modified: it still performs its own MTProxy transform and still believes
++ * it is talking to an ordinary proxy, so DPI shaping and fake-TLS stay on the MTProto
++ * path only and never apply to this carrier.
++ */
++public final class WebProxyTransport {
++
++    public static final int FRAME_OPEN = 0x01;
++    public static final int FRAME_DATA = 0x02;
++    public static final int FRAME_CLOSE = 0x03;
++    public static final int FRAME_WINDOW = 0x04;
++    public static final int FRAME_PING = 0x05;
++    public static final int FRAME_PONG = 0x06;
++    public static final int FRAME_HELLO = 0x10;
++    public static final int FRAME_WELCOME = 0x11;
++    public static final int FRAME_BYE = 0x1f;
++
++    /** Marks a link secret that carries a base path. Never 0xDD: old clients accept that one. */
++    public static final int LINK_SECRET_MARKER = 0x70;
++
++    private static final String BRIDGE_OBJECT = "TelegramWebProxy";
++    private static final String CONTEXT_V1 = "tdesktop-web-proxy-bridge-v1\n";
++    private static final String CONTEXT_V2 = "tdesktop-web-proxy-bridge-v2\n";
++
++    private static final int FRAME_HEADER_SIZE = 8;
++    private static final int MAX_PAYLOAD = 1024 * 1024;
++    private static final int CHUNK_SIZE = 64 * 1024;
++    private static final int INITIAL_WINDOW = 4 * 1024 * 1024;
++    private static final int MAX_PENDING_UPLINK = 8 * 1024 * 1024;
++    private static final int MAX_STREAM_ID = 0xffffff;
++
++    private static final long RETRY_MIN_DELAY = 1000;
++    private static final long RETRY_MAX_DELAY = 30000;
++
++    private static volatile WebProxyTransport instance;
++
++    public static WebProxyTransport getInstance() {
++        WebProxyTransport local = instance;
++        if (local == null) {
++            synchronized (WebProxyTransport.class) {
++                local = instance;
++                if (local == null) {
++                    instance = local = new WebProxyTransport();
++                }
++            }
++        }
++        return local;
++    }
++
++    private final Handler mux;
++    private final Handler ui = new Handler(Looper.getMainLooper());
++    private final SparseArray<Stream> streams = new SparseArray<>();
++    private final ArrayList<byte[]> pendingUplink = new ArrayList<>();
++
++    private String host;
++    private String basePath;
++    private byte[] secret;
++
++    private ServerSocket serverSocket;
++    private int localPort;
++    private Thread acceptThread;
++
++    private WebView webView;
++    private JavaScriptReplyProxy replyProxy;
++    private String nonce;
++    private boolean welcomed;
++    private int nextStreamId = 1;
++    private int pendingUplinkBytes;
++    private long retryDelay = RETRY_MIN_DELAY;
++    private int carrierGeneration;
++
++    private WebProxyTransport() {
++        HandlerThread thread = new HandlerThread("WebProxyTransport");
++        thread.start();
++        mux = new Handler(thread.getLooper());
++    }
++
++    // region public API
++
++    /**
++     * True when this device can carry a WEB proxy at all. A missing WebView feature fails
++     * closed — tgnet is pointed at a dead loopback port rather than at Telegram directly.
++     */
++    public static boolean isSupported() {
++        try {
++            return WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
++                    && WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_ARRAY_BUFFER)
++                    && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT);
++        } catch (Throwable e) {
++            return false;
++        }
++    }
++
++    /**
++     * Binds the loopback listener and starts the carrier. Returns the port tgnet must be
++     * pointed at, or 0 when the address or secret cannot be used.
++     */
++    public int start(String address, String secretText) {
++        final String canonicalHost = hostOf(address);
++        final String path = basePathOf(address);
++        final byte[] secretBytes = decodeSecret(secretText);
++        if (canonicalHost == null || path == null || secretBytes == null) {
++            stop();
++            return 0;
++        }
++        synchronized (this) {
++            if (serverSocket != null
++                    && canonicalHost.equals(host)
++                    && TextUtils.equals(path, basePath)
++                    && java.util.Arrays.equals(secretBytes, secret)) {
++                return localPort;
++            }
++        }
++        stop();
++        synchronized (this) {
++            host = canonicalHost;
++            basePath = path;
++            secret = secretBytes;
++            try {
++                serverSocket = new ServerSocket();
++                serverSocket.setReuseAddress(true);
++                serverSocket.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 64);
++                localPort = serverSocket.getLocalPort();
++            } catch (IOException e) {
++                FileLog.e(e);
++                serverSocket = null;
++                localPort = 0;
++                return 0;
++            }
++            final ServerSocket bound = serverSocket;
++            acceptThread = new Thread(() -> acceptLoop(bound), "WebProxyAccept");
++            acceptThread.setDaemon(true);
++            acceptThread.start();
++        }
++        mux.post(this::startCarrier);
++        return localPort;
++    }
++
++    public void stop() {
++        final ServerSocket toClose;
++        synchronized (this) {
++            toClose = serverSocket;
++            serverSocket = null;
++            localPort = 0;
++            acceptThread = null;
++            host = null;
++            basePath = null;
++            secret = null;
++        }
++        if (toClose != null) {
++            try {
++                toClose.close();
++            } catch (IOException ignore) {
++            }
++        }
++        mux.post(() -> dropCarrier(false));
++    }
++
++    // endregion
++
++    // region link helpers
++
++    /** Lowercased host part of a {@code host} or {@code host/base/path} address, or null. */
++    @Nullable
++    public static String hostOf(String address) {
++        if (TextUtils.isEmpty(address)) {
++            return null;
++        }
++        int slash = address.indexOf('/');
++        String value = (slash < 0 ? address : address.substring(0, slash)).toLowerCase();
++        if (value.isEmpty() || value.length() > 253 || value.indexOf(':') >= 0
++                || value.startsWith(".") || value.endsWith(".") || value.contains("..")) {
++            return null;
++        }
++        for (int i = 0; i < value.length(); i++) {
++            char c = value.charAt(i);
++            if (!(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '-')) {
++                return null;
++            }
++        }
++        // An IPv4 literal is not a DNS name and would defeat the TLS-name cover.
++        return value.matches("^\\d{1,3}(\\.\\d{1,3}){3}$") ? null : value;
++    }
++
++    /**
++     * Base path of a {@code host/base/path} address: one or more {@code [A-Za-z0-9][A-Za-z0-9_-]*}
++     * segments, case-sensitive, no leading or trailing slash. Empty string when there is none,
++     * null when the value is present but malformed.
++     */
++    @Nullable
++    public static String basePathOf(String address) {
++        if (TextUtils.isEmpty(address)) {
++            return null;
++        }
++        int slash = address.indexOf('/');
++        if (slash < 0) {
++            return "";
++        }
++        String path = address.substring(slash + 1);
++        while (path.endsWith("/")) {
++            path = path.substring(0, path.length() - 1);
++        }
++        if (path.isEmpty()) {
++            return "";
++        }
++        if (path.length() > 128) {
++            return null;
++        }
++        for (String segment : path.split("/", -1)) {
++            if (segment.isEmpty() || !segment.matches("^[A-Za-z0-9][A-Za-z0-9_-]*$")) {
++                return null;
++            }
++        }
++        return path;
++    }
++
++    /** True when the address and secret together form a usable WEB proxy entry. */
++    public static boolean isValidAddress(String address, String secretText) {
++        return hostOf(address) != null
++                && basePathOf(address) != null
++                && decodeSecret(secretText) != null;
++    }
++
++    /**
++     * MTProxy secret bytes of a stored WEB entry, or null. The leading {@code dd} byte of a
++     * random-padding secret is part of the key and is kept.
++     */
++    @Nullable
++    public static byte[] decodeSecret(String secretText) {
++        if (TextUtils.isEmpty(secretText)) {
++            return null;
++        }
++        byte[] bytes = null;
++        if (secretText.length() % 2 == 0 && secretText.matches("^[0-9a-fA-F]+$")) {
++            try {
++                bytes = Utilities.hexToBytes(secretText);
++            } catch (Exception ignore) {
++            }
++        }
++        if (bytes == null) {
++            try {
++                bytes = Base64.decode(secretText, Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP);
++            } catch (Exception ignore) {
++                return null;
++            }
++        }
++        if (bytes == null) {
++            return null;
++        }
++        // WEB only carries a plain 16-byte secret or a 17-byte dd-prefixed one. A 0xee
++        // fake-TLS secret belongs to the ordinary MTProto path, not to this carrier.
++        if (bytes.length == 16) {
++            return bytes;
++        }
++        if (bytes.length == 17 && (bytes[0] & 0xff) == 0xdd) {
++            return bytes;
++        }
++        return null;
++    }
++
++    /**
++     * Decodes the {@code secret} of a webproxy link. Returns the canonical hex secret, or null
++     * when the link is unusable. A link that carries a base path must use the marked form.
++     */
++    @Nullable
++    public static String decodeLinkSecret(String linkSecret, boolean hasBasePath) {
++        if (TextUtils.isEmpty(linkSecret)) {
++            return null;
++        }
++        byte[] marked = null;
++        try {
++            marked = Base64.decode(linkSecret, Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP);
++        } catch (Exception ignore) {
++        }
++        if (marked != null && marked.length >= 17 && (marked[0] & 0xff) == LINK_SECRET_MARKER) {
++            byte[] plain = new byte[marked.length - 1];
++            System.arraycopy(marked, 1, plain, 0, plain.length);
++            return decodeSecret(Utilities.bytesToHex(plain)) != null ? Utilities.bytesToHex(plain) : null;
++        }
++        if (hasBasePath) {
++            return null;
++        }
++        byte[] plain = decodeSecret(linkSecret);
++        return plain != null ? Utilities.bytesToHex(plain) : null;
++    }
++
++    /** Encodes a stored secret for a share link: plain hex at the root, marked base64url under a path. */
++    public static String encodeLinkSecret(String secretText, boolean hasBasePath) {
++        byte[] plain = decodeSecret(secretText);
++        if (plain == null) {
++            return "";
++        }
++        if (!hasBasePath) {
++            return Utilities.bytesToHex(plain);
++        }
++        byte[] marked = new byte[plain.length + 1];
++        marked[0] = (byte) LINK_SECRET_MARKER;
++        System.arraycopy(plain, 0, marked, 1, plain.length);
++        return Base64.encodeToString(marked, Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP);
++    }
++
++    /**
++     * Bridge capability: base64url(HMAC-SHA256(secret, context)). The root context is the frozen
++     * v1 label; a base path binds host and path through v2.
++     */
++    @Nullable
++    public static String bridgeCapability(String address, String secretText) {
++        final String canonicalHost = hostOf(address);
++        final String path = basePathOf(address);
++        final byte[] key = decodeSecret(secretText);
++        if (canonicalHost == null || path == null || key == null) {
++            return null;
++        }
++        final String context = path.isEmpty()
++                ? CONTEXT_V1 + canonicalHost
++                : CONTEXT_V2 + canonicalHost + "\n" + path;
++        try {
++            Mac mac = Mac.getInstance("HmacSHA256");
++            mac.init(new SecretKeySpec(key, "HmacSHA256"));
++            byte[] digest = mac.doFinal(context.getBytes(StandardCharsets.UTF_8));
++            return Base64.encodeToString(digest, Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP);
++        } catch (Exception e) {
++            FileLog.e(e);
++            return null;
++        }
++    }
++
++    // endregion
++
++    // region frames
++
++    static byte[] frame(int type, int streamId, @Nullable byte[] payload, int offset, int length) {
++        byte[] out = new byte[FRAME_HEADER_SIZE + length];
++        out[0] = (byte) type;
++        out[1] = (byte) (streamId >> 16);
++        out[2] = (byte) (streamId >> 8);
++        out[3] = (byte) streamId;
++        out[4] = (byte) (length >> 24);
++        out[5] = (byte) (length >> 16);
++        out[6] = (byte) (length >> 8);
++        out[7] = (byte) length;
++        if (length > 0) {
++            System.arraycopy(payload, offset, out, FRAME_HEADER_SIZE, length);
++        }
++        return out;
++    }
++
++    private static byte[] windowFrame(int streamId, int delta) {
++        byte[] payload = new byte[]{
++                (byte) (delta >> 24), (byte) (delta >> 16), (byte) (delta >> 8), (byte) delta
++        };
++        return frame(FRAME_WINDOW, streamId, payload, 0, payload.length);
++    }
++
++    // endregion
++
++    // region loopback
++
++    private void acceptLoop(ServerSocket bound) {
++        while (true) {
++            final Socket socket;
++            try {
++                socket = bound.accept();
++            } catch (IOException e) {
++                return;
++            }
++            try {
++                socket.setTcpNoDelay(true);
++            } catch (IOException ignore) {
++            }
++            mux.post(() -> registerStream(socket, bound));
++        }
++    }
++
++    private void registerStream(Socket socket, ServerSocket owner) {
++        synchronized (this) {
++            if (serverSocket != owner) {
++                closeQuietly(socket);
++                return;
++            }
++        }
++        if (!isSupported()) {
++            // The listener stays bound so tgnet never falls back to a direct connection, but a
++            // device without the required WebView features can never carry the stream.
++            closeQuietly(socket);
++            return;
++        }
++        if (nextStreamId > MAX_STREAM_ID) {
++            // Stream ids are never reused inside a session, so exhausting them replaces the carrier.
++            closeQuietly(socket);
++            resetCarrier();
++            return;
++        }
++        final Stream stream = new Stream(nextStreamId++, socket);
++        streams.put(stream.id, stream);
++        sendFrame(frame(FRAME_OPEN, stream.id, null, 0, 0));
++        stream.startReader();
++        stream.startWriter();
++    }
++
++    private static void closeQuietly(@Nullable Socket socket) {
++        if (socket != null) {
++            try {
++                socket.close();
++            } catch (IOException ignore) {
++            }
++        }
++    }
++
++    // endregion
++
++    // region carrier
++
++    private void startCarrier() {
++        final String currentHost;
++        final String path;
++        final String capability;
++        synchronized (this) {
++            if (serverSocket == null || host == null) {
++                return;
++            }
++            currentHost = host;
++            path = basePath.isEmpty() ? "/" : "/" + basePath + "/";
++            capability = bridgeCapability(basePath.isEmpty() ? host : host + "/" + basePath,
++                    Utilities.bytesToHex(secret));
++        }
++        if (capability == null || !isSupported()) {
++            return;
++        }
++        final byte[] random = new byte[32];
++        new SecureRandom().nextBytes(random);
++        nonce = Base64.encodeToString(random, Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP);
++        welcomed = false;
++        final int generation = ++carrierGeneration;
++        final String url = "https://" + currentHost + path + "?bridge=" + capability + "#android=" + nonce;
++        final String origin = "https://" + currentHost;
++        ui.post(() -> createWebView(generation, currentHost, origin, url));
++    }
++
++    @SuppressLint("SetJavaScriptEnabled")
++    private void createWebView(int generation, String currentHost, String origin, String url) {
++        if (generation != carrierGeneration) {
++            return;
++        }
++        destroyWebView();
++        final WebView view;
++        try {
++            view = new WebView(ApplicationLoader.applicationContext);
++        } catch (Throwable e) {
++            FileLog.e(e);
++            mux.post(this::scheduleRetry);
++            return;
++        }
++        final WebSettings settings = view.getSettings();
++        settings.setJavaScriptEnabled(true);
++        settings.setDomStorageEnabled(false);
++        settings.setDatabaseEnabled(false);
++        settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
++        settings.setAllowFileAccess(false);
++        settings.setAllowContentAccess(false);
++        settings.setBlockNetworkImage(true);
++        settings.setLoadsImagesAutomatically(false);
++        settings.setGeolocationEnabled(false);
++        settings.setSaveFormData(false);
++        settings.setSupportMultipleWindows(false);
++        settings.setJavaScriptCanOpenWindowsAutomatically(false);
++        settings.setMediaPlaybackRequiresUserGesture(true);
++        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
++
++        final Set<String> allowed = new HashSet<>(Collections.singletonList(origin));
++        view.setWebViewClient(new CarrierClient(generation, currentHost, url));
++        view.setDownloadListener((downloadUrl, agent, disposition, mime, size) -> {
++        });
++        try {
++            WebViewCompat.addDocumentStartJavaScript(view, hardeningScript(currentHost), allowed);
++            WebViewCompat.addWebMessageListener(view, BRIDGE_OBJECT, allowed,
++                    new CarrierListener(generation, origin));
++        } catch (Throwable e) {
++            FileLog.e(e);
++            view.destroy();
++            mux.post(this::scheduleRetry);
++            return;
++        }
++        webView = view;
++        view.loadUrl(url);
++    }
++
++    private static String hardeningScript(String host) {
++        // A second CSP independent of the provider's response headers, plus inert shims for the
++        // browser facilities the bridge never uses. The CSP and the native policy remain the
++        // boundary; the shims only reduce surface.
++        final String csp = "default-src 'none'; base-uri 'none'; child-src 'none'; "
++                + "connect-src https://" + host + " wss://" + host + "; font-src 'none'; "
++                + "form-action 'none'; frame-src 'none'; img-src 'none'; manifest-src 'none'; "
++                + "media-src 'none'; object-src 'none'; script-src 'unsafe-inline'; "
++                + "style-src 'none'; worker-src 'none'";
++        return "(()=>{'use strict';"
++                + "const root=document.documentElement;"
++                + "const meta=(equiv,content)=>{const m=document.createElement('meta');"
++                + "m.setAttribute('http-equiv',equiv);m.setAttribute('content',content);"
++                + "root.insertBefore(m,root.firstChild)};"
++                + "meta('Content-Security-Policy'," + jsString(csp) + ");"
++                + "meta('x-dns-prefetch-control','off');"
++                + "const dead=name=>{try{Object.defineProperty(window,name,"
++                + "{configurable:false,get(){throw new Error('unavailable')}})}catch(e){}};"
++                + "['localStorage','sessionStorage','indexedDB','caches','Worker','SharedWorker',"
++                + "'BroadcastChannel','AudioContext','webkitAudioContext','open']"
++                + ".forEach(dead);"
++                + "const inert=()=>undefined;"
++                + "['print','alert','confirm','prompt'].forEach(name=>{"
++                + "try{Object.defineProperty(window,name,{configurable:false,value:inert})}catch(e){}});"
++                + "try{Object.defineProperty(document,'cookie',"
++                + "{configurable:false,get:()=>'',set:()=>{}})}catch(e){}"
++                + "})();";
++    }
++
++    private static String jsString(String value) {
++        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'";
++    }
++
++    private final class CarrierClient extends WebViewClientCompat {
++
++        private final int generation;
++        private final String host;
++        private final String url;
++
++        CarrierClient(int generation, String host, String url) {
++            this.generation = generation;
++            this.host = host;
++            this.url = url;
++        }
++
++        @Override
++        public boolean shouldOverrideUrlLoading(@NonNull WebView view, @NonNull WebResourceRequest request) {
++            // Only the one canonical bridge URL may ever be the main frame.
++            return !(request.isForMainFrame() && url.equals(request.getUrl().toString()));
++        }
++
++        @Nullable
++        @Override
++        public WebResourceResponse shouldInterceptRequest(@NonNull WebView view, @NonNull WebResourceRequest request) {
++            final Uri uri = request.getUrl();
++            final String scheme = uri.getScheme();
++            if (scheme == null) {
++                return blocked();
++            }
++            if (!"https".equals(scheme) && !"wss".equals(scheme)) {
++                return blocked();
++            }
++            final int port = uri.getPort();
++            if (!host.equalsIgnoreCase(uri.getHost()) || (port != -1 && port != 443)) {
++                return blocked();
++            }
++            return null;
++        }
++
++        @Override
++        public void onReceivedError(@NonNull WebView view, @NonNull WebResourceRequest request, @NonNull androidx.webkit.WebResourceErrorCompat error) {
++            if (request.isForMainFrame()) {
++                mux.post(() -> onCarrierLost(generation));
++            }
++        }
++
++        @Override
++        public boolean onRenderProcessGone(@NonNull WebView view, @NonNull RenderProcessGoneDetail detail) {
++            mux.post(() -> onCarrierLost(generation));
++            return true;
++        }
++
++        private WebResourceResponse blocked() {
++            final InputStream empty = new ByteArrayInputStream(new byte[0]);
++            return new WebResourceResponse("text/plain", "utf-8", 403, "Blocked",
++                    Collections.emptyMap(), empty);
++        }
++    }
++
++    private final class CarrierListener implements WebViewCompat.WebMessageListener {
++
++        private final int generation;
++        private final String origin;
++
++        CarrierListener(int generation, String origin) {
++            this.generation = generation;
++            this.origin = origin;
++        }
++
++        @Override
++        public void onPostMessage(@NonNull WebView view, @NonNull WebMessageCompat message,
++                                  @NonNull Uri sourceOrigin, boolean isMainFrame,
++                                  @NonNull JavaScriptReplyProxy proxy) {
++            if (!isMainFrame || view != webView || !origin.equals(sourceOrigin.toString())) {
++                return;
++            }
++            if (message.getType() == WebMessageCompat.TYPE_ARRAY_BUFFER) {
++                final byte[] data = message.getArrayBuffer();
++                mux.post(() -> onCarrierFrame(generation, data));
++            } else {
++                final String text = message.getData();
++                mux.post(() -> onCarrierControl(generation, proxy, text));
++            }
++        }
++    }
++
++    private void onCarrierControl(int generation, JavaScriptReplyProxy proxy, @Nullable String text) {
++        if (generation != carrierGeneration || text == null) {
++            return;
++        }
++        final String type;
++        final String messageNonce;
++        try {
++            JSONObject object = new JSONObject(text);
++            type = object.optString("t");
++            messageNonce = object.optString("nonce");
++        } catch (Exception e) {
++            return;
++        }
++        if ("tproxy-android-init".equals(type)) {
++            if (nonce == null || !nonce.equals(messageNonce) || replyProxy != null) {
++                return;
++            }
++            replyProxy = proxy;
++            retryDelay = RETRY_MIN_DELAY;
++            sendFrame(frame(FRAME_HELLO, 0, new byte[]{0x01}, 0, 1));
++        } else if ("close".equals(type)) {
++            onCarrierLost(generation);
++        }
++    }
++
++    private void onCarrierFrame(int generation, @Nullable byte[] data) {
++        if (generation != carrierGeneration || data == null || data.length < FRAME_HEADER_SIZE) {
++            return;
++        }
++        final int type = data[0] & 0xff;
++        final int streamId = ((data[1] & 0xff) << 16) | ((data[2] & 0xff) << 8) | (data[3] & 0xff);
++        final long length = ((long) (data[4] & 0xff) << 24) | ((data[5] & 0xff) << 16)
++                | ((data[6] & 0xff) << 8) | (data[7] & 0xff);
++        if (length > MAX_PAYLOAD || data.length != FRAME_HEADER_SIZE + length) {
++            resetCarrier();
++            return;
++        }
++        switch (type) {
++            case FRAME_WELCOME:
++                welcomed = true;
++                flushPendingUplink();
++                break;
++            case FRAME_PING: {
++                byte[] echo = frame(FRAME_PONG, 0, data, FRAME_HEADER_SIZE, (int) length);
++                sendFrame(echo);
++                break;
++            }
++            case FRAME_DATA: {
++                Stream stream = streams.get(streamId);
++                if (stream != null) {
++                    stream.enqueueDownlink(data, FRAME_HEADER_SIZE, (int) length);
++                }
++                break;
++            }
++            case FRAME_WINDOW: {
++                Stream stream = streams.get(streamId);
++                if (stream != null && length == 4) {
++                    int delta = ((data[8] & 0xff) << 24) | ((data[9] & 0xff) << 16)
++                            | ((data[10] & 0xff) << 8) | (data[11] & 0xff);
++                    stream.grantSendWindow(delta);
++                }
++                break;
++            }
++            case FRAME_CLOSE:
++                closeStream(streamId, false);
++                break;
++            case FRAME_BYE:
++                resetCarrier();
++                break;
++            default:
++                break;
++        }
++    }
++
++    private void onCarrierLost(int generation) {
++        if (generation != carrierGeneration) {
++            return;
++        }
++        resetCarrier();
++    }
++
++    private void resetCarrier() {
++        dropCarrier(true);
++        scheduleRetry();
++    }
++
++    private void dropCarrier(boolean restarting) {
++        carrierGeneration++;
++        welcomed = false;
++        replyProxy = null;
++        nonce = null;
++        pendingUplink.clear();
++        pendingUplinkBytes = 0;
++        for (int i = 0, count = streams.size(); i < count; i++) {
++            streams.valueAt(i).shutdown();
++        }
++        streams.clear();
++        ui.post(this::destroyWebView);
++        if (!restarting) {
++            retryDelay = RETRY_MIN_DELAY;
++            mux.removeCallbacks(retryRunnable);
++        }
++    }
++
++    private void destroyWebView() {
++        final WebView view = webView;
++        webView = null;
++        if (view == null) {
++            return;
++        }
++        try {
++            view.stopLoading();
++            view.loadUrl("about:blank");
++            view.destroy();
++        } catch (Throwable e) {
++            FileLog.e(e);
++        }
++    }
++
++    private final Runnable retryRunnable = this::startCarrier;
++
++    private void scheduleRetry() {
++        synchronized (this) {
++            if (serverSocket == null) {
++                return;
++            }
++        }
++        mux.removeCallbacks(retryRunnable);
++        mux.postDelayed(retryRunnable, retryDelay);
++        retryDelay = Math.min(retryDelay * 2, RETRY_MAX_DELAY);
++    }
++
++    private void sendFrame(byte[] data) {
++        // HELLO opens the session; everything else waits for WELCOME.
++        if (replyProxy == null || (!welcomed && (data[0] & 0xff) != FRAME_HELLO)) {
++            if (pendingUplinkBytes + data.length > MAX_PENDING_UPLINK) {
++                resetCarrier();
++                return;
++            }
++            pendingUplink.add(data);
++            pendingUplinkBytes += data.length;
++            return;
++        }
++        postUplink(data);
++    }
++
++    private void flushPendingUplink() {
++        final ArrayList<byte[]> queued = new ArrayList<>(pendingUplink);
++        pendingUplink.clear();
++        pendingUplinkBytes = 0;
++        for (byte[] data : queued) {
++            postUplink(data);
++        }
++    }
++
++    private void postUplink(byte[] data) {
++        final JavaScriptReplyProxy proxy = replyProxy;
++        if (proxy == null) {
++            return;
++        }
++        ui.post(() -> {
++            try {
++                proxy.postMessage(data);
++            } catch (Throwable e) {
++                FileLog.e(e);
++            }
++        });
++    }
++
++    private void closeStream(int streamId, boolean notifyRelay) {
++        final Stream stream = streams.get(streamId);
++        if (stream == null) {
++            return;
++        }
++        streams.remove(streamId);
++        stream.shutdown();
++        if (notifyRelay) {
++            sendFrame(frame(FRAME_CLOSE, streamId, null, 0, 0));
++        }
++    }
++
++    // endregion
++
++    // region stream
++
++    /**
++     * One MTProxy TCP connection from tgnet, carried as one logical relay stream. CLOSE is an
++     * abort in both directions, matching the TCP path tgnet would otherwise use.
++     */
++    private final class Stream {
++
++        final int id;
++        private final Socket socket;
++        private final ArrayList<byte[]> downlink = new ArrayList<>();
++        private final Object sendLock = new Object();
++        private int sendWindow = INITIAL_WINDOW;
++        private volatile boolean closed;
++        private Thread reader;
++        private Thread writer;
++
++        Stream(int id, Socket socket) {
++            this.id = id;
++            this.socket = socket;
++        }
++
++        void startReader() {
++            reader = new Thread(this::readLoop, "WebProxyRead/" + id);
++            reader.setDaemon(true);
++            reader.start();
++        }
++
++        void startWriter() {
++            writer = new Thread(this::writeLoop, "WebProxyWrite/" + id);
++            writer.setDaemon(true);
++            writer.start();
++        }
++
++        void grantSendWindow(int delta) {
++            synchronized (sendLock) {
++                sendWindow += delta;
++                sendLock.notifyAll();
++            }
++        }
++
++        void enqueueDownlink(byte[] source, int offset, int length) {
++            byte[] copy = new byte[length];
++            System.arraycopy(source, offset, copy, 0, length);
++            synchronized (downlink) {
++                downlink.add(copy);
++                downlink.notifyAll();
++            }
++        }
++
++        void shutdown() {
++            closed = true;
++            closeQuietly(socket);
++            synchronized (sendLock) {
++                sendLock.notifyAll();
++            }
++            synchronized (downlink) {
++                downlink.notifyAll();
++            }
++        }
++
++        private void readLoop() {
++            final byte[] buffer = new byte[CHUNK_SIZE];
++            try {
++                final InputStream input = socket.getInputStream();
++                while (!closed) {
++                    final int allowed;
++                    synchronized (sendLock) {
++                        while (sendWindow <= 0 && !closed) {
++                            sendLock.wait();
++                        }
++                        if (closed) {
++                            return;
++                        }
++                        allowed = Math.min(buffer.length, sendWindow);
++                    }
++                    final int read = input.read(buffer, 0, allowed);
++                    if (read <= 0) {
++                        break;
++                    }
++                    synchronized (sendLock) {
++                        sendWindow -= read;
++                    }
++                    final byte[] data = frame(FRAME_DATA, id, buffer, 0, read);
++                    mux.post(() -> sendFrame(data));
++                }
++            } catch (Exception ignore) {
++            } finally {
++                if (!closed) {
++                    mux.post(() -> closeStream(id, true));
++                }
++            }
++        }
++
++        private void writeLoop() {
++            try {
++                final OutputStream output = socket.getOutputStream();
++                while (!closed) {
++                    final byte[] chunk;
++                    synchronized (downlink) {
++                        while (downlink.isEmpty() && !closed) {
++                            downlink.wait();
++                        }
++                        if (closed) {
++                            return;
++                        }
++                        chunk = downlink.remove(0);
++                    }
++                    output.write(chunk);
++                    output.flush();
++                    // Credit is returned only once the bytes have reached the local socket.
++                    final byte[] window = windowFrame(id, chunk.length);
++                    mux.post(() -> sendFrame(window));
++                }
++            } catch (Exception ignore) {
++            } finally {
++                if (!closed) {
++                    mux.post(() -> closeStream(id, true));
++                }
++            }
++        }
++    }
++
++    // endregion
++}
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java b/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java
 index e8ea5120e..3678770bf 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java
@@ -1813,10 +3099,68 @@ index e8ea5120e..3678770bf 100644
          }
  
 diff --git a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
-index 470e3c4a6..9ba590be9 100644
+index f8383aefb..42d9a935d 100644
 --- a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
 +++ b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
-@@ -999,6 +999,28 @@ public class ConnectionsManager extends BaseController {
+@@ -43,6 +43,7 @@ import org.telegram.messenger.SharedConfig;
+ import org.telegram.messenger.StatsController;
+ import org.telegram.messenger.UserConfig;
+ import org.telegram.messenger.Utilities;
++import org.telegram.messenger.WebProxyTransport;
+ import org.telegram.ui.Components.VideoPlayer;
+ import org.telegram.ui.LoginActivity;
+ 
+@@ -633,8 +634,15 @@ public class ConnectionsManager extends BaseController {
+         String proxyPassword = preferences.getString("proxy_pass", "");
+         String proxySecret = preferences.getString("proxy_secret", "");
+         int proxyPort = preferences.getInt("proxy_port", 1080);
++        int proxyType = preferences.getInt("proxy_type", TextUtils.isEmpty(proxySecret) ? SharedConfig.ProxyInfo.TYPE_SOCKS5 : SharedConfig.ProxyInfo.TYPE_MTPROTO);
+ 
+         if (preferences.getBoolean("proxy_enabled", false) && !TextUtils.isEmpty(proxyAddress)) {
++            if (proxyType == SharedConfig.ProxyInfo.TYPE_WEB) {
++                proxyPort = WebProxyTransport.getInstance().start(proxyAddress, proxySecret);
++                proxyAddress = "127.0.0.1";
++                proxyUsername = "";
++                proxyPassword = "";
++            }
+             native_setProxySettings(currentAccount, proxyAddress, proxyPort, proxyUsername, proxyPassword, proxySecret);
+         }
+         String installer = "";
+@@ -940,6 +948,10 @@ public class ConnectionsManager extends BaseController {
+     }
+ 
+     public static void setProxySettings(boolean enabled, String address, int port, String username, String password, String secret) {
++        setProxySettings(enabled, address, port, username, password, secret, SharedConfig.ProxyInfo.TYPE_SOCKS5);
++    }
++
++    public static void setProxySettings(boolean enabled, String address, int port, String username, String password, String secret, int type) {
+         if (address == null) {
+             address = "";
+         }
+@@ -953,6 +965,22 @@ public class ConnectionsManager extends BaseController {
+             secret = "";
+         }
+ 
++        if (type == SharedConfig.ProxyInfo.TYPE_WEB) {
++            // tgnet keeps producing an ordinary MTProxy stream; the WEB carrier picks it up on
++            // loopback. A port of 0 means the carrier refused to start, which fails closed
++            // rather than falling back to a direct connection.
++            if (enabled && !TextUtils.isEmpty(address)) {
++                port = WebProxyTransport.getInstance().start(address, secret);
++                address = "127.0.0.1";
++                username = "";
++                password = "";
++            } else {
++                WebProxyTransport.getInstance().stop();
++            }
++        } else {
++            WebProxyTransport.getInstance().stop();
++        }
++
+         for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+             if (enabled && !TextUtils.isEmpty(address)) {
+                 native_setProxySettings(a, address, port, username, password, secret);
+@@ -990,6 +1018,28 @@ public class ConnectionsManager extends BaseController {
      public static native void native_setUserId(int currentAccount, long id);
      public static native void native_init(int currentAccount, int version, int layer, int apiId, String deviceModel, String systemVersion, String appVersion, String langCode, String systemLangCode, String configPath, String logPath, String regId, String cFingerprint, String installer, String packageId, int timezoneOffset, long userId, boolean userPremium, boolean enablePushConnection, boolean hasNetwork, int networkType, int performanceClass);
      public static native void native_setProxySettings(int currentAccount, String address, int port, String username, String password, String secret);
@@ -1846,10 +3190,10 @@ index 470e3c4a6..9ba590be9 100644
      public static native void native_setRegId(int currentAccount, String regId);
      public static native void native_setSystemLangCode(int currentAccount, String langCode);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java b/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
-index 7d7291c05..c5d9d3cd4 100644
+index ece0e3925..c10adb2aa 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
-@@ -70,6 +70,7 @@ import android.text.TextUtils;
+@@ -71,6 +71,7 @@ import android.text.TextUtils;
  import android.text.style.CharacterStyle;
  import android.text.style.ClickableSpan;
  import android.text.style.DynamicDrawableSpan;
@@ -1857,15 +3201,15 @@ index 7d7291c05..c5d9d3cd4 100644
  import android.text.style.LeadingMarginSpan;
  import android.text.style.StrikethroughSpan;
  import android.text.style.URLSpan;
-@@ -12014,6 +12015,7 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+@@ -12057,6 +12058,7 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
              Window window = activity == null ? null : activity.getWindow();
              if (window != null) {
                  flagSecure = new FlagSecureReason(window, () ->
 +                    !MessagesController.isAllowScreenshotsEnabled() &&
                      currentMessageObject != null && currentMessageObject.messageOwner != null && (
                          currentMessageObject.type == MessageObject.TYPE_PAID_MEDIA && (groupMedia == null || !groupMedia.hidden) ||
-                         currentMessageObject.messageOwner.noforwards ||
-@@ -18394,6 +18396,15 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+                         currentMessageObject.messageOwner.noforwards && !currentMessageObject.isEphemeral() ||
+@@ -18461,6 +18463,15 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
              timeString = LocaleController.formatSmallDateChat(currentMessageObject.realDate) + ", " + LocaleController.getInstance().getFormatterDay().format((long) (currentMessageObject.realDate) * 1000);
          } else if (currentMessageObject.isRepostPreview) {
              timeString = LocaleController.formatSmallDateChat(messageObject.messageOwner.date) + ", " + LocaleController.getInstance().getFormatterDay().format((long) (messageObject.messageOwner.date) * 1000);
@@ -1881,7 +3225,7 @@ index 7d7291c05..c5d9d3cd4 100644
          } else if (edited) {
              timeString = AppGlobalConfig.getInstance(currentAccount).messagePrimaryEditedDate.get() ?
                  LocaleController.formatPmEditedDate(currentMessagesGroup != null ? currentMessagesGroup.getMaxEditDate() : messageObject.messageOwner.edit_date) :
-@@ -18421,6 +18432,18 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+@@ -18488,6 +18499,18 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
          } else {
              currentTimeString = timeString;
          }
@@ -1901,10 +3245,10 @@ index 7d7291c05..c5d9d3cd4 100644
              currentTimeString = TextUtils.concat("💎", StarsIntroActivity.formatTON(currentMessageObject.getStakedDiceAmount()), "  ", currentTimeString);
              currentTimeString = StarsIntroActivity.replaceDiamond(currentTimeString, 0.55f, null, 0, dp(-.33f), 1.05f);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
-index f2ccd7e90..e21779918 100644
+index 26d82ff82..87be83021 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
-@@ -487,6 +487,7 @@ public class ChatActivity extends BaseFragment implements
+@@ -494,6 +494,7 @@ public class ChatActivity extends BaseFragment implements
      private RecyclerListView.OnItemClickListener mentionsOnItemClickListener;
      private SuggestEmojiView suggestEmojiPanel;
      private ActionBarMenuItem.Item muteItem;
@@ -1912,7 +3256,7 @@ index f2ccd7e90..e21779918 100644
      private ActionBarMenuItem.Item muteItemGap;
      private ActionBarMenuItem.Item feeItemGap;
      private ActionBarMenuItem.Item feeItemText;
-@@ -1619,6 +1620,7 @@ public class ChatActivity extends BaseFragment implements
+@@ -1642,6 +1643,7 @@ public class ChatActivity extends BaseFragment implements
      private final static int save_to = 25;
      private final static int auto_delete_timer = 26;
      private final static int change_colors = 27;
@@ -1920,7 +3264,7 @@ index f2ccd7e90..e21779918 100644
      private final static int tag_message = 28;
      private final static int boost_group = 29;
  
-@@ -2896,6 +2898,7 @@ public class ChatActivity extends BaseFragment implements
+@@ -2926,6 +2928,7 @@ public class ChatActivity extends BaseFragment implements
              .add(NotificationCenter.didLoadSendAsPeers)
              .add(NotificationCenter.closeChatActivity)
              .add(NotificationCenter.messagesDeleted)
@@ -1928,7 +3272,7 @@ index f2ccd7e90..e21779918 100644
              .add(NotificationCenter.historyCleared)
              .add(NotificationCenter.messageReceivedByServer)
              .add(NotificationCenter.messageReceivedByAck)
-@@ -3864,6 +3867,8 @@ public class ChatActivity extends BaseFragment implements
+@@ -3895,6 +3898,8 @@ public class ChatActivity extends BaseFragment implements
                      }
                  } else if (id == mute) {
                      toggleMute(false);
@@ -1937,7 +3281,7 @@ index f2ccd7e90..e21779918 100644
                  } else if (id == add_shortcut) {
                      try {
                          getMediaDataController().installShortcut(currentUser.id, MediaDataController.SHORTCUT_TYPE_USER_OR_CHAT);
-@@ -4398,6 +4403,10 @@ public class ChatActivity extends BaseFragment implements
+@@ -4440,6 +4445,10 @@ public class ChatActivity extends BaseFragment implements
              if (themeDelegate.isThemeChangeAvailable(true)) {
                  headerItem.lazilyAddSubItem(change_colors, R.drawable.msg_background, LocaleController.getString(R.string.SetWallpapers));
              }
@@ -1948,7 +3292,7 @@ index f2ccd7e90..e21779918 100644
              if (currentUser != null && currentUser.self && getDialogId() != UserObject.VERIFY) {
                  headerItem.lazilyAddSubItem(add_shortcut, R.drawable.msg_home, LocaleController.getString(R.string.AddShortcut));
              }
-@@ -8622,8 +8631,10 @@ public class ChatActivity extends BaseFragment implements
+@@ -8672,8 +8681,10 @@ public class ChatActivity extends BaseFragment implements
          chatScrollHelper.setAnimationCallback(chatScrollHelperCallback);
  
          flagSecure = new FlagSecureReason(getParentActivity().getWindow(), () ->
@@ -1961,7 +3305,7 @@ index f2ccd7e90..e21779918 100644
          );
  
          if (oldMessage != null) {
-@@ -16485,6 +16496,22 @@ public class ChatActivity extends BaseFragment implements
+@@ -16607,6 +16618,22 @@ public class ChatActivity extends BaseFragment implements
          }
      }
  
@@ -1984,7 +3328,7 @@ index f2ccd7e90..e21779918 100644
      private void toggleMute(boolean instant) {
          boolean muted = getMessagesController().isDialogMuted(dialog_id, getTopicId());
          if (!muted) {
-@@ -19481,6 +19508,9 @@ public class ChatActivity extends BaseFragment implements
+@@ -19627,6 +19654,9 @@ public class ChatActivity extends BaseFragment implements
              leftIcon = avatarContainer.getBotVerificationDrawable(DialogObject.getBotVerificationIcon(currentUser), false);
          }
          avatarContainer.setTitleIcons(leftIcon, rightIcon);
@@ -1994,7 +3338,7 @@ index f2ccd7e90..e21779918 100644
          if (!forceToggleMuted && muteItem != null) {
              if (isMuted) {
                  muteItem.setRightIconVisibility(View.GONE);
-@@ -22102,6 +22132,44 @@ public class ChatActivity extends BaseFragment implements
+@@ -22261,6 +22291,44 @@ public class ChatActivity extends BaseFragment implements
                  return;
              }
              ArrayList<Integer> markAsDeletedMessages = (ArrayList<Integer>) args[0];
@@ -2039,7 +3383,7 @@ index f2ccd7e90..e21779918 100644
              long channelId = (Long) args[1];
              boolean update = args.length > 2 && (boolean) args[2];
              boolean sent = args.length > 3 && (boolean) args[3];
-@@ -22165,6 +22233,29 @@ public class ChatActivity extends BaseFragment implements
+@@ -22324,6 +22392,29 @@ public class ChatActivity extends BaseFragment implements
                      removeSelfFromStack();
                  }
              }
@@ -2069,7 +3413,7 @@ index f2ccd7e90..e21779918 100644
          } else if (id == NotificationCenter.quickRepliesDeleted) {
              if (chatMode != MODE_QUICK_REPLIES) return;
              if ((Long) args[1] != getQuickReplyId()) return;
-@@ -24746,7 +24837,7 @@ public class ChatActivity extends BaseFragment implements
+@@ -24905,7 +24996,7 @@ public class ChatActivity extends BaseFragment implements
      private Pattern sponsoredUrlPattern;
      private MessageObject botSponsoredMessage;
      private void addSponsoredMessages(boolean animated) {
@@ -2270,8 +3614,21 @@ index 000000000..c33556875
 +        }
 +    }
 +}
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
+index 470be57c7..c4ce5a9d2 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
+@@ -421,7 +421,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
+                     Uri uri = intent.getData();
+                     if (uri != null) {
+                         String url = uri.toString().toLowerCase();
+-                        isProxy = url.startsWith("tg:proxy") || url.startsWith("tg://proxy") || url.startsWith("tg:socks") || url.startsWith("tg://socks");
++                        isProxy = url.startsWith("tg:proxy") || url.startsWith("tg://proxy") || url.startsWith("tg:socks") || url.startsWith("tg://socks") || url.startsWith("tg:webproxy") || url.startsWith("tg://webproxy");
+                     }
+                 }
+             }
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
-index f0994562a..4c48919b2 100644
+index b09347dc6..ea2584c25 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
 @@ -8802,7 +8802,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
@@ -2284,10 +3641,10 @@ index f0994562a..4c48919b2 100644
  
      private void showProxyButton(boolean show, boolean animated) {
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java b/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java
-index 776d83c01..c140b3adf 100644
+index ad8671923..819b5a7bb 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java
-@@ -17645,11 +17645,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
+@@ -17429,11 +17429,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                  WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR |
                  WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM |
                  WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS;
@@ -2302,10 +3659,10 @@ index 776d83c01..c140b3adf 100644
                  AndroidUtilities.logFlagSecure();
              } else {
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
-index e748e47b6..5d37a5dd4 100644
+index 40634647b..39be8a85d 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
-@@ -622,6 +622,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -628,6 +628,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
      private int languageRow;
      private int privacyRow;
      private int dataRow;
@@ -2313,7 +3670,7 @@ index e748e47b6..5d37a5dd4 100644
      private int chatRow;
      private int filtersRow;
      private int liteModeRow;
-@@ -2512,7 +2513,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -2520,7 +2521,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
              flagSecure = null;
          }
          if (layout != null && layout.getParentActivity() != null) {
@@ -2322,7 +3679,7 @@ index e748e47b6..5d37a5dd4 100644
          }
      }
  
-@@ -4507,6 +4508,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -4536,6 +4537,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                  presentFragment(new PrivacySettingsActivity().setCurrentPassword(currentPassword));
              } else if (position == dataRow) {
                  presentFragment(new DataSettingsActivity());
@@ -2331,7 +3688,7 @@ index e748e47b6..5d37a5dd4 100644
              } else if (position == chatRow) {
                  presentFragment(new ThemeActivity(ThemeActivity.THEME_TYPE_BASIC));
              } else if (position == filtersRow) {
-@@ -10445,6 +10448,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -10477,6 +10480,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
          premiumSectionsRow = -1;
          privacyRow = -1;
          dataRow = -1;
@@ -2339,7 +3696,7 @@ index e748e47b6..5d37a5dd4 100644
          chatRow = -1;
          filtersRow = -1;
          liteModeRow = -1;
-@@ -10610,6 +10614,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -10642,6 +10646,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                  privacyRow = rowCount++;
                  notificationRow = rowCount++;
                  dataRow = rowCount++;
@@ -2347,7 +3704,7 @@ index e748e47b6..5d37a5dd4 100644
                  liteModeRow = rowCount++;
  //                stickersRow = rowCount++;
                  if (getMessagesController().filtersEnabled || !getMessagesController().dialogFilters.isEmpty()) {
-@@ -13803,6 +13808,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -13839,6 +13844,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                          textCell.setTextAndIcon(LocaleController.getString(R.string.PrivacySettings), R.drawable.msg2_secret, true);
                      } else if (position == dataRow) {
                          textCell.setTextAndIcon(LocaleController.getString(R.string.DataSettings), R.drawable.msg2_data, true);
@@ -2356,7 +3713,7 @@ index e748e47b6..5d37a5dd4 100644
                      } else if (position == chatRow) {
                          textCell.setTextAndIcon(LocaleController.getString(R.string.ChatSettings), R.drawable.msg2_discussion, true);
                      } else if (position == filtersRow) {
-@@ -14244,7 +14251,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -14280,7 +14287,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                  int position = holder.getAdapterPosition();
                  return position == notificationRow || position == numberRow || position == privacyRow ||
                          position == languageRow || position == setUsernameRow || position == bioRow ||
@@ -2365,7 +3722,7 @@ index e748e47b6..5d37a5dd4 100644
                          position == questionRow || position == devicesRow || position == filtersRow || position == stickersRow ||
                          position == faqRow || position == policyRow || position == sendLogsRow || position == sendLastLogsRow ||
                          position == clearLogsRow || position == switchBackendRow || position == setAvatarRow ||
-@@ -14290,7 +14297,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -14326,7 +14333,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                      position == subscribersRow || position == subscribersRequestsRow || position == administratorsRow || position == settingsRow || position == blockedUsersRow ||
                      position == addMemberRow || position == joinRow || position == unblockRow ||
                      position == sendMessageRow || position == notificationRow || position == privacyRow ||
@@ -2374,7 +3731,7 @@ index e748e47b6..5d37a5dd4 100644
                      position == questionRow || position == devicesRow || position == filtersRow || position == stickersRow ||
                      position == faqRow || position == policyRow || position == sendLogsRow || position == sendLastLogsRow ||
                      position == clearLogsRow || position == switchBackendRow || position == setAvatarRow || position == addToGroupButtonRow ||
-@@ -15654,6 +15661,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -15690,6 +15697,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
              put(++pointer, premiumGiftingRow, sparseIntArray);
              put(++pointer, privacyRow, sparseIntArray);
              put(++pointer, dataRow, sparseIntArray);
@@ -2382,11 +3739,86 @@ index e748e47b6..5d37a5dd4 100644
              put(++pointer, liteModeRow, sparseIntArray);
              put(++pointer, chatRow, sparseIntArray);
              put(++pointer, filtersRow, sparseIntArray);
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProxyListActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProxyListActivity.java
+index be4d12ccd..a2a77854a 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ProxyListActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ProxyListActivity.java
+@@ -175,7 +175,11 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+         }
+ 
+         public void setProxy(SharedConfig.ProxyInfo proxyInfo) {
+-            textView.setText(proxyInfo.address + ":" + proxyInfo.port);
++            // A WEB entry is always HTTPS on 443, so the port carries no information; its type
++            // does, since the same host can also be an ordinary MTProto entry.
++            textView.setText(proxyInfo.isWeb()
++                    ? proxyInfo.address + " · " + getString(R.string.UseProxyWeb)
++                    : proxyInfo.address + ":" + proxyInfo.port);
+             currentInfo = proxyInfo;
+         }
+ 
+@@ -197,7 +201,11 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+                     valueTextView.setText(getString(R.string.Connecting));
+                 }
+             } else {
+-                if (currentInfo.checking) {
++                if (currentInfo.isWeb()) {
++                    // Never probed in the background, so "unavailable" would be a false claim.
++                    valueTextView.setText(getString(R.string.ProxyNotTested));
++                    colorKey = Theme.key_windowBackgroundWhiteGrayText2;
++                } else if (currentInfo.checking) {
+                     valueTextView.setText(getString(R.string.Checking));
+                     colorKey = Theme.key_windowBackgroundWhiteGrayText2;
+                 } else if (currentInfo.available) {
+@@ -406,6 +414,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+                             editor.putString("proxy_user", SharedConfig.currentProxy.username);
+                             editor.putInt("proxy_port", SharedConfig.currentProxy.port);
+                             editor.putString("proxy_secret", SharedConfig.currentProxy.secret);
++                            editor.putInt("proxy_type", SharedConfig.currentProxy.type);
+                             editor.commit();
+                         }
+                     } else {
+@@ -433,7 +442,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+                 editor.putBoolean("proxy_enabled", useProxySettings);
+                 editor.commit();
+ 
+-                ConnectionsManager.setProxySettings(useProxySettings, SharedConfig.currentProxy.address, SharedConfig.currentProxy.port, SharedConfig.currentProxy.username, SharedConfig.currentProxy.password, SharedConfig.currentProxy.secret);
++                ConnectionsManager.setProxySettings(useProxySettings, SharedConfig.currentProxy.address, SharedConfig.currentProxy.port, SharedConfig.currentProxy.username, SharedConfig.currentProxy.password, SharedConfig.currentProxy.secret, SharedConfig.currentProxy.type);
+                 NotificationCenter.getGlobalInstance().removeObserver(ProxyListActivity.this, NotificationCenter.proxySettingsChanged);
+                 NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
+                 NotificationCenter.getGlobalInstance().addObserver(ProxyListActivity.this, NotificationCenter.proxySettingsChanged);
+@@ -493,7 +502,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+                     TextCheckCell textCheckCell = (TextCheckCell) holder.itemView;
+                     textCheckCell.setChecked(true);
+                 }
+-                ConnectionsManager.setProxySettings(useProxySettings, SharedConfig.currentProxy.address, SharedConfig.currentProxy.port, SharedConfig.currentProxy.username, SharedConfig.currentProxy.password, SharedConfig.currentProxy.secret);
++                ConnectionsManager.setProxySettings(useProxySettings, SharedConfig.currentProxy.address, SharedConfig.currentProxy.port, SharedConfig.currentProxy.username, SharedConfig.currentProxy.password, SharedConfig.currentProxy.secret, SharedConfig.currentProxy.type);
+             } else if (position == proxyAddRow) {
+                 presentFragment(new ProxySettingsActivity());
+             } else if (position == deleteAllRow) {
+@@ -722,7 +731,9 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+     private void checkProxyList() {
+         for (int a = 0, count = proxyList.size(); a < count; a++) {
+             final SharedConfig.ProxyInfo proxyInfo = proxyList.get(a);
+-            if (proxyInfo.checking || SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime < 2 * 60 * 1000) {
++            // Probing a WEB entry would start the process-wide WebView carrier, so it is never
++            // checked in the background and shows as untested until the user activates it.
++            if (proxyInfo.isWeb() || proxyInfo.checking || SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime < 2 * 60 * 1000) {
+                 continue;
+             }
+             proxyInfo.checking = true;
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
-index 5e5e6934c..6cbb74811 100644
+index 5e5e6934c..98a0fe3bf 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
-@@ -72,12 +72,28 @@ import java.io.UnsupportedEncodingException;
+@@ -51,6 +51,7 @@ import org.telegram.messenger.R;
+ import org.telegram.messenger.SharedConfig;
+ import org.telegram.messenger.SvgHelper;
+ import org.telegram.messenger.Utilities;
++import org.telegram.messenger.WebProxyTransport;
+ import org.telegram.tgnet.ConnectionsManager;
+ import org.telegram.ui.ActionBar.ActionBar;
+ import org.telegram.ui.ActionBar.ActionBarMenuItem;
+@@ -72,11 +73,28 @@ import java.io.UnsupportedEncodingException;
  import java.net.URLDecoder;
  import java.net.URLEncoder;
  import java.util.ArrayList;
@@ -2394,9 +3826,12 @@ index 5e5e6934c..6cbb74811 100644
  
  public class ProxySettingsActivity extends BaseFragment {
  
-     private final static int TYPE_SOCKS5 = 0;
-     private final static int TYPE_MTPROTO = 1;
- 
+-    private final static int TYPE_SOCKS5 = 0;
+-    private final static int TYPE_MTPROTO = 1;
++    private final static int TYPE_SOCKS5 = SharedConfig.ProxyInfo.TYPE_SOCKS5;
++    private final static int TYPE_MTPROTO = SharedConfig.ProxyInfo.TYPE_MTPROTO;
++    private final static int TYPE_WEB = SharedConfig.ProxyInfo.TYPE_WEB;
++
 +    private static int parseEchExtensionId(String text) {
 +        if (text == null) {
 +            return DEFAULT_ECH_EXTENSION_ID;
@@ -2411,11 +3846,19 @@ index 5e5e6934c..6cbb74811 100644
 +            return DEFAULT_ECH_EXTENSION_ID;
 +        }
 +    }
-+
+ 
      private final static int FIELD_IP = 0;
      private final static int FIELD_PORT = 1;
-     private final static int FIELD_USER = 2;
-@@ -108,6 +124,57 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -94,7 +112,7 @@ public class ProxySettingsActivity extends BaseFragment {
+     private TextSettingsCell shareCell;
+     private TextSettingsCell pasteCell;
+     private ActionBarMenuItem doneItem;
+-    private RadioCell[] typeCell = new RadioCell[2];
++    private RadioCell[] typeCell = new RadioCell[3];
+     private int currentType = -1;
+ 
+     private int pasteType = -1;
+@@ -108,6 +126,57 @@ public class ProxySettingsActivity extends BaseFragment {
  
      private ClipboardManager clipboardManager;
  
@@ -2473,7 +3916,7 @@ index 5e5e6934c..6cbb74811 100644
      private boolean addingNewProxy;
  
      private SharedConfig.ProxyInfo currentProxyInfo;
-@@ -116,6 +183,38 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -116,6 +185,38 @@ public class ProxySettingsActivity extends BaseFragment {
  
      private static final int done_button = 1;
  
@@ -2512,7 +3955,7 @@ index 5e5e6934c..6cbb74811 100644
      public static class TypeCell extends FrameLayout {
  
          private TextView textView;
-@@ -198,7 +297,7 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -198,7 +299,7 @@ public class ProxySettingsActivity extends BaseFragment {
          actionBar.setTitle(LocaleController.getString(R.string.ProxyDetails));
          actionBar.setBackButtonImage(R.drawable.ic_ab_back);
          actionBar.setAllowOverlayTitle(false);
@@ -2521,10 +3964,34 @@ index 5e5e6934c..6cbb74811 100644
              actionBar.setOccupyStatusBar(false);
          }
  
-@@ -243,6 +342,35 @@ public class ProxySettingsActivity extends BaseFragment {
-                         editor.putString("proxy_secret", currentProxyInfo.secret);
-                         ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret);
+@@ -213,7 +314,8 @@ public class ProxySettingsActivity extends BaseFragment {
                      }
+                     currentProxyInfo.address = inputFields[FIELD_IP].getText().toString();
+                     currentProxyInfo.port = Utilities.parseInt(inputFields[FIELD_PORT].getText().toString());
+-                    if (currentType == 0) {
++                    currentProxyInfo.type = currentType;
++                    if (currentType == TYPE_SOCKS5) {
+                         currentProxyInfo.secret = "";
+                         currentProxyInfo.username = inputFields[FIELD_USER].getText().toString();
+                         currentProxyInfo.password = inputFields[FIELD_PASSWORD].getText().toString();
+@@ -222,6 +324,9 @@ public class ProxySettingsActivity extends BaseFragment {
+                         currentProxyInfo.username = "";
+                         currentProxyInfo.password = "";
+                     }
++                    if (currentType == TYPE_WEB) {
++                        currentProxyInfo.port = SharedConfig.ProxyInfo.WEB_PORT;
++                    }
+ 
+                     SharedPreferences preferences = MessagesController.getGlobalMainSettings();
+                     SharedPreferences.Editor editor = preferences.edit();
+@@ -241,8 +346,38 @@ public class ProxySettingsActivity extends BaseFragment {
+                         editor.putString("proxy_user", currentProxyInfo.username);
+                         editor.putInt("proxy_port", currentProxyInfo.port);
+                         editor.putString("proxy_secret", currentProxyInfo.secret);
+-                        ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret);
++                        editor.putInt("proxy_type", currentProxyInfo.type);
++                        ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret, currentProxyInfo.type);
++                    }
 +                    // Save and apply TLS fingerprint profile
 +                    if (rotationIntervalField != null) {
 +                        currentRotationInterval = Utilities.parseInt(rotationIntervalField.getText().toString());
@@ -2548,7 +4015,7 @@ index 5e5e6934c..6cbb74811 100644
 +                        editor.putInt("tls_fragment_min", fragMin);
 +                        editor.putInt("tls_fragment_max", fragMax);
 +                        ConnectionsManager.setTlsFragmentConfig(fragEnabled, fragMin, fragMax);
-+                    }
+                     }
 +                    // Save and apply DPI shaping (record sizing / startup cover / timing jitter)
 +                    editor.putInt("dpi_record_sizing_mode", currentRecordSizingMode);
 +                    editor.putInt("dpi_startup_cover_mode", currentStartupCoverMode);
@@ -2557,7 +4024,54 @@ index 5e5e6934c..6cbb74811 100644
                      editor.commit();
  
                      NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
-@@ -448,6 +576,256 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -272,14 +407,16 @@ public class ProxySettingsActivity extends BaseFragment {
+ 
+         final View.OnClickListener typeCellClickListener = view -> setProxyType((Integer) view.getTag(), true);
+ 
+-        for (int a = 0; a < 2; a++) {
++        for (int a = 0; a < 3; a++) {
+             typeCell[a] = new RadioCell(context);
+             typeCell[a].setBackground(Theme.getSelectorDrawable(true));
+             typeCell[a].setTag(a);
+-            if (a == 0) {
++            if (a == TYPE_SOCKS5) {
+                 typeCell[a].setText(LocaleController.getString(R.string.UseProxySocks5), a == currentType, true);
++            } else if (a == TYPE_MTPROTO) {
++                typeCell[a].setText(LocaleController.getString(R.string.UseProxyTelegram), a == currentType, true);
+             } else {
+-                typeCell[a].setText(LocaleController.getString(R.string.UseProxyTelegram), a == currentType, false);
++                typeCell[a].setText(LocaleController.getString(R.string.UseProxyWeb), a == currentType, false);
+             }
+             linearLayout2.addView(typeCell[a], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 50));
+             typeCell[a].setOnClickListener(typeCellClickListener);
+@@ -389,6 +526,26 @@ public class ProxySettingsActivity extends BaseFragment {
+                 inputFields[a].setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+                 inputFields[a].setTypeface(Typeface.DEFAULT);
+                 inputFields[a].setTransformationMethod(PasswordTransformationMethod.getInstance());
++            } else if (a == FIELD_SECRET) {
++                inputFields[a].setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
++                inputFields[a].addTextChangedListener(new TextWatcher() {
++                    @Override
++                    public void beforeTextChanged(CharSequence s, int start, int count, int after) {
++
++                    }
++
++                    @Override
++                    public void onTextChanged(CharSequence s, int start, int before, int count) {
++
++                    }
++
++                    @Override
++                    public void afterTextChanged(Editable s) {
++                        if (currentType == TYPE_WEB) {
++                            checkShareDone(true);
++                        }
++                    }
++                });
+             } else {
+                 inputFields[a].setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+             }
+@@ -448,6 +605,256 @@ public class ProxySettingsActivity extends BaseFragment {
              linearLayout2.addView(bottomCells[i], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
          }
  
@@ -2814,26 +4328,209 @@ index 5e5e6934c..6cbb74811 100644
          pasteCell = new TextSettingsCell(fragmentView.getContext());
          pasteCell.setBackground(Theme.getSelectorDrawable(true));
          pasteCell.setText(LocaleController.getString(R.string.PasteFromClipboard), false);
-@@ -746,12 +1124,14 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -458,7 +865,7 @@ public class ProxySettingsActivity extends BaseFragment {
+                     if (pasteType == TYPE_SOCKS5 && i == FIELD_SECRET) {
+                         continue;
+                     }
+-                    if (pasteType == TYPE_MTPROTO && (i == FIELD_USER || i == FIELD_PASSWORD)) {
++                    if (pasteType != TYPE_SOCKS5 && (i == FIELD_USER || i == FIELD_PASSWORD)) {
+                         continue;
+                     }
+                     if (pasteFields[i] != null) {
+@@ -478,7 +885,7 @@ public class ProxySettingsActivity extends BaseFragment {
+                         if (pasteType == TYPE_SOCKS5 && i != FIELD_SECRET) {
+                             continue;
+                         }
+-                        if (pasteType == TYPE_MTPROTO && i != FIELD_USER && i != FIELD_PASSWORD) {
++                        if (pasteType != TYPE_SOCKS5 && i != FIELD_USER && i != FIELD_PASSWORD) {
+                             continue;
+                         }
+                         inputFields[i].setText(null);
+@@ -507,6 +914,19 @@ public class ProxySettingsActivity extends BaseFragment {
+             String secret = inputFields[FIELD_SECRET].getText().toString();
+             String url;
+             try {
++                if (currentType == TYPE_WEB) {
++                    final String basePath = WebProxyTransport.basePathOf(address);
++                    if (basePath == null || WebProxyTransport.hostOf(address) == null) {
++                        return;
++                    }
++                    final String linkSecret = WebProxyTransport.encodeLinkSecret(secret, !basePath.isEmpty());
++                    if (TextUtils.isEmpty(linkSecret)) {
++                        return;
++                    }
++                    params.append("server=").append(URLEncoder.encode(address, "UTF-8"));
++                    params.append("&secret=").append(linkSecret);
++                    url = "https://t.me/webproxy?";
++                } else {
+                 if (!TextUtils.isEmpty(address)) {
+                     params.append("server=").append(URLEncoder.encode(address, "UTF-8"));
+                 }
+@@ -537,6 +957,7 @@ public class ProxySettingsActivity extends BaseFragment {
+                         params.append("pass=").append(URLEncoder.encode(password, "UTF-8"));
+                     }
+                 }
++                }
+             } catch (Exception ignore) {
+                 return;
+             }
+@@ -561,7 +982,7 @@ public class ProxySettingsActivity extends BaseFragment {
+         checkShareDone(false);
+ 
+         currentType = -1;
+-        setProxyType(TextUtils.isEmpty(currentProxyInfo.secret) ? 0 : 1, false);
++        setProxyType(currentProxyInfo.type, false);
+ 
+         pasteType = -1;
+         pasteString = null;
+@@ -570,6 +991,33 @@ public class ProxySettingsActivity extends BaseFragment {
+         return fragmentView;
+     }
+ 
++    /**
++     * Canonicalizes a pasted webproxy link in place: the address arrives percent-encoded and may
++     * carry a base path, and the secret arrives in the link's marked base64url form.
++     */
++    private boolean applyWebPasteFields() {
++        String address = pasteFields[FIELD_IP];
++        if (address == null) {
++            return false;
++        }
++        try {
++            address = URLDecoder.decode(address, "UTF-8");
++        } catch (UnsupportedEncodingException ignored) {
++        }
++        final String basePath = WebProxyTransport.basePathOf(address);
++        if (WebProxyTransport.hostOf(address) == null || basePath == null) {
++            return false;
++        }
++        final String secret = WebProxyTransport.decodeLinkSecret(pasteFields[FIELD_SECRET], !basePath.isEmpty());
++        if (secret == null) {
++            return false;
++        }
++        pasteFields[FIELD_IP] = address;
++        pasteFields[FIELD_SECRET] = secret;
++        pasteFields[FIELD_PORT] = String.valueOf(SharedConfig.ProxyInfo.WEB_PORT);
++        return true;
++    }
++
+     private void updatePasteCell() {
+         final ClipData clip = clipboardManager.getPrimaryClip();
+ 
+@@ -604,6 +1052,18 @@ public class ProxySettingsActivity extends BaseFragment {
+                 }
+             }
+ 
++            if (params == null) {
++                final String[] webStrings = {"t.me/webproxy?", "tg://webproxy?"};
++                for (int i = 0; i < webStrings.length; i++) {
++                    final int index = clipText.indexOf(webStrings[i]);
++                    if (index >= 0) {
++                        pasteType = TYPE_WEB;
++                        params = clipText.substring(index + webStrings[i].length()).split("&");
++                        break;
++                    }
++                }
++            }
++
+             if (params == null) {
+                 final String[] proxyStrings = {"t.me/proxy?", "tg://proxy?"};
+                 for (int i = 0; i < proxyStrings.length; i++) {
+@@ -625,7 +1085,9 @@ public class ProxySettingsActivity extends BaseFragment {
+                             pasteFields[FIELD_IP] = pair[1];
+                             break;
+                         case "port":
+-                            pasteFields[FIELD_PORT] = pair[1];
++                            if (pasteType != TYPE_WEB) {
++                                pasteFields[FIELD_PORT] = pair[1];
++                            }
+                             break;
+                         case "user":
+                             if (pasteType == TYPE_SOCKS5) {
+@@ -638,12 +1100,15 @@ public class ProxySettingsActivity extends BaseFragment {
+                             }
+                             break;
+                         case "secret":
+-                            if (pasteType == TYPE_MTPROTO) {
++                            if (pasteType != TYPE_SOCKS5) {
+                                 pasteFields[FIELD_SECRET] = pair[1];
+                             }
+                             break;
+                     }
+                 }
++                if (pasteType == TYPE_WEB && !applyWebPasteFields()) {
++                    pasteType = -1;
++                }
+             }
+         }
+ 
+@@ -692,6 +1157,12 @@ public class ProxySettingsActivity extends BaseFragment {
+         if (shareCell == null || doneItem == null || inputFields[FIELD_IP] == null || inputFields[FIELD_PORT] == null) {
+             return;
+         }
++        if (currentType == TYPE_WEB) {
++            setShareDoneEnabled(WebProxyTransport.isValidAddress(
++                    inputFields[FIELD_IP].getText().toString(),
++                    inputFields[FIELD_SECRET].getText().toString()), animated);
++            return;
++        }
+         setShareDoneEnabled(inputFields[FIELD_IP].length() != 0 && Utilities.parseInt(inputFields[FIELD_PORT].getText().toString()) != 0, animated);
+     }
+ 
+@@ -740,21 +1211,44 @@ public class ProxySettingsActivity extends BaseFragment {
+ 
+                 TransitionManager.beginDelayedTransition(linearLayout2, transitionSet);
+             }
+-            if (currentType == 0) {
++            if (currentType == TYPE_SOCKS5) {
+                 bottomCells[0].setVisibility(View.VISIBLE);
+                 bottomCells[1].setVisibility(View.GONE);
                  ((View) inputFields[FIELD_SECRET].getParent()).setVisibility(View.GONE);
++                ((View) inputFields[FIELD_PORT].getParent()).setVisibility(View.VISIBLE);
                  ((View) inputFields[FIELD_PASSWORD].getParent()).setVisibility(View.VISIBLE);
                  ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.VISIBLE);
+-            } else if (currentType == 1) {
 +                if (fragmentContainer != null) fragmentContainer.setVisibility(View.GONE);
-             } else if (currentType == 1) {
++            } else if (currentType == TYPE_MTPROTO) {
++                bottomCells[0].setVisibility(View.GONE);
++                bottomCells[1].setVisibility(View.VISIBLE);
++                bottomCells[1].setText(LocaleController.getString(R.string.UseProxyTelegramInfo) + "\n\n" + LocaleController.getString(R.string.UseProxyTelegramInfo2));
++                ((View) inputFields[FIELD_SECRET].getParent()).setVisibility(View.VISIBLE);
++                ((View) inputFields[FIELD_PORT].getParent()).setVisibility(View.VISIBLE);
++                ((View) inputFields[FIELD_PASSWORD].getParent()).setVisibility(View.GONE);
++                ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.GONE);
++                if (fragmentContainer != null) fragmentContainer.setVisibility(View.VISIBLE);
++            } else {
++                // WEB always runs HTTPS on 443 and carries no credentials. The DPI section stays
++                // hidden: shaping belongs to the MTProto path, not to this carrier.
                  bottomCells[0].setVisibility(View.GONE);
                  bottomCells[1].setVisibility(View.VISIBLE);
++                bottomCells[1].setText(LocaleController.getString(WebProxyTransport.isSupported()
++                        ? R.string.UseProxyWebInfo
++                        : R.string.UseProxyWebUnsupported));
                  ((View) inputFields[FIELD_SECRET].getParent()).setVisibility(View.VISIBLE);
++                ((View) inputFields[FIELD_PORT].getParent()).setVisibility(View.GONE);
                  ((View) inputFields[FIELD_PASSWORD].getParent()).setVisibility(View.GONE);
                  ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.GONE);
-+                if (fragmentContainer != null) fragmentContainer.setVisibility(View.VISIBLE);
++                if (fragmentContainer != null) fragmentContainer.setVisibility(View.GONE);
++                ignoreOnTextChange = true;
++                inputFields[FIELD_PORT].setText(String.valueOf(SharedConfig.ProxyInfo.WEB_PORT));
++                ignoreOnTextChange = false;
++            }
++            for (int a = 0; a < typeCell.length; a++) {
++                typeCell[a].setChecked(currentType == a, animated);
              }
-             typeCell[0].setChecked(currentType == 0, animated);
-             typeCell[1].setChecked(currentType == 1, animated);
+-            typeCell[0].setChecked(currentType == 0, animated);
+-            typeCell[1].setChecked(currentType == 1, animated);
++            checkShareDone(animated);
+         }
+     }
+ 
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/SecretMediaViewer.java b/TMessagesProj/src/main/java/org/telegram/ui/SecretMediaViewer.java
-index ee09cca09..393d918c9 100644
+index a402e93c0..5de2d74c7 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/SecretMediaViewer.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/SecretMediaViewer.java
-@@ -977,8 +977,10 @@ public class SecretMediaViewer implements NotificationCenter.NotificationCenterD
+@@ -967,8 +967,10 @@ public class SecretMediaViewer implements NotificationCenter.NotificationCenterD
                  WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR |
                  WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
                  WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS;
@@ -2847,23 +4544,23 @@ index ee09cca09..393d918c9 100644
          centerImage.setForceCrossfade(true);
  
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/SecretVoicePlayer.java b/TMessagesProj/src/main/java/org/telegram/ui/SecretVoicePlayer.java
-index b22d350f5..57c8d1834 100644
+index 3f1ab8e40..19abfc96e 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/SecretVoicePlayer.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/SecretVoicePlayer.java
-@@ -257,7 +257,7 @@ public class SecretVoicePlayer extends Dialog {
-                 WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS |
-                 WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION;
-         }
+@@ -238,7 +238,7 @@ public class SecretVoicePlayer extends Dialog {
+             WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR |
+             WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS |
+             WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION;
 -        if (!BuildVars.DEBUG_PRIVATE_VERSION) {
 +        if (!BuildVars.DEBUG_PRIVATE_VERSION && !MessagesController.isAllowScreenshotsEnabled()) {
              params.flags |= WindowManager.LayoutParams.FLAG_SECURE;
              AndroidUtilities.logFlagSecure();
          }
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java
-index c5799ee80..d47e18e80 100644
+index cbfb369a9..72dcd2a15 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java
-@@ -692,6 +692,7 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
+@@ -693,6 +693,7 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
          items.add(SettingCell.Factory.of(3, IconBackgroundColors.GREEN.top, IconBackgroundColors.GREEN.bottom, R.drawable.settings_privacy, getString(R.string.SettingsPrivacySecurity), getString(R.string.SettingsPrivacySecurityInfo)));
          items.add(SettingCell.Factory.of(5, IconBackgroundColors.RED.top, IconBackgroundColors.RED.bottom, R.drawable.settings_sounds, getString(R.string.SettingsNotifications), getString(R.string.SettingsNotificationsInfo)));
          items.add(SettingCell.Factory.of(6, IconBackgroundColors.BLUE_DEEP.top, IconBackgroundColors.BLUE_DEEP.bottom, R.drawable.settings_data, getString(R.string.SettingsData), getString(R.string.SettingsDataInfo)));
@@ -2871,7 +4568,7 @@ index c5799ee80..d47e18e80 100644
          items.add(SettingCell.Factory.of(7, IconBackgroundColors.BLUE_ALT.top, IconBackgroundColors.BLUE_ALT.bottom, R.drawable.settings_folders, getString(R.string.SettingsFolders), getString(R.string.SettingsFoldersInfo)));
          items.add(SettingCell.Factory.of(8, IconBackgroundColors.CYAN.top, IconBackgroundColors.CYAN.bottom, R.drawable.settings_devices, getString(R.string.SettingsDevices), getString(R.string.SettingsDevicesInfo)));
          items.add(SettingCell.Factory.of(9, IconBackgroundColors.ORANGE_DEEP.top, IconBackgroundColors.ORANGE_DEEP.bottom, R.drawable.settings_power, getString(R.string.SettingsPowerSaving), getString(R.string.SettingsPowerSavingInfo)));
-@@ -823,6 +824,9 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
+@@ -824,6 +825,9 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
              case 6:
                  presentSettingFragment(new DataSettingsActivity());
                  break;
@@ -2881,7 +4578,7 @@ index c5799ee80..d47e18e80 100644
              case 7:
                  presentSettingFragment(new FiltersSetupActivity());
                  break;
-@@ -932,7 +936,9 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
+@@ -933,7 +937,9 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
                      }
                      break;
              }
@@ -2893,10 +4590,10 @@ index c5799ee80..d47e18e80 100644
              FileLog.e(e);
          }
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Stories/StoryViewer.java b/TMessagesProj/src/main/java/org/telegram/ui/Stories/StoryViewer.java
-index ed2143fde..109bc7de0 100644
+index 395af9487..d5197801c 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/Stories/StoryViewer.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/Stories/StoryViewer.java
-@@ -2885,7 +2885,7 @@ public class StoryViewer implements NotificationCenter.NotificationCenterDelegat
+@@ -2877,7 +2877,7 @@ public class StoryViewer implements NotificationCenter.NotificationCenterDelegat
          if (BuildVars.DEBUG_PRIVATE_VERSION) {
              return;
          }
@@ -2906,7 +4603,7 @@ index ed2143fde..109bc7de0 100644
              this.allowScreenshots = allowScreenshots;
  
 diff --git a/TMessagesProj/src/main/res/values/strings.xml b/TMessagesProj/src/main/res/values/strings.xml
-index 71702261c..3203fefb3 100644
+index ffa4d5663..05439ad74 100644
 --- a/TMessagesProj/src/main/res/values/strings.xml
 +++ b/TMessagesProj/src/main/res/values/strings.xml
 @@ -1,7 +1,7 @@
@@ -2919,7 +4616,7 @@ index 71702261c..3203fefb3 100644
      <string name="LanguageName">English</string>
      <string name="English">English</string>
      <string name="LanguageNameInEnglish">English</string>
-@@ -2622,6 +2622,7 @@
+@@ -2628,6 +2628,7 @@
      <string name="Emoji">Emoji</string>
      <string name="LargeEmoji">Large Emoji</string>
      <string name="TelegramVersion">Telegram for Android %1$s</string>
@@ -2927,8 +4624,19 @@ index 71702261c..3203fefb3 100644
      <string name="DebugMenu">Debug Menu</string>
      <string name="DebugMenuLongPress">Long press again for debug menu</string>
      <string name="DebugSendLogs">Send Logs</string>
+@@ -2687,6 +2688,10 @@
+     <string name="UseProxyUsername">Username</string>
+     <string name="UseProxySocks5">SOCKS5 Proxy</string>
+     <string name="UseProxyTelegram">MTProto Proxy</string>
++    <string name="UseProxyWeb">WEB Proxy</string>
++    <string name="ProxyNotTested">Not tested</string>
++    <string name="UseProxyWebInfo">A WEB proxy carries MTProto traffic inside ordinary HTTPS requests to the server you enter. Use servers you trust: the server operator controls the page that carries your connection.</string>
++    <string name="UseProxyWebUnsupported">This device\'s Android System WebView is missing or too old to run a WEB proxy. Update Android System WebView and try again.</string>
+     <string name="UseProxyTelegramError">The proxy you are using is not configured correctly and will be disabled. Please find another one.</string>
+     <string name="UseProxySponsor">Proxy sponsor</string>
+     <string name="UseProxySponsorInfo">This channel is shown by your proxy server. To remove this channel from your chat list, disable the proxy in Telegram Settings.</string>
 diff --git a/TMessagesProj_App/build.gradle b/TMessagesProj_App/build.gradle
-index 2aa197cb3..632593bdf 100644
+index b8a0ed897..384c68f3e 100644
 --- a/TMessagesProj_App/build.gradle
 +++ b/TMessagesProj_App/build.gradle
 @@ -1,5 +1,22 @@
@@ -3963,13 +5671,13 @@ index 000000000..677a0a34b
 +    }
 +}
 diff --git a/gradle.properties b/gradle.properties
-index 5e1ad1dde..b0a7c353b 100644
+index 38299bed6..eab47fa90 100644
 --- a/gradle.properties
 +++ b/gradle.properties
 @@ -15,7 +15,7 @@
  #Sat Mar 12 05:53:50 MSK 2016
- APP_VERSION_CODE=6966
- APP_VERSION_NAME=12.9.0
+ APP_VERSION_CODE=7038
+ APP_VERSION_NAME=12.10.1
 -APP_PACKAGE=org.telegram.messenger
 +APP_PACKAGE=com.rework.grambas
  IS_PRIVATE=false

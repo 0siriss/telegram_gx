@@ -55,7 +55,8 @@ public class SharedConfig {
      * V2: Ping and check time serialized
      */
     private final static int PROXY_SCHEMA_V2 = 2;
-    private final static int PROXY_CURRENT_SCHEMA_VERSION = PROXY_SCHEMA_V2;
+    private final static int PROXY_SCHEMA_V3 = 3;
+    private final static int PROXY_CURRENT_SCHEMA_VERSION = PROXY_SCHEMA_V3;
 
     public final static int PASSCODE_TYPE_PIN = 0,
             PASSCODE_TYPE_PASSWORD = 1;
@@ -372,11 +373,18 @@ public class SharedConfig {
 
     public static class ProxyInfo {
 
+        public final static int TYPE_SOCKS5 = 0;
+        public final static int TYPE_MTPROTO = 1;
+        public final static int TYPE_WEB = 2;
+
+        public final static int WEB_PORT = 443;
+
         public String address;
         public int port;
         public String username;
         public String password;
         public String secret;
+        public int type;
 
         public long proxyCheckPingId;
         public long ping;
@@ -385,6 +393,11 @@ public class SharedConfig {
         public long availableCheckTime;
 
         public ProxyInfo(String address, int port, String username, String password, String secret) {
+            this(address, port, username, password, secret, TextUtils.isEmpty(secret) ? TYPE_SOCKS5 : TYPE_MTPROTO);
+        }
+
+        public ProxyInfo(String address, int port, String username, String password, String secret, int type) {
+            this.type = type;
             this.address = address;
             this.port = port;
             this.username = username;
@@ -404,7 +417,20 @@ public class SharedConfig {
             }
         }
 
+        public boolean isWeb() {
+            return type == TYPE_WEB;
+        }
+
         public String getLink() {
+            if (type == TYPE_WEB) {
+                StringBuilder url = new StringBuilder("https://t.me/webproxy?");
+                try {
+                    boolean hasBasePath = !TextUtils.isEmpty(WebProxyTransport.basePathOf(address));
+                    url.append("server=").append(URLEncoder.encode(address, "UTF-8"));
+                    url.append("&secret=").append(WebProxyTransport.encodeLinkSecret(secret, hasBasePath));
+                } catch (UnsupportedEncodingException ignored) {}
+                return url.toString();
+            }
             StringBuilder url = new StringBuilder(!TextUtils.isEmpty(secret) ? "https://t.me/proxy?" : "https://t.me/socks?");
             try {
                 url.append("server=").append(URLEncoder.encode(address, "UTF-8")).append("&").append("port=").append(port);
@@ -1416,6 +1442,7 @@ public class SharedConfig {
         String proxyPassword = preferences.getString("proxy_pass", "");
         String proxySecret = preferences.getString("proxy_secret", "");
         int proxyPort = preferences.getInt("proxy_port", 1080);
+        int proxyType = preferences.getInt("proxy_type", TextUtils.isEmpty(proxySecret) ? ProxyInfo.TYPE_SOCKS5 : ProxyInfo.TYPE_MTPROTO);
 
         proxyListLoaded = true;
         proxyList.clear();
@@ -1428,7 +1455,7 @@ public class SharedConfig {
             if (count == -1) { // V2 or newer
                 int version = data.readByte(false);
 
-                if (version == PROXY_SCHEMA_V2) {
+                if (version == PROXY_SCHEMA_V2 || version == PROXY_SCHEMA_V3) {
                     count = data.readInt32(false);
 
                     for (int i = 0; i < count; i++) {
@@ -1441,10 +1468,13 @@ public class SharedConfig {
 
                         info.ping = data.readInt64(false);
                         info.availableCheckTime = data.readInt64(false);
+                        if (version == PROXY_SCHEMA_V3) {
+                            info.type = data.readInt32(false);
+                        }
 
                         proxyList.add(0, info);
                         if (currentProxy == null && !TextUtils.isEmpty(proxyAddress)) {
-                            if (proxyAddress.equals(info.address) && proxyPort == info.port && proxyUsername.equals(info.username) && proxyPassword.equals(info.password)) {
+                            if (proxyAddress.equals(info.address) && proxyPort == info.port && proxyUsername.equals(info.username) && proxyPassword.equals(info.password) && proxyType == info.type) {
                                 currentProxy = info;
                             }
                         }
@@ -1462,7 +1492,7 @@ public class SharedConfig {
                             data.readString(false));
                     proxyList.add(0, info);
                     if (currentProxy == null && !TextUtils.isEmpty(proxyAddress)) {
-                        if (proxyAddress.equals(info.address) && proxyPort == info.port && proxyUsername.equals(info.username) && proxyPassword.equals(info.password)) {
+                        if (proxyAddress.equals(info.address) && proxyPort == info.port && proxyUsername.equals(info.username) && proxyPassword.equals(info.password) && proxyType == info.type) {
                             currentProxy = info;
                         }
                     }
@@ -1471,7 +1501,7 @@ public class SharedConfig {
             data.cleanup();
         }
         if (currentProxy == null && !TextUtils.isEmpty(proxyAddress)) {
-            ProxyInfo info = currentProxy = new ProxyInfo(proxyAddress, proxyPort, proxyUsername, proxyPassword, proxySecret);
+            ProxyInfo info = currentProxy = new ProxyInfo(proxyAddress, proxyPort, proxyUsername, proxyPassword, proxySecret, proxyType);
             proxyList.add(0, info);
         }
     }
@@ -1504,6 +1534,7 @@ public class SharedConfig {
 
             serializedData.writeInt64(info.ping);
             serializedData.writeInt64(info.availableCheckTime);
+            serializedData.writeInt32(info.type);
         }
         SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("mainconfig", Activity.MODE_PRIVATE);
         preferences.edit().putString("proxy_list", Base64.encodeToString(serializedData.toByteArray(), Base64.NO_WRAP)).apply();
@@ -1515,7 +1546,7 @@ public class SharedConfig {
         int count = proxyList.size();
         for (int a = 0; a < count; a++) {
             ProxyInfo info = proxyList.get(a);
-            if (proxyInfo.address.equals(info.address) && proxyInfo.port == info.port && proxyInfo.username.equals(info.username) && proxyInfo.password.equals(info.password) && proxyInfo.secret.equals(info.secret)) {
+            if (proxyInfo.address.equals(info.address) && proxyInfo.port == info.port && proxyInfo.username.equals(info.username) && proxyInfo.password.equals(info.password) && proxyInfo.secret.equals(info.secret) && proxyInfo.type == info.type) {
                 return info;
             }
         }
@@ -1539,6 +1570,7 @@ public class SharedConfig {
             editor.putString("proxy_user", "");
             editor.putString("proxy_secret", "");
             editor.putInt("proxy_port", 1080);
+            editor.remove("proxy_type");
             editor.putBoolean("proxy_enabled", false);
             editor.putBoolean("proxy_enabled_calls", false);
             editor.apply();

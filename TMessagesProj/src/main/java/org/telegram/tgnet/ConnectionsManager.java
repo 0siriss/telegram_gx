@@ -43,6 +43,7 @@ import org.telegram.messenger.SharedConfig;
 import org.telegram.messenger.StatsController;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
+import org.telegram.messenger.WebProxyTransport;
 import org.telegram.ui.Components.VideoPlayer;
 import org.telegram.ui.LoginActivity;
 
@@ -633,8 +634,15 @@ public class ConnectionsManager extends BaseController {
         String proxyPassword = preferences.getString("proxy_pass", "");
         String proxySecret = preferences.getString("proxy_secret", "");
         int proxyPort = preferences.getInt("proxy_port", 1080);
+        int proxyType = preferences.getInt("proxy_type", TextUtils.isEmpty(proxySecret) ? SharedConfig.ProxyInfo.TYPE_SOCKS5 : SharedConfig.ProxyInfo.TYPE_MTPROTO);
 
         if (preferences.getBoolean("proxy_enabled", false) && !TextUtils.isEmpty(proxyAddress)) {
+            if (proxyType == SharedConfig.ProxyInfo.TYPE_WEB) {
+                proxyPort = WebProxyTransport.getInstance().start(proxyAddress, proxySecret);
+                proxyAddress = "127.0.0.1";
+                proxyUsername = "";
+                proxyPassword = "";
+            }
             native_setProxySettings(currentAccount, proxyAddress, proxyPort, proxyUsername, proxyPassword, proxySecret);
         }
         String installer = "";
@@ -940,6 +948,10 @@ public class ConnectionsManager extends BaseController {
     }
 
     public static void setProxySettings(boolean enabled, String address, int port, String username, String password, String secret) {
+        setProxySettings(enabled, address, port, username, password, secret, SharedConfig.ProxyInfo.TYPE_SOCKS5);
+    }
+
+    public static void setProxySettings(boolean enabled, String address, int port, String username, String password, String secret, int type) {
         if (address == null) {
             address = "";
         }
@@ -951,6 +963,22 @@ public class ConnectionsManager extends BaseController {
         }
         if (secret == null) {
             secret = "";
+        }
+
+        if (type == SharedConfig.ProxyInfo.TYPE_WEB) {
+            // tgnet keeps producing an ordinary MTProxy stream; the WEB carrier picks it up on
+            // loopback. A port of 0 means the carrier refused to start, which fails closed
+            // rather than falling back to a direct connection.
+            if (enabled && !TextUtils.isEmpty(address)) {
+                port = WebProxyTransport.getInstance().start(address, secret);
+                address = "127.0.0.1";
+                username = "";
+                password = "";
+            } else {
+                WebProxyTransport.getInstance().stop();
+            }
+        } else {
+            WebProxyTransport.getInstance().stop();
         }
 
         for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {

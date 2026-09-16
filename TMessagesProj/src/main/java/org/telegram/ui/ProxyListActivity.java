@@ -175,7 +175,11 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
         }
 
         public void setProxy(SharedConfig.ProxyInfo proxyInfo) {
-            textView.setText(proxyInfo.address + ":" + proxyInfo.port);
+            // A WEB entry is always HTTPS on 443, so the port carries no information; its type
+            // does, since the same host can also be an ordinary MTProto entry.
+            textView.setText(proxyInfo.isWeb()
+                    ? proxyInfo.address + " · " + getString(R.string.UseProxyWeb)
+                    : proxyInfo.address + ":" + proxyInfo.port);
             currentInfo = proxyInfo;
         }
 
@@ -197,7 +201,11 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                     valueTextView.setText(getString(R.string.Connecting));
                 }
             } else {
-                if (currentInfo.checking) {
+                if (currentInfo.isWeb()) {
+                    // Never probed in the background, so "unavailable" would be a false claim.
+                    valueTextView.setText(getString(R.string.ProxyNotTested));
+                    colorKey = Theme.key_windowBackgroundWhiteGrayText2;
+                } else if (currentInfo.checking) {
                     valueTextView.setText(getString(R.string.Checking));
                     colorKey = Theme.key_windowBackgroundWhiteGrayText2;
                 } else if (currentInfo.available) {
@@ -406,6 +414,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                             editor.putString("proxy_user", SharedConfig.currentProxy.username);
                             editor.putInt("proxy_port", SharedConfig.currentProxy.port);
                             editor.putString("proxy_secret", SharedConfig.currentProxy.secret);
+                            editor.putInt("proxy_type", SharedConfig.currentProxy.type);
                             editor.commit();
                         }
                     } else {
@@ -433,7 +442,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                 editor.putBoolean("proxy_enabled", useProxySettings);
                 editor.commit();
 
-                ConnectionsManager.setProxySettings(useProxySettings, SharedConfig.currentProxy.address, SharedConfig.currentProxy.port, SharedConfig.currentProxy.username, SharedConfig.currentProxy.password, SharedConfig.currentProxy.secret);
+                ConnectionsManager.setProxySettings(useProxySettings, SharedConfig.currentProxy.address, SharedConfig.currentProxy.port, SharedConfig.currentProxy.username, SharedConfig.currentProxy.password, SharedConfig.currentProxy.secret, SharedConfig.currentProxy.type);
                 NotificationCenter.getGlobalInstance().removeObserver(ProxyListActivity.this, NotificationCenter.proxySettingsChanged);
                 NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
                 NotificationCenter.getGlobalInstance().addObserver(ProxyListActivity.this, NotificationCenter.proxySettingsChanged);
@@ -493,7 +502,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                     TextCheckCell textCheckCell = (TextCheckCell) holder.itemView;
                     textCheckCell.setChecked(true);
                 }
-                ConnectionsManager.setProxySettings(useProxySettings, SharedConfig.currentProxy.address, SharedConfig.currentProxy.port, SharedConfig.currentProxy.username, SharedConfig.currentProxy.password, SharedConfig.currentProxy.secret);
+                ConnectionsManager.setProxySettings(useProxySettings, SharedConfig.currentProxy.address, SharedConfig.currentProxy.port, SharedConfig.currentProxy.username, SharedConfig.currentProxy.password, SharedConfig.currentProxy.secret, SharedConfig.currentProxy.type);
             } else if (position == proxyAddRow) {
                 presentFragment(new ProxySettingsActivity());
             } else if (position == deleteAllRow) {
@@ -722,7 +731,9 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
     private void checkProxyList() {
         for (int a = 0, count = proxyList.size(); a < count; a++) {
             final SharedConfig.ProxyInfo proxyInfo = proxyList.get(a);
-            if (proxyInfo.checking || SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime < 2 * 60 * 1000) {
+            // Probing a WEB entry would start the process-wide WebView carrier, so it is never
+            // checked in the background and shows as untested until the user activates it.
+            if (proxyInfo.isWeb() || proxyInfo.checking || SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime < 2 * 60 * 1000) {
                 continue;
             }
             proxyInfo.checking = true;

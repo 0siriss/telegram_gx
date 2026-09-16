@@ -2688,6 +2688,10 @@
     <string name="UseProxyUsername">Username</string>
     <string name="UseProxySocks5">SOCKS5 Proxy</string>
     <string name="UseProxyTelegram">MTProto Proxy</string>
+    <string name="UseProxyWeb">WEB Proxy</string>
+    <string name="ProxyNotTested">Not tested</string>
+    <string name="UseProxyWebInfo">A WEB proxy carries MTProto traffic inside ordinary HTTPS requests to the server you enter. Use servers you trust: the server operator controls the page that carries your connection.</string>
+    <string name="UseProxyWebUnsupported">This device\'s Android System WebView is missing or too old to run a WEB proxy. Update Android System WebView and try again.</string>
     <string name="UseProxyTelegramError">The proxy you are using is not configured correctly and will be disabled. Please find another one.</string>
     <string name="UseProxySponsor">Proxy sponsor</string>
     <string name="UseProxySponsorInfo">This channel is shown by your proxy server. To remove this channel from your chat list, disable the proxy in Telegram Settings.</string>
