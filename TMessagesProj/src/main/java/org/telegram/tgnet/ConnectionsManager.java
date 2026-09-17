@@ -642,6 +642,7 @@ public class ConnectionsManager extends BaseController {
                 proxyAddress = "127.0.0.1";
                 proxyUsername = "";
                 proxyPassword = "";
+                native_setWebProxyToken(WebProxyTransport.getInstance().getToken());
             }
             native_setProxySettings(currentAccount, proxyAddress, proxyPort, proxyUsername, proxyPassword, proxySecret);
         }
@@ -980,6 +981,9 @@ public class ConnectionsManager extends BaseController {
         } else {
             WebProxyTransport.getInstance().stop();
         }
+        // Empty whenever no carrier runs, so tgnet writes a token to the loopback listener and
+        // to nothing else. Must precede the settings below, which start connecting at once.
+        native_setWebProxyToken(WebProxyTransport.getInstance().getToken());
 
         for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
             if (enabled && !TextUtils.isEmpty(address)) {
@@ -1047,6 +1051,7 @@ public class ConnectionsManager extends BaseController {
     public static native void native_setPushConnectionEnabled(int currentAccount, boolean value);
     public static native void native_applyDnsConfig(int currentAccount, long address, String phone, int date);
     public static native long native_checkProxy(int currentAccount, String address, int port, String username, String password, String secret, RequestTimeDelegate requestTimeDelegate);
+    public static native void native_setWebProxyToken(String token);
     public static native void native_onHostNameResolved(String host, long address, String ip);
     public static native void native_discardConnection(int currentAccount, int datacenterId, int connectionType);
     public static native void native_failNotRunningRequest(int currentAccount, int token);

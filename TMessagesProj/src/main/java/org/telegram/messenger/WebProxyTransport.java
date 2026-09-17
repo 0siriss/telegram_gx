@@ -33,6 +33,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -80,6 +81,11 @@ public final class WebProxyTransport {
     private static final long RETRY_MIN_DELAY = 1000;
     private static final long RETRY_MAX_DELAY = 30000;
 
+    /** 128 bits of entropy, sent as hex, so the token is 32 ASCII bytes on the wire. */
+    private static final int TOKEN_BYTES = 16;
+    private static final int TOKEN_LENGTH = TOKEN_BYTES * 2;
+    private static final int TOKEN_READ_TIMEOUT = 2000;
+
     private static volatile WebProxyTransport instance;
 
     public static WebProxyTransport getInstance() {
@@ -107,6 +113,7 @@ public final class WebProxyTransport {
     private ServerSocket serverSocket;
     private int localPort;
     private Thread acceptThread;
+    private byte[] token;
 
     private WebView webView;
     private JavaScriptReplyProxy replyProxy;
@@ -164,6 +171,9 @@ public final class WebProxyTransport {
             host = canonicalHost;
             basePath = path;
             secret = secretBytes;
+            final byte[] random = new byte[TOKEN_BYTES];
+            new SecureRandom().nextBytes(random);
+            token = Utilities.bytesToHex(random).getBytes(StandardCharsets.US_ASCII);
             try {
                 serverSocket = new ServerSocket();
                 serverSocket.setReuseAddress(true);
@@ -184,6 +194,33 @@ public final class WebProxyTransport {
         return localPort;
     }
 
+    /**
+     * The token tgnet must write before the MTProxy handshake, or an empty string when no
+     * carrier runs. Pass it to native before pointing tgnet at the loopback port.
+     */
+    public synchronized String getToken() {
+        return token == null ? "" : new String(token, StandardCharsets.US_ASCII);
+    }
+
+    /**
+     * The loopback port already carrying this exact entry, or 0 when the running carrier
+     * serves a different one. Callers use this to reach an entry without restarting the
+     * carrier, which would drop the live connection.
+     */
+    public synchronized int portFor(String address, String secretText) {
+        final String canonicalHost = hostOf(address);
+        final String path = basePathOf(address);
+        final byte[] secretBytes = decodeSecret(secretText);
+        if (serverSocket == null || canonicalHost == null || path == null || secretBytes == null) {
+            return 0;
+        }
+        if (!canonicalHost.equals(host) || !TextUtils.equals(path, basePath)
+                || !java.util.Arrays.equals(secretBytes, secret)) {
+            return 0;
+        }
+        return localPort;
+    }
+
     public void stop() {
         final ServerSocket toClose;
         synchronized (this) {
@@ -194,6 +231,7 @@ public final class WebProxyTransport {
             host = null;
             basePath = null;
             secret = null;
+            token = null;
         }
         if (toClose != null) {
             try {
@@ -416,8 +454,50 @@ public final class WebProxyTransport {
                 socket.setTcpNoDelay(true);
             } catch (IOException ignore) {
             }
-            mux.post(() -> registerStream(socket, bound));
+            // The token read blocks, so it runs off the accept loop: a local app that connects
+            // and then stalls must not hold up tgnet's own connections.
+            final Thread auth = new Thread(() -> authenticate(socket, bound), "WebProxyAuth");
+            auth.setDaemon(true);
+            auth.start();
         }
+    }
+
+    /**
+     * Reads the loopback token and hands the socket to the mux, or closes it. Without this
+     * any local app with INTERNET permission could use the relay at the user's expense.
+     */
+    private void authenticate(Socket socket, ServerSocket owner) {
+        final byte[] expected;
+        synchronized (this) {
+            expected = serverSocket == owner ? token : null;
+        }
+        if (expected == null) {
+            closeQuietly(socket);
+            return;
+        }
+        final byte[] received = new byte[TOKEN_LENGTH];
+        try {
+            socket.setSoTimeout(TOKEN_READ_TIMEOUT);
+            final InputStream input = socket.getInputStream();
+            int read = 0;
+            while (read < TOKEN_LENGTH) {
+                final int count = input.read(received, read, TOKEN_LENGTH - read);
+                if (count < 0) {
+                    closeQuietly(socket);
+                    return;
+                }
+                read += count;
+            }
+            socket.setSoTimeout(0);
+        } catch (IOException e) {
+            closeQuietly(socket);
+            return;
+        }
+        if (!MessageDigest.isEqual(expected, received)) {
+            closeQuietly(socket);
+            return;
+        }
+        mux.post(() -> registerStream(socket, owner));
     }
 
     private void registerStream(Socket socket, ServerSocket owner) {

@@ -84,7 +84,11 @@ private:
     size_t bytesRead = 0;
     int8_t tlsState = 0;
 
+    // 0 = none or done, 1..6 = SOCKS5, 10..11 = fake-TLS, 20 = WEB proxy token pending
     uint8_t proxyAuthState;
+
+    // Copy of the WEB proxy loopback token taken when this connection opened.
+    std::string webProxyToken;
 
     // DPI shaping state — only meaningful while tlsState != 0 (FakeTLS app-data path)
     int64_t startupCoverStartTime = 0;

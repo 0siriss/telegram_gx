@@ -13,6 +13,13 @@
 #include <openssl/pem.h>
 #include <openssl/aes.h>
 #include <atomic>
+#include <mutex>
+
+// WEB proxy loopback token — accessed by ConnectionSocket.cpp. The carrier binds its
+// listener on 127.0.0.1, so any local app could otherwise use the relay; tgnet writes this
+// token before the MTProxy handshake and the listener drops a connection that omits it.
+std::mutex gWebProxyTokenMutex;
+std::string gWebProxyToken;
 
 // TLS config — accessed by ConnectionSocket.cpp
 std::atomic<bool>    gTlsFragmentEnabled{false};
@@ -236,6 +243,17 @@ void applyDatacenterAddress(JNIEnv *env, jclass c, jint instanceNum, jint datace
     if (valueStr != 0) {
         env->ReleaseStringUTFChars(ipAddress, valueStr);
     }
+}
+
+void setWebProxyToken(JNIEnv *env, jclass c, jstring token) {
+    std::string value;
+    if (token != nullptr) {
+        const char *valueStr = env->GetStringUTFChars(token, 0);
+        value = std::string(valueStr);
+        env->ReleaseStringUTFChars(token, valueStr);
+    }
+    std::lock_guard<std::mutex> lock(gWebProxyTokenMutex);
+    gWebProxyToken = value;
 }
 
 void setTlsFragmentConfig(JNIEnv *env, jclass c, jboolean enabled, jint minBytes, jint maxBytes) {
@@ -603,6 +621,7 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
         {"native_receivedIntegrityCheckClassic", "(IILjava/lang/String;Ljava/lang/String;)V", (void *) receivedIntegrityCheckClassic},
         {"native_receivedCaptchaResult", "(I[ILjava/lang/String;)V", (void *) receivedCaptchaResult},
         {"native_isGoodPrime", "([BI)Z", (void *) isGoodPrime},
+        {"native_setWebProxyToken", "(Ljava/lang/String;)V", (void *) setWebProxyToken},
 };
 
 

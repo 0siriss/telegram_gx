@@ -33,6 +33,7 @@
 #include <random>
 #include <atomic>
 #include <chrono>
+#include <mutex>
 
 #ifndef EPOLLRDHUP
 #define EPOLLRDHUP 0x2000
@@ -54,6 +55,14 @@ extern std::atomic<int>  gTlsEchExtensionId; // default 0xfe0d
 extern std::atomic<int>  gDpiRecordSizingMode; // 0=Off,1=Conservative,2=Varied
 extern std::atomic<int>  gDpiTimingMode;       // 0=Off,1=Gentle,2=Balanced
 extern std::atomic<int>  gDpiStartupCoverMode; // 0=Off,1=Soft,2=Strict
+
+// WEB proxy loopback token, set from Java while the carrier runs. See TgNetWrapper.cpp.
+extern std::mutex gWebProxyTokenMutex;
+extern std::string gWebProxyToken;
+
+// The WEB carrier binds its listener on this address only, so the token is written to no
+// other proxy. An ordinary proxy on loopback simply never has a token set alongside it.
+static const char *WEB_PROXY_LOOPBACK = "127.0.0.1";
 
 static BIGNUM *get_y2(BIGNUM *x, const BIGNUM *mod, BN_CTX *big_num_context) {
     // returns y^2 = x^3 + 486662 * x^2 + x
@@ -828,7 +837,15 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
             currentSecretDomain = proxySecret->substr(17);
             tempBuffLength = 65 * 1024;
         } else {
-            proxyAuthState = 0;
+            // Plain MTProxy stream. When the WEB carrier runs, this is its loopback listener,
+            // which drops any connection that does not present the token first. The token is
+            // read once here so it cannot change while this connection authenticates.
+            webProxyToken.clear();
+            if (*proxyAddress == WEB_PROXY_LOOPBACK) {
+                std::lock_guard<std::mutex> lock(gWebProxyTokenMutex);
+                webProxyToken = gWebProxyToken;
+            }
+            proxyAuthState = webProxyToken.empty() ? 0 : 20;
             tempBuffLength = 0;
         }
         if (tempBuffLength > 0) {
@@ -1239,6 +1256,17 @@ void ConnectionSocket::onEvent(uint32_t events) {
             closeSocket(1, error);
             return;
         } else {
+            if (proxyAuthState == 20) {
+                // The WEB carrier expects the token as the first bytes of the loopback stream,
+                // ahead of the MTProxy handshake this connection is about to write.
+                lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
+                if (send(socketFd, webProxyToken.data(), webProxyToken.size(), 0) != (ssize_t) webProxyToken.size()) {
+                    if (LOGS_ENABLED) DEBUG_E("connection(%p) web proxy token send failed", this);
+                    closeSocket(1, -1);
+                    return;
+                }
+                proxyAuthState = 0;
+            }
             if (proxyAuthState != 0) {
                 if (proxyAuthState >= 10) {
                     if (proxyAuthState == 10) {
@@ -1528,7 +1556,7 @@ void ConnectionSocket::adjustWriteOp() {
         return;
     }
     eventMask.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLET;
-    if (proxyAuthState == 0 && (outgoingByteStream->hasData() || !onConnectedSent) || proxyAuthState == 1 || proxyAuthState == 3 || proxyAuthState == 5 || proxyAuthState == 10) {
+    if (proxyAuthState == 0 && (outgoingByteStream->hasData() || !onConnectedSent) || proxyAuthState == 1 || proxyAuthState == 3 || proxyAuthState == 5 || proxyAuthState == 10 || proxyAuthState == 20) {
         eventMask.events |= EPOLLOUT;
     }
     eventMask.data.ptr = eventObject;
