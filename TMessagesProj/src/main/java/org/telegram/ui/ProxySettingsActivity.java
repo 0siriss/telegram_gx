@@ -332,7 +332,9 @@ public class ProxySettingsActivity extends BaseFragment {
                     SharedPreferences.Editor editor = preferences.edit();
                     boolean enabled;
                     if (addingNewProxy) {
-                        SharedConfig.addProxy(currentProxyInfo);
+                        // addProxy returns the existing entry when this one duplicates it, so the
+                        // active proxy always stays an object the list actually holds.
+                        currentProxyInfo = SharedConfig.addProxy(currentProxyInfo);
                         SharedConfig.currentProxy = currentProxyInfo;
                         editor.putBoolean("proxy_enabled", true);
                         enabled = true;
@@ -341,12 +343,7 @@ public class ProxySettingsActivity extends BaseFragment {
                         SharedConfig.saveProxyList();
                     }
                     if (addingNewProxy || SharedConfig.currentProxy == currentProxyInfo) {
-                        editor.putString("proxy_ip", currentProxyInfo.address);
-                        editor.putString("proxy_pass", currentProxyInfo.password);
-                        editor.putString("proxy_user", currentProxyInfo.username);
-                        editor.putInt("proxy_port", currentProxyInfo.port);
-                        editor.putString("proxy_secret", currentProxyInfo.secret);
-                        editor.putInt("proxy_type", currentProxyInfo.type);
+                        currentProxyInfo.writeToPrefs(editor);
                         ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret, currentProxyInfo.type);
                     }
                     // Save and apply TLS fingerprint profile

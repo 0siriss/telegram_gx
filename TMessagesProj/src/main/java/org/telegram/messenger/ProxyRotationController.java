@@ -73,11 +73,7 @@ public class ProxyRotationController implements NotificationCenter.NotificationC
             }
 
             SharedPreferences.Editor editor = MessagesController.getGlobalMainSettings().edit();
-            editor.putString("proxy_ip", info.address);
-            editor.putString("proxy_pass", info.password);
-            editor.putString("proxy_user", info.username);
-            editor.putInt("proxy_port", info.port);
-            editor.putString("proxy_secret", info.secret);
+            info.writeToPrefs(editor);
             editor.putBoolean("proxy_enabled", true);
 
             if (!info.secret.isEmpty()) {

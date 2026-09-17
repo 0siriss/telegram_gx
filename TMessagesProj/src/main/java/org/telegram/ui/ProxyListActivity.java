@@ -47,6 +47,7 @@ import org.telegram.messenger.NotificationCenter;
 import org.telegram.messenger.ProxyRotationController;
 import org.telegram.messenger.R;
 import org.telegram.messenger.SharedConfig;
+import org.telegram.messenger.WebProxyTransport;
 import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.ui.ActionBar.ActionBar;
 import org.telegram.ui.ActionBar.ActionBarMenu;
@@ -202,7 +203,8 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                 }
             } else {
                 if (currentInfo.isWeb()) {
-                    // Never probed in the background, so "unavailable" would be a false claim.
+                    // Only probed while active, through its own carrier, so an inactive entry
+                    // has no result and "unavailable" would be a false claim.
                     valueTextView.setText(getString(R.string.ProxyNotTested));
                     colorKey = Theme.key_windowBackgroundWhiteGrayText2;
                 } else if (currentInfo.checking) {
@@ -409,12 +411,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                         if (!useProxySettings) {
                             SharedPreferences preferences = MessagesController.getGlobalMainSettings();
                             SharedPreferences.Editor editor = MessagesController.getGlobalMainSettings().edit();
-                            editor.putString("proxy_ip", SharedConfig.currentProxy.address);
-                            editor.putString("proxy_pass", SharedConfig.currentProxy.password);
-                            editor.putString("proxy_user", SharedConfig.currentProxy.username);
-                            editor.putInt("proxy_port", SharedConfig.currentProxy.port);
-                            editor.putString("proxy_secret", SharedConfig.currentProxy.secret);
-                            editor.putInt("proxy_type", SharedConfig.currentProxy.type);
+                            SharedConfig.currentProxy.writeToPrefs(editor);
                             editor.commit();
                         }
                     } else {
@@ -476,11 +473,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                 SharedConfig.ProxyInfo info = proxyList.get(position - proxyStartRow);
                 useProxySettings = true;
                 SharedPreferences.Editor editor = MessagesController.getGlobalMainSettings().edit();
-                editor.putString("proxy_ip", info.address);
-                editor.putString("proxy_pass", info.password);
-                editor.putString("proxy_user", info.username);
-                editor.putInt("proxy_port", info.port);
-                editor.putString("proxy_secret", info.secret);
+                info.writeToPrefs(editor);
                 editor.putBoolean("proxy_enabled", useProxySettings);
                 if (!info.secret.isEmpty()) {
                     useProxyForCalls = false;
@@ -731,13 +724,22 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
     private void checkProxyList() {
         for (int a = 0, count = proxyList.size(); a < count; a++) {
             final SharedConfig.ProxyInfo proxyInfo = proxyList.get(a);
-            // Probing a WEB entry would start the process-wide WebView carrier, so it is never
-            // checked in the background and shows as untested until the user activates it.
-            if (proxyInfo.isWeb() || proxyInfo.checking || SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime < 2 * 60 * 1000) {
+            if (proxyInfo.checking || SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime < 2 * 60 * 1000) {
                 continue;
             }
+            // A WEB entry is reached through the carrier's loopback listener, so it can only be
+            // probed while its own carrier runs — that is, while it is the active proxy.
+            // Starting a carrier for any other entry would drop the live connection.
+            final boolean web = proxyInfo.isWeb();
+            final int checkPort = web ? WebProxyTransport.getInstance().portFor(proxyInfo.address, proxyInfo.secret) : proxyInfo.port;
+            if (web && checkPort == 0) {
+                continue;
+            }
+            final String checkAddress = web ? "127.0.0.1" : proxyInfo.address;
+            final String checkUser = web ? "" : proxyInfo.username;
+            final String checkPassword = web ? "" : proxyInfo.password;
             proxyInfo.checking = true;
-            proxyInfo.proxyCheckPingId = ConnectionsManager.getInstance(currentAccount).checkProxy(proxyInfo.address, proxyInfo.port, proxyInfo.username, proxyInfo.password, proxyInfo.secret, time -> AndroidUtilities.runOnUIThread(() -> {
+            proxyInfo.proxyCheckPingId = ConnectionsManager.getInstance(currentAccount).checkProxy(checkAddress, checkPort, checkUser, checkPassword, proxyInfo.secret, time -> AndroidUtilities.runOnUIThread(() -> {
                 proxyInfo.availableCheckTime = SystemClock.elapsedRealtime();
                 proxyInfo.checking = false;
                 if (time == -1) {

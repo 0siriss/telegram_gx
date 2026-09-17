@@ -421,6 +421,21 @@ public class SharedConfig {
             return type == TYPE_WEB;
         }
 
+        /**
+         * Writes this entry as the active proxy. Every caller that points the app at a proxy
+         * goes through here: a writer that sets the address but forgets the type leaves the
+         * saved type describing a different entry, and {@link #loadProxyList()} then matches
+         * nothing and invents a duplicate carrying the wrong transport.
+         */
+        public void writeToPrefs(SharedPreferences.Editor editor) {
+            editor.putString("proxy_ip", address);
+            editor.putString("proxy_pass", password);
+            editor.putString("proxy_user", username);
+            editor.putInt("proxy_port", port);
+            editor.putString("proxy_secret", secret);
+            editor.putInt("proxy_type", type);
+        }
+
         public String getLink() {
             if (type == TYPE_WEB) {
                 StringBuilder url = new StringBuilder("https://t.me/webproxy?");
@@ -1499,6 +1514,21 @@ public class SharedConfig {
                 }
             }
             data.cleanup();
+        }
+        if (currentProxy == null && !TextUtils.isEmpty(proxyAddress)) {
+            // The saved type describes no entry, which means it was left behind by an older
+            // build or by a writer that did not use ProxyInfo.writeToPrefs. Adopt the entry the
+            // rest of the settings point at and correct the type, rather than adding a duplicate
+            // that carries the wrong transport.
+            for (int a = 0, count = proxyList.size(); a < count; a++) {
+                ProxyInfo info = proxyList.get(a);
+                if (proxyAddress.equals(info.address) && proxyPort == info.port && proxyUsername.equals(info.username)
+                        && proxyPassword.equals(info.password) && proxySecret.equals(info.secret)) {
+                    currentProxy = info;
+                    preferences.edit().putInt("proxy_type", info.type).apply();
+                    break;
+                }
+            }
         }
         if (currentProxy == null && !TextUtils.isEmpty(proxyAddress)) {
             ProxyInfo info = currentProxy = new ProxyInfo(proxyAddress, proxyPort, proxyUsername, proxyPassword, proxySecret, proxyType);
