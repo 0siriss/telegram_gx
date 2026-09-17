@@ -10867,6 +10867,23 @@ public class MessagesController extends BaseController implements NotificationCe
         if (reset && checkingPromoInfo) {
             checkingPromoInfo = false;
         }
+        if (isSponsoredMessagesHidden()) {
+            // GramBas: the ad toggle covers every promo dialog, not only the proxy sponsor one --
+            // PSA and other promo types arrive through the same request, so it is not sent at all
+            // and a dialog stored by an earlier check is dropped. This runs ahead of the next-check
+            // time guard, because a promo dialog is kept in local storage and would otherwise stay
+            // in the list for the rest of the session. Turning the toggle off calls back in with
+            // reset = true, which fetches again.
+            if (checkingPromoInfoRequestId != 0) {
+                getConnectionsManager().cancelRequest(checkingPromoInfoRequestId, true);
+                checkingPromoInfoRequestId = 0;
+            }
+            checkingPromoInfo = false;
+            if (promoDialogId != 0) {
+                dropPromoDialog();
+            }
+            return;
+        }
         if (!reset && nextPromoInfoCheckTime > getConnectionsManager().getCurrentTime() || checkingPromoInfo) {
             return;
         }
@@ -11149,6 +11166,22 @@ public class MessagesController extends BaseController implements NotificationCe
             getGlobalMainSettings().edit().putLong("proxy_dialog", promoDialogId).remove("proxyDialogAddress").putInt("nextPromoInfoCheckTime", nextPromoInfoCheckTime).commit();
             AndroidUtilities.runOnUIThread(this::removePromoDialog);
         }
+    }
+
+    /**
+     * Forgets the stored promo dialog and takes it out of the list. Runs on the stage queue,
+     * where the promo state is owned; the list itself is touched on the UI thread.
+     */
+    private void dropPromoDialog() {
+        promoDialogId = 0;
+        proxyDialogAddress = null;
+        nextPromoInfoCheckTime = getConnectionsManager().getCurrentTime() + 60 * 60;
+        getGlobalMainSettings().edit()
+                .putLong("proxy_dialog", 0)
+                .remove("proxyDialogAddress")
+                .putInt("nextPromoInfoCheckTime", nextPromoInfoCheckTime)
+                .commit();
+        AndroidUtilities.runOnUIThread(this::removePromoDialog);
     }
 
     private void removePromoDialog() {
@@ -21708,6 +21741,13 @@ public class MessagesController extends BaseController implements NotificationCe
 
     public static void setSponsoredMessagesHidden(boolean hidden) {
         getGlobalMainSettings().edit().putBoolean("sponsored_messages_hidden", hidden).commit();
+        // Promo dialogs are held per account and survive in the dialog list, so the switch has to
+        // reach them now: hiding drops the current one, showing fetches it again.
+        for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+            if (UserConfig.getInstance(a).isClientActivated()) {
+                getInstance(a).checkPromoInfo(true);
+            }
+        }
     }
 
     // TGX: suppress the "took a screenshot" service message sent to the other party in secret
