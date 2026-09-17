@@ -388,14 +388,21 @@ index 84b822602..47287a632 100644
              buildConfigField "String", "BETA_URL", "\"\""
              buildConfigField "boolean", "DEBUG_VERSION", "false"
 diff --git a/TMessagesProj/jni/TgNetWrapper.cpp b/TMessagesProj/jni/TgNetWrapper.cpp
-index 0f8bc556d..1101d8040 100644
+index 0f8bc556d..edbaa4dce 100644
 --- a/TMessagesProj/jni/TgNetWrapper.cpp
 +++ b/TMessagesProj/jni/TgNetWrapper.cpp
-@@ -12,6 +12,21 @@
+@@ -12,6 +12,28 @@
  #include <openssl/bn.h>
  #include <openssl/pem.h>
  #include <openssl/aes.h>
 +#include <atomic>
++#include <mutex>
++
++// WEB proxy loopback token — accessed by ConnectionSocket.cpp. The carrier binds its
++// listener on 127.0.0.1, so any local app could otherwise use the relay; tgnet writes this
++// token before the MTProxy handshake and the listener drops a connection that omits it.
++std::mutex gWebProxyTokenMutex;
++std::string gWebProxyToken;
 +
 +// TLS config — accessed by ConnectionSocket.cpp
 +std::atomic<bool>    gTlsFragmentEnabled{false};
@@ -413,10 +420,21 @@ index 0f8bc556d..1101d8040 100644
  
  JavaVM *java;
  
-@@ -223,6 +238,30 @@ void applyDatacenterAddress(JNIEnv *env, jclass c, jint instanceNum, jint datace
+@@ -223,6 +245,41 @@ void applyDatacenterAddress(JNIEnv *env, jclass c, jint instanceNum, jint datace
      }
  }
  
++void setWebProxyToken(JNIEnv *env, jclass c, jstring token) {
++    std::string value;
++    if (token != nullptr) {
++        const char *valueStr = env->GetStringUTFChars(token, 0);
++        value = std::string(valueStr);
++        env->ReleaseStringUTFChars(token, valueStr);
++    }
++    std::lock_guard<std::mutex> lock(gWebProxyTokenMutex);
++    gWebProxyToken = value;
++}
++
 +void setTlsFragmentConfig(JNIEnv *env, jclass c, jboolean enabled, jint minBytes, jint maxBytes) {
 +    gTlsFragmentEnabled = (bool) enabled;
 +    gTlsFragmentMin = (int) minBytes;
@@ -444,7 +462,7 @@ index 0f8bc556d..1101d8040 100644
  void setProxySettings(JNIEnv *env, jclass c, jint instanceNum, jstring address, jint port, jstring username, jstring password, jstring secret) {
      const char *addressStr = env->GetStringUTFChars(address, 0);
      const char *usernameStr = env->GetStringUTFChars(username, 0);
-@@ -537,6 +576,10 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
+@@ -537,6 +594,10 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
          {"native_bindRequestToGuid", "(III)V", (void *) bindRequestToGuid},
          {"native_applyDatacenterAddress", "(IILjava/lang/String;I)V", (void *) applyDatacenterAddress},
          {"native_setProxySettings", "(ILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void *) setProxySettings},
@@ -455,6 +473,14 @@ index 0f8bc556d..1101d8040 100644
          {"native_getConnectionState", "(I)I", (void *) getConnectionState},
          {"native_setUserId", "(IJ)V", (void *) setUserId},
          {"native_init", "(IIIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IJZZZII)V", (void *) init},
+@@ -560,6 +621,7 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
+         {"native_receivedIntegrityCheckClassic", "(IILjava/lang/String;Ljava/lang/String;)V", (void *) receivedIntegrityCheckClassic},
+         {"native_receivedCaptchaResult", "(I[ILjava/lang/String;)V", (void *) receivedCaptchaResult},
+         {"native_isGoodPrime", "([BI)Z", (void *) isGoodPrime},
++        {"native_setWebProxyToken", "(Ljava/lang/String;)V", (void *) setWebProxyToken},
+ };
+ 
+ 
 diff --git a/TMessagesProj/jni/tgnet/Connection.cpp b/TMessagesProj/jni/tgnet/Connection.cpp
 index 3ce0c222d..40dfb3d15 100644
 --- a/TMessagesProj/jni/tgnet/Connection.cpp
@@ -483,19 +509,20 @@ index 81e4d5edc..8dce10b33 100644
  
  private:
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
-index 3f345ab65..110202353 100644
+index 3f345ab65..d10e4a66e 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
-@@ -31,6 +31,8 @@
+@@ -31,6 +31,9 @@
  #include "BuffersStorage.h"
  #include "Connection.h"
  #include <random>
 +#include <atomic>
 +#include <chrono>
++#include <mutex>
  
  #ifndef EPOLLRDHUP
  #define EPOLLRDHUP 0x2000
-@@ -38,6 +40,21 @@
+@@ -38,6 +41,29 @@
  
  #define MAX_GREASE 8
  
@@ -514,10 +541,18 @@ index 3f345ab65..110202353 100644
 +extern std::atomic<int>  gDpiTimingMode;       // 0=Off,1=Gentle,2=Balanced
 +extern std::atomic<int>  gDpiStartupCoverMode; // 0=Off,1=Soft,2=Strict
 +
++// WEB proxy loopback token, set from Java while the carrier runs. See TgNetWrapper.cpp.
++extern std::mutex gWebProxyTokenMutex;
++extern std::string gWebProxyToken;
++
++// The WEB carrier binds its listener on this address only, so the token is written to no
++// other proxy. An ordinary proxy on loopback simply never has a token set alongside it.
++static const char *WEB_PROXY_LOOPBACK = "127.0.0.1";
++
  static BIGNUM *get_y2(BIGNUM *x, const BIGNUM *mod, BN_CTX *big_num_context) {
      // returns y^2 = x^3 + 486662 * x^2 + x
      BIGNUM *y = BN_dup(x);
-@@ -163,7 +180,7 @@ public:
+@@ -163,7 +189,7 @@ public:
  
      struct Op {
          enum class Type {
@@ -526,7 +561,7 @@ index 3f345ab65..110202353 100644
          };
          Type type;
          size_t length;
-@@ -249,6 +266,12 @@ public:
+@@ -249,6 +275,12 @@ public:
              return res;
          }
  
@@ -539,7 +574,7 @@ index 3f345ab65..110202353 100644
      };
  
      static const TlsHello &getDefault() {
-@@ -311,12 +334,259 @@ public:
+@@ -311,12 +343,259 @@ public:
                          },
                          { Op::string("\x44\xcd\x00\x05\x00\x03\x02\x68\x32", 9) },
                          {
@@ -753,8 +788,7 @@ index 3f345ab65..110202353 100644
 +                            Op::begin_scope(),
 +                            Op::begin_scope(),
 +                            Op::string("\x00", 1),
-                             Op::begin_scope(),
--                            Op::string("\x00\x00\x01\x00\x01", 5),
++                            Op::begin_scope(),
 +                            Op::domain(),
 +                            Op::end_scope(),
 +                            Op::end_scope(),
@@ -792,7 +826,8 @@ index 3f345ab65..110202353 100644
 +                        { Op::string("\x44\x69\x00\x05\x00\x03\x02\x68\x32", 9) },
 +                        {
 +                            Op::echId(),
-+                            Op::begin_scope(),
+                             Op::begin_scope(),
+-                            Op::string("\x00\x00\x01\x00\x01", 5),
 +                            Op::string("\x00\x01\x00\x01", 4),
                              Op::random(1),
 -                            Op::string("\x00\x20", 2),
@@ -802,7 +837,7 @@ index 3f345ab65..110202353 100644
                              Op::begin_scope(),
                              Op::E(),
                              Op::end_scope(),
-@@ -336,6 +606,38 @@ public:
+@@ -336,6 +615,38 @@ public:
          return result;
      }
  
@@ -841,7 +876,7 @@ index 3f345ab65..110202353 100644
      uint32_t writeToBuffer(uint8_t *data) {
          uint32_t offset = 0;
          for (auto op : ops) {
-@@ -392,6 +694,13 @@ private:
+@@ -392,6 +703,13 @@ private:
                  offset += 2;
                  break;
              }
@@ -855,7 +890,7 @@ index 3f345ab65..110202353 100644
              case Type::BeginScope:
                  scopeOffset.push_back(offset);
                  offset += 2;
-@@ -415,11 +724,14 @@ private:
+@@ -415,11 +733,14 @@ private:
              }
              case Type::P: {
                  auto length = offset;
@@ -875,7 +910,7 @@ index 3f345ab65..110202353 100644
                  }
                  break;
              }
-@@ -451,6 +763,7 @@ ConnectionSocket::ConnectionSocket(int32_t instance) {
+@@ -451,6 +772,7 @@ ConnectionSocket::ConnectionSocket(int32_t instance) {
      outgoingByteStream = new ByteStream();
      lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
      eventObject = new EventObject(this, EventObjectTypeConnection);
@@ -883,7 +918,7 @@ index 3f345ab65..110202353 100644
  }
  
  ConnectionSocket::~ConnectionSocket() {
-@@ -470,6 +783,10 @@ ConnectionSocket::~ConnectionSocket() {
+@@ -470,6 +792,10 @@ ConnectionSocket::~ConnectionSocket() {
          tlsBuffer->reuse();
          tlsBuffer = nullptr;
      }
@@ -894,7 +929,24 @@ index 3f345ab65..110202353 100644
  }
  
  void ConnectionSocket::openConnection(std::string address, uint16_t port, std::string secret, bool ipv6, int32_t networkType) {
-@@ -775,6 +1092,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -511,7 +837,15 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
+             currentSecretDomain = proxySecret->substr(17);
+             tempBuffLength = 65 * 1024;
+         } else {
+-            proxyAuthState = 0;
++            // Plain MTProxy stream. When the WEB carrier runs, this is its loopback listener,
++            // which drops any connection that does not present the token first. The token is
++            // read once here so it cannot change while this connection authenticates.
++            webProxyToken.clear();
++            if (*proxyAddress == WEB_PROXY_LOOPBACK) {
++                std::lock_guard<std::mutex> lock(gWebProxyTokenMutex);
++                webProxyToken = gWebProxyToken;
++            }
++            proxyAuthState = webProxyToken.empty() ? 0 : 20;
+             tempBuffLength = 0;
+         }
+         if (tempBuffLength > 0) {
+@@ -775,6 +1109,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
                              tlsState = 1;
                              proxyAuthState = 0;
                              bytesRead = 0;
@@ -909,7 +961,24 @@ index 3f345ab65..110202353 100644
                              adjustWriteOp();
                          } else {
                              std::memcpy(tempBuffer->bytes + bytesRead, buffer->bytes(), (size_t) readCount);
-@@ -920,7 +1245,7 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -914,13 +1256,24 @@ void ConnectionSocket::onEvent(uint32_t events) {
+             closeSocket(1, error);
+             return;
+         } else {
++            if (proxyAuthState == 20) {
++                // The WEB carrier expects the token as the first bytes of the loopback stream,
++                // ahead of the MTProxy handshake this connection is about to write.
++                lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
++                if (send(socketFd, webProxyToken.data(), webProxyToken.size(), 0) != (ssize_t) webProxyToken.size()) {
++                    if (LOGS_ENABLED) DEBUG_E("connection(%p) web proxy token send failed", this);
++                    closeSocket(1, -1);
++                    return;
++                }
++                proxyAuthState = 0;
++            }
+             if (proxyAuthState != 0) {
+                 if (proxyAuthState >= 10) {
+                     if (proxyAuthState == 10) {
                          lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
                          tlsHashMismatch = false;
                          proxyAuthState = 11;
@@ -918,7 +987,7 @@ index 3f345ab65..110202353 100644
                          hello.setDomain(currentSecretDomain);
                          uint32_t size = hello.writeToBuffer(tempBuffer->bytes);
                          uint32_t outLength;
-@@ -933,7 +1258,21 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -933,7 +1286,21 @@ void ConnectionSocket::onEvent(uint32_t events) {
                          memcpy(tempBuffer->bytes + 11, tempBuffer->bytes + 64 * 1024, 32);
                          bytesRead = 0;
  
@@ -941,7 +1010,7 @@ index 3f345ab65..110202353 100644
                              if (LOGS_ENABLED) DEBUG_E("connection(%p) send failed", this);
                              closeSocket(1, -1);
                              return;
-@@ -1011,9 +1350,20 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -1011,9 +1378,20 @@ void ConnectionSocket::onEvent(uint32_t events) {
                  if (remaining) {
                      ssize_t sentLength;
                      if (tlsState != 0) {
@@ -965,7 +1034,7 @@ index 3f345ab65..110202353 100644
                          size_t headersSize = 0;
                          if (tlsState == 1) {
                              static std::string header1 = std::string("\x14\x03\x03\x00\x01\x01", 6);
-@@ -1040,8 +1390,22 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -1040,8 +1418,22 @@ void ConnectionSocket::onEvent(uint32_t events) {
                                  ConnectionsManager::getInstance(instanceNum).delegate->onBytesSent((int32_t) sentLength, currentNetworkType, instanceNum);
                              }
                              outgoingByteStream->discard((uint32_t) (sentLength - headersSize));
@@ -988,7 +1057,7 @@ index 3f345ab65..110202353 100644
                      } else {
                          if ((sentLength = send(socketFd, buffer->bytes(), remaining, 0)) < 0) {
                              if (LOGS_ENABLED) DEBUG_D("connection(%p) send failed", this);
-@@ -1086,6 +1450,78 @@ void ConnectionSocket::writeBuffer(NativeByteBuffer *buffer) {
+@@ -1086,13 +1478,85 @@ void ConnectionSocket::writeBuffer(NativeByteBuffer *buffer) {
      adjustWriteOp();
  }
  
@@ -1067,8 +1136,16 @@ index 3f345ab65..110202353 100644
  void ConnectionSocket::adjustWriteOp() {
      if (!waitingForHostResolve.empty()) {
          adjustWriteOpAfterResolve = true;
+         return;
+     }
+     eventMask.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLET;
+-    if (proxyAuthState == 0 && (outgoingByteStream->hasData() || !onConnectedSent) || proxyAuthState == 1 || proxyAuthState == 3 || proxyAuthState == 5 || proxyAuthState == 10) {
++    if (proxyAuthState == 0 && (outgoingByteStream->hasData() || !onConnectedSent) || proxyAuthState == 1 || proxyAuthState == 3 || proxyAuthState == 5 || proxyAuthState == 10 || proxyAuthState == 20) {
+         eventMask.events |= EPOLLOUT;
+     }
+     eventMask.data.ptr = eventObject;
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.h b/TMessagesProj/jni/tgnet/ConnectionSocket.h
-index 15ffee898..6d048c501 100644
+index 15ffee898..d4a2cd8d2 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.h
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.h
 @@ -18,6 +18,7 @@ class ConnectionsManager;
@@ -1089,10 +1166,16 @@ index 15ffee898..6d048c501 100644
  
      std::string overrideProxyUser = "";
      std::string overrideProxyPassword = "";
-@@ -82,6 +86,19 @@ private:
+@@ -80,8 +84,25 @@ private:
+     size_t bytesRead = 0;
+     int8_t tlsState = 0;
  
++    // 0 = none or done, 1..6 = SOCKS5, 10..11 = fake-TLS, 20 = WEB proxy token pending
      uint8_t proxyAuthState;
  
++    // Copy of the WEB proxy loopback token taken when this connection opened.
++    std::string webProxyToken;
++
 +    // DPI shaping state — only meaningful while tlsState != 0 (FakeTLS app-data path)
 +    int64_t startupCoverStartTime = 0;
 +    uint32_t startupCoverFrameCount = 0;
@@ -1437,7 +1520,7 @@ index 12c669c43..fbe52d345 100644
      public float forceSeekTo = -1;
      public int audioProgressMs;
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
-index 7a0b35b13..18b2c52ab 100644
+index 7a0b35b13..05628de62 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
 @@ -8289,13 +8289,17 @@ public class MessagesController extends BaseController implements NotificationCe
@@ -1460,7 +1543,54 @@ index 7a0b35b13..18b2c52ab 100644
                      final boolean checkViewer = SecretMediaViewer.hasInstance() && SecretMediaViewer.getInstance().isVisible();
                      final MessageObject viewerObject = checkViewer ? SecretMediaViewer.getInstance().getCurrentMessageObject() : null;
                      for (int a = 0, N = taskMedia.size(); a < N; a++) {
-@@ -14405,6 +14409,10 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -10863,6 +10867,23 @@ public class MessagesController extends BaseController implements NotificationCe
+         if (reset && checkingPromoInfo) {
+             checkingPromoInfo = false;
+         }
++        if (isSponsoredMessagesHidden()) {
++            // GramBas: the ad toggle covers every promo dialog, not only the proxy sponsor one --
++            // PSA and other promo types arrive through the same request, so it is not sent at all
++            // and a dialog stored by an earlier check is dropped. This runs ahead of the next-check
++            // time guard, because a promo dialog is kept in local storage and would otherwise stay
++            // in the list for the rest of the session. Turning the toggle off calls back in with
++            // reset = true, which fetches again.
++            if (checkingPromoInfoRequestId != 0) {
++                getConnectionsManager().cancelRequest(checkingPromoInfoRequestId, true);
++                checkingPromoInfoRequestId = 0;
++            }
++            checkingPromoInfo = false;
++            if (promoDialogId != 0) {
++                dropPromoDialog();
++            }
++            return;
++        }
+         if (!reset && nextPromoInfoCheckTime > getConnectionsManager().getCurrentTime() || checkingPromoInfo) {
+             return;
+         }
+@@ -11147,6 +11168,22 @@ public class MessagesController extends BaseController implements NotificationCe
+         }
+     }
+ 
++    /**
++     * Forgets the stored promo dialog and takes it out of the list. Runs on the stage queue,
++     * where the promo state is owned; the list itself is touched on the UI thread.
++     */
++    private void dropPromoDialog() {
++        promoDialogId = 0;
++        proxyDialogAddress = null;
++        nextPromoInfoCheckTime = getConnectionsManager().getCurrentTime() + 60 * 60;
++        getGlobalMainSettings().edit()
++                .putLong("proxy_dialog", 0)
++                .remove("proxyDialogAddress")
++                .putInt("nextPromoInfoCheckTime", nextPromoInfoCheckTime)
++                .commit();
++        AndroidUtilities.runOnUIThread(this::removePromoDialog);
++    }
++
+     private void removePromoDialog() {
+         if (promoDialog == null) {
+             return;
+@@ -14405,6 +14442,10 @@ public class MessagesController extends BaseController implements NotificationCe
          long dialogId = messageObject.getDialogId();
          getMessagesStorage().markMessagesContentAsRead(dialogId, arrayList, 0, 0);
          getNotificationCenter().postNotificationName(NotificationCenter.messagesReadContent, dialogId, arrayList);
@@ -1471,7 +1601,7 @@ index 7a0b35b13..18b2c52ab 100644
          if (messageObject.getId() < 0) {
              markMessageAsRead(messageObject.getDialogId(), messageObject.messageOwner.random_id, Integer.MIN_VALUE);
          } else {
-@@ -14470,6 +14478,11 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -14470,6 +14511,11 @@ public class MessagesController extends BaseController implements NotificationCe
  
      public void doDeleteShowOnceTask(long taskId, long dialogId, int mid) {
          getMessagesStorage().removePendingTask(taskId);
@@ -1483,7 +1613,7 @@ index 7a0b35b13..18b2c52ab 100644
          ArrayList<Integer> mids = new ArrayList<>();
          mids.add(mid);
          getMessagesStorage().emptyMessagesMedia(dialogId, mids);
-@@ -14480,6 +14493,15 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -14480,6 +14526,15 @@ public class MessagesController extends BaseController implements NotificationCe
      }
  
      public void markMessageAsRead2(long dialogId, int mid, TLRPC.InputChannel inputChannel, int ttl, long taskId, boolean createDeleteTask) {
@@ -1499,7 +1629,7 @@ index 7a0b35b13..18b2c52ab 100644
          if (mid == 0 || ttl < 0) {
              return;
          }
-@@ -18426,6 +18448,10 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -18426,6 +18481,10 @@ public class MessagesController extends BaseController implements NotificationCe
          LongSparseArray<ArrayList<Integer>> markContentAsReadMessages = null;
          SparseIntArray markAsReadEncrypted = null;
          LongSparseArray<ArrayList<Integer>> deletedMessages = null;
@@ -1510,7 +1640,7 @@ index 7a0b35b13..18b2c52ab 100644
          LongSparseArray<ArrayList<Integer>> deletedQuickReplyMessages = null;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessages = null;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSent = null;
-@@ -18814,6 +18840,11 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -18814,6 +18873,11 @@ public class MessagesController extends BaseController implements NotificationCe
                  dialogs_read_outbox_max.put(dialogId, Math.max(value, update.max_id));
              } else if (baseUpdate instanceof TL_update.TL_updateDeleteMessages) {
                  TL_update.TL_updateDeleteMessages update = (TL_update.TL_updateDeleteMessages) baseUpdate;
@@ -1522,7 +1652,7 @@ index 7a0b35b13..18b2c52ab 100644
                  if (deletedMessages == null) {
                      deletedMessages = new LongSparseArray<>();
                  }
-@@ -19339,16 +19370,33 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -19339,16 +19403,33 @@ public class MessagesController extends BaseController implements NotificationCe
                  if (BuildVars.LOGS_ENABLED) {
                      FileLog.d(baseUpdate + " channelId = " + update.channel_id);
                  }
@@ -1564,7 +1694,7 @@ index 7a0b35b13..18b2c52ab 100644
              } else if (baseUpdate instanceof TL_update.TL_updateChannel) {
                  if (BuildVars.LOGS_ENABLED) {
                      TL_update.TL_updateChannel update = (TL_update.TL_updateChannel) baseUpdate;
-@@ -21001,6 +21049,7 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21001,6 +21082,7 @@ public class MessagesController extends BaseController implements NotificationCe
          LongSparseArray<ArrayList<Integer>> markContentAsReadMessagesFinal = markContentAsReadMessages;
          SparseIntArray markAsReadEncryptedFinal = markAsReadEncrypted;
          LongSparseArray<ArrayList<Integer>> deletedMessagesFinal = deletedMessages;
@@ -1572,7 +1702,7 @@ index 7a0b35b13..18b2c52ab 100644
          LongSparseArray<ArrayList<Integer>> deletedQuickRepliesMessagesFinal = deletedQuickReplyMessages;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesFinal = scheduledDeletedMessages;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSentFinal = scheduledDeletedMessagesSent;
-@@ -21125,6 +21174,35 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21125,6 +21207,35 @@ public class MessagesController extends BaseController implements NotificationCe
                  }
                  getNotificationsController().removeDeletedMessagesFromNotifications(deletedMessagesFinal, false);
              }
@@ -1608,7 +1738,7 @@ index 7a0b35b13..18b2c52ab 100644
              if (deletedQuickRepliesMessagesFinal != null) {
                  for (int a = 0, size = deletedQuickRepliesMessagesFinal.size(); a < size; a++) {
                      long topicId = deletedQuickRepliesMessagesFinal.keyAt(a);
-@@ -21211,6 +21289,20 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21211,6 +21322,20 @@ public class MessagesController extends BaseController implements NotificationCe
              for (int a = 0, size = deletedMessages.size(); a < size; a++) {
                  long key = deletedMessages.keyAt(a);
                  ArrayList<Integer> arrayList = deletedMessages.valueAt(a);
@@ -1629,7 +1759,7 @@ index 7a0b35b13..18b2c52ab 100644
                  getMessagesStorage().getStorageQueue().postRunnable(() -> {
                      ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, arrayList, false, true, 0, 0);
                      getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, arrayList, dialogIds);
-@@ -21549,6 +21641,147 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21549,6 +21674,154 @@ public class MessagesController extends BaseController implements NotificationCe
          return false;
      }
  
@@ -1700,6 +1830,13 @@ index 7a0b35b13..18b2c52ab 100644
 +
 +    public static void setSponsoredMessagesHidden(boolean hidden) {
 +        getGlobalMainSettings().edit().putBoolean("sponsored_messages_hidden", hidden).commit();
++        // Promo dialogs are held per account and survive in the dialog list, so the switch has to
++        // reach them now: hiding drops the current one, showing fetches it again.
++        for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
++            if (UserConfig.getInstance(a).isClientActivated()) {
++                getInstance(a).checkPromoInfo(true);
++            }
++        }
 +    }
 +
 +    // TGX: suppress the "took a screenshot" service message sent to the other party in secret
@@ -1956,7 +2093,7 @@ index d6901d267..a219bb6d3 100644
          notificationsQueue.postRunnable(() -> {
              boolean added = false;
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/ProxyRotationController.java b/TMessagesProj/src/main/java/org/telegram/messenger/ProxyRotationController.java
-index 9b5fb7713..f19a4e4a8 100644
+index 9b5fb7713..a859da3c0 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/ProxyRotationController.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/ProxyRotationController.java
 @@ -26,7 +26,9 @@ public class ProxyRotationController implements NotificationCenter.NotificationC
@@ -1970,7 +2107,7 @@ index 9b5fb7713..f19a4e4a8 100644
                  continue;
              }
              startedCheck = true;
-@@ -66,7 +68,7 @@ public class ProxyRotationController implements NotificationCenter.NotificationC
+@@ -66,16 +68,12 @@ public class ProxyRotationController implements NotificationCenter.NotificationC
          List<SharedConfig.ProxyInfo> sortedList = new ArrayList<>(SharedConfig.proxyList);
          Collections.sort(sortedList, (o1, o2) -> Long.compare(o1.ping, o2.ping));
          for (SharedConfig.ProxyInfo info : sortedList) {
@@ -1979,8 +2116,18 @@ index 9b5fb7713..f19a4e4a8 100644
                  continue;
              }
  
+             SharedPreferences.Editor editor = MessagesController.getGlobalMainSettings().edit();
+-            editor.putString("proxy_ip", info.address);
+-            editor.putString("proxy_pass", info.password);
+-            editor.putString("proxy_user", info.username);
+-            editor.putInt("proxy_port", info.port);
+-            editor.putString("proxy_secret", info.secret);
++            info.writeToPrefs(editor);
+             editor.putBoolean("proxy_enabled", true);
+ 
+             if (!info.secret.isEmpty()) {
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java b/TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java
-index bbc3a939a..aee8584ca 100644
+index bbc3a939a..417a6b5ab 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java
 @@ -55,7 +55,8 @@ public class SharedConfig {
@@ -2024,12 +2171,27 @@ index bbc3a939a..aee8584ca 100644
              this.address = address;
              this.port = port;
              this.username = username;
-@@ -404,7 +417,20 @@ public class SharedConfig {
+@@ -404,7 +417,35 @@ public class SharedConfig {
              }
          }
  
 +        public boolean isWeb() {
 +            return type == TYPE_WEB;
++        }
++
++        /**
++         * Writes this entry as the active proxy. Every caller that points the app at a proxy
++         * goes through here: a writer that sets the address but forgets the type leaves the
++         * saved type describing a different entry, and {@link #loadProxyList()} then matches
++         * nothing and invents a duplicate carrying the wrong transport.
++         */
++        public void writeToPrefs(SharedPreferences.Editor editor) {
++            editor.putString("proxy_ip", address);
++            editor.putString("proxy_pass", password);
++            editor.putString("proxy_user", username);
++            editor.putInt("proxy_port", port);
++            editor.putString("proxy_secret", secret);
++            editor.putInt("proxy_type", type);
 +        }
 +
          public String getLink() {
@@ -2045,7 +2207,7 @@ index bbc3a939a..aee8584ca 100644
              StringBuilder url = new StringBuilder(!TextUtils.isEmpty(secret) ? "https://t.me/proxy?" : "https://t.me/socks?");
              try {
                  url.append("server=").append(URLEncoder.encode(address, "UTF-8")).append("&").append("port=").append(port);
-@@ -1416,6 +1442,7 @@ public class SharedConfig {
+@@ -1416,6 +1457,7 @@ public class SharedConfig {
          String proxyPassword = preferences.getString("proxy_pass", "");
          String proxySecret = preferences.getString("proxy_secret", "");
          int proxyPort = preferences.getInt("proxy_port", 1080);
@@ -2053,7 +2215,7 @@ index bbc3a939a..aee8584ca 100644
  
          proxyListLoaded = true;
          proxyList.clear();
-@@ -1428,7 +1455,7 @@ public class SharedConfig {
+@@ -1428,7 +1470,7 @@ public class SharedConfig {
              if (count == -1) { // V2 or newer
                  int version = data.readByte(false);
  
@@ -2062,7 +2224,7 @@ index bbc3a939a..aee8584ca 100644
                      count = data.readInt32(false);
  
                      for (int i = 0; i < count; i++) {
-@@ -1441,10 +1468,13 @@ public class SharedConfig {
+@@ -1441,10 +1483,13 @@ public class SharedConfig {
  
                          info.ping = data.readInt64(false);
                          info.availableCheckTime = data.readInt64(false);
@@ -2077,7 +2239,7 @@ index bbc3a939a..aee8584ca 100644
                                  currentProxy = info;
                              }
                          }
-@@ -1462,7 +1492,7 @@ public class SharedConfig {
+@@ -1462,7 +1507,7 @@ public class SharedConfig {
                              data.readString(false));
                      proxyList.add(0, info);
                      if (currentProxy == null && !TextUtils.isEmpty(proxyAddress)) {
@@ -2086,16 +2248,31 @@ index bbc3a939a..aee8584ca 100644
                              currentProxy = info;
                          }
                      }
-@@ -1471,7 +1501,7 @@ public class SharedConfig {
+@@ -1471,7 +1516,22 @@ public class SharedConfig {
              data.cleanup();
          }
          if (currentProxy == null && !TextUtils.isEmpty(proxyAddress)) {
 -            ProxyInfo info = currentProxy = new ProxyInfo(proxyAddress, proxyPort, proxyUsername, proxyPassword, proxySecret);
++            // The saved type describes no entry, which means it was left behind by an older
++            // build or by a writer that did not use ProxyInfo.writeToPrefs. Adopt the entry the
++            // rest of the settings point at and correct the type, rather than adding a duplicate
++            // that carries the wrong transport.
++            for (int a = 0, count = proxyList.size(); a < count; a++) {
++                ProxyInfo info = proxyList.get(a);
++                if (proxyAddress.equals(info.address) && proxyPort == info.port && proxyUsername.equals(info.username)
++                        && proxyPassword.equals(info.password) && proxySecret.equals(info.secret)) {
++                    currentProxy = info;
++                    preferences.edit().putInt("proxy_type", info.type).apply();
++                    break;
++                }
++            }
++        }
++        if (currentProxy == null && !TextUtils.isEmpty(proxyAddress)) {
 +            ProxyInfo info = currentProxy = new ProxyInfo(proxyAddress, proxyPort, proxyUsername, proxyPassword, proxySecret, proxyType);
              proxyList.add(0, info);
          }
      }
-@@ -1504,6 +1534,7 @@ public class SharedConfig {
+@@ -1504,6 +1564,7 @@ public class SharedConfig {
  
              serializedData.writeInt64(info.ping);
              serializedData.writeInt64(info.availableCheckTime);
@@ -2103,7 +2280,7 @@ index bbc3a939a..aee8584ca 100644
          }
          SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("mainconfig", Activity.MODE_PRIVATE);
          preferences.edit().putString("proxy_list", Base64.encodeToString(serializedData.toByteArray(), Base64.NO_WRAP)).apply();
-@@ -1515,7 +1546,7 @@ public class SharedConfig {
+@@ -1515,7 +1576,7 @@ public class SharedConfig {
          int count = proxyList.size();
          for (int a = 0; a < count; a++) {
              ProxyInfo info = proxyList.get(a);
@@ -2112,7 +2289,7 @@ index bbc3a939a..aee8584ca 100644
                  return info;
              }
          }
-@@ -1539,6 +1570,7 @@ public class SharedConfig {
+@@ -1539,6 +1600,7 @@ public class SharedConfig {
              editor.putString("proxy_user", "");
              editor.putString("proxy_secret", "");
              editor.putInt("proxy_port", 1080);
@@ -2122,10 +2299,10 @@ index bbc3a939a..aee8584ca 100644
              editor.apply();
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java b/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
 new file mode 100644
-index 000000000..f09076d0c
+index 000000000..139b0d2ea
 --- /dev/null
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
-@@ -0,0 +1,959 @@
+@@ -0,0 +1,1039 @@
 +package org.telegram.messenger;
 +
 +import android.annotation.SuppressLint;
@@ -2161,6 +2338,7 @@ index 000000000..f09076d0c
 +import java.net.ServerSocket;
 +import java.net.Socket;
 +import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
 +import java.security.SecureRandom;
 +import java.util.ArrayList;
 +import java.util.Collections;
@@ -2208,6 +2386,11 @@ index 000000000..f09076d0c
 +    private static final long RETRY_MIN_DELAY = 1000;
 +    private static final long RETRY_MAX_DELAY = 30000;
 +
++    /** 128 bits of entropy, sent as hex, so the token is 32 ASCII bytes on the wire. */
++    private static final int TOKEN_BYTES = 16;
++    private static final int TOKEN_LENGTH = TOKEN_BYTES * 2;
++    private static final int TOKEN_READ_TIMEOUT = 2000;
++
 +    private static volatile WebProxyTransport instance;
 +
 +    public static WebProxyTransport getInstance() {
@@ -2235,6 +2418,7 @@ index 000000000..f09076d0c
 +    private ServerSocket serverSocket;
 +    private int localPort;
 +    private Thread acceptThread;
++    private byte[] token;
 +
 +    private WebView webView;
 +    private JavaScriptReplyProxy replyProxy;
@@ -2292,6 +2476,9 @@ index 000000000..f09076d0c
 +            host = canonicalHost;
 +            basePath = path;
 +            secret = secretBytes;
++            final byte[] random = new byte[TOKEN_BYTES];
++            new SecureRandom().nextBytes(random);
++            token = Utilities.bytesToHex(random).getBytes(StandardCharsets.US_ASCII);
 +            try {
 +                serverSocket = new ServerSocket();
 +                serverSocket.setReuseAddress(true);
@@ -2312,6 +2499,33 @@ index 000000000..f09076d0c
 +        return localPort;
 +    }
 +
++    /**
++     * The token tgnet must write before the MTProxy handshake, or an empty string when no
++     * carrier runs. Pass it to native before pointing tgnet at the loopback port.
++     */
++    public synchronized String getToken() {
++        return token == null ? "" : new String(token, StandardCharsets.US_ASCII);
++    }
++
++    /**
++     * The loopback port already carrying this exact entry, or 0 when the running carrier
++     * serves a different one. Callers use this to reach an entry without restarting the
++     * carrier, which would drop the live connection.
++     */
++    public synchronized int portFor(String address, String secretText) {
++        final String canonicalHost = hostOf(address);
++        final String path = basePathOf(address);
++        final byte[] secretBytes = decodeSecret(secretText);
++        if (serverSocket == null || canonicalHost == null || path == null || secretBytes == null) {
++            return 0;
++        }
++        if (!canonicalHost.equals(host) || !TextUtils.equals(path, basePath)
++                || !java.util.Arrays.equals(secretBytes, secret)) {
++            return 0;
++        }
++        return localPort;
++    }
++
 +    public void stop() {
 +        final ServerSocket toClose;
 +        synchronized (this) {
@@ -2322,6 +2536,7 @@ index 000000000..f09076d0c
 +            host = null;
 +            basePath = null;
 +            secret = null;
++            token = null;
 +        }
 +        if (toClose != null) {
 +            try {
@@ -2544,8 +2759,50 @@ index 000000000..f09076d0c
 +                socket.setTcpNoDelay(true);
 +            } catch (IOException ignore) {
 +            }
-+            mux.post(() -> registerStream(socket, bound));
++            // The token read blocks, so it runs off the accept loop: a local app that connects
++            // and then stalls must not hold up tgnet's own connections.
++            final Thread auth = new Thread(() -> authenticate(socket, bound), "WebProxyAuth");
++            auth.setDaemon(true);
++            auth.start();
 +        }
++    }
++
++    /**
++     * Reads the loopback token and hands the socket to the mux, or closes it. Without this
++     * any local app with INTERNET permission could use the relay at the user's expense.
++     */
++    private void authenticate(Socket socket, ServerSocket owner) {
++        final byte[] expected;
++        synchronized (this) {
++            expected = serverSocket == owner ? token : null;
++        }
++        if (expected == null) {
++            closeQuietly(socket);
++            return;
++        }
++        final byte[] received = new byte[TOKEN_LENGTH];
++        try {
++            socket.setSoTimeout(TOKEN_READ_TIMEOUT);
++            final InputStream input = socket.getInputStream();
++            int read = 0;
++            while (read < TOKEN_LENGTH) {
++                final int count = input.read(received, read, TOKEN_LENGTH - read);
++                if (count < 0) {
++                    closeQuietly(socket);
++                    return;
++                }
++                read += count;
++            }
++            socket.setSoTimeout(0);
++        } catch (IOException e) {
++            closeQuietly(socket);
++            return;
++        }
++        if (!MessageDigest.isEqual(expected, received)) {
++            closeQuietly(socket);
++            return;
++        }
++        mux.post(() -> registerStream(socket, owner));
 +    }
 +
 +    private void registerStream(Socket socket, ServerSocket owner) {
@@ -3099,7 +3356,7 @@ index e8ea5120e..3678770bf 100644
          }
  
 diff --git a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
-index f8383aefb..42d9a935d 100644
+index f8383aefb..dc8de5aa9 100644
 --- a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
 +++ b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
 @@ -43,6 +43,7 @@ import org.telegram.messenger.SharedConfig;
@@ -3110,7 +3367,7 @@ index f8383aefb..42d9a935d 100644
  import org.telegram.ui.Components.VideoPlayer;
  import org.telegram.ui.LoginActivity;
  
-@@ -633,8 +634,15 @@ public class ConnectionsManager extends BaseController {
+@@ -633,8 +634,16 @@ public class ConnectionsManager extends BaseController {
          String proxyPassword = preferences.getString("proxy_pass", "");
          String proxySecret = preferences.getString("proxy_secret", "");
          int proxyPort = preferences.getInt("proxy_port", 1080);
@@ -3122,11 +3379,12 @@ index f8383aefb..42d9a935d 100644
 +                proxyAddress = "127.0.0.1";
 +                proxyUsername = "";
 +                proxyPassword = "";
++                native_setWebProxyToken(WebProxyTransport.getInstance().getToken());
 +            }
              native_setProxySettings(currentAccount, proxyAddress, proxyPort, proxyUsername, proxyPassword, proxySecret);
          }
          String installer = "";
-@@ -940,6 +948,10 @@ public class ConnectionsManager extends BaseController {
+@@ -940,6 +949,10 @@ public class ConnectionsManager extends BaseController {
      }
  
      public static void setProxySettings(boolean enabled, String address, int port, String username, String password, String secret) {
@@ -3137,7 +3395,7 @@ index f8383aefb..42d9a935d 100644
          if (address == null) {
              address = "";
          }
-@@ -953,6 +965,22 @@ public class ConnectionsManager extends BaseController {
+@@ -953,6 +966,25 @@ public class ConnectionsManager extends BaseController {
              secret = "";
          }
  
@@ -3156,11 +3414,14 @@ index f8383aefb..42d9a935d 100644
 +        } else {
 +            WebProxyTransport.getInstance().stop();
 +        }
++        // Empty whenever no carrier runs, so tgnet writes a token to the loopback listener and
++        // to nothing else. Must precede the settings below, which start connecting at once.
++        native_setWebProxyToken(WebProxyTransport.getInstance().getToken());
 +
          for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
              if (enabled && !TextUtils.isEmpty(address)) {
                  native_setProxySettings(a, address, port, username, password, secret);
-@@ -990,6 +1018,28 @@ public class ConnectionsManager extends BaseController {
+@@ -990,6 +1022,28 @@ public class ConnectionsManager extends BaseController {
      public static native void native_setUserId(int currentAccount, long id);
      public static native void native_init(int currentAccount, int version, int layer, int apiId, String deviceModel, String systemVersion, String appVersion, String langCode, String systemLangCode, String configPath, String logPath, String regId, String cFingerprint, String installer, String packageId, int timezoneOffset, long userId, boolean userPremium, boolean enablePushConnection, boolean hasNetwork, int networkType, int performanceClass);
      public static native void native_setProxySettings(int currentAccount, String address, int port, String username, String password, String secret);
@@ -3189,6 +3450,14 @@ index f8383aefb..42d9a935d 100644
      public static native void native_setLangCode(int currentAccount, String langCode);
      public static native void native_setRegId(int currentAccount, String regId);
      public static native void native_setSystemLangCode(int currentAccount, String langCode);
+@@ -997,6 +1051,7 @@ public class ConnectionsManager extends BaseController {
+     public static native void native_setPushConnectionEnabled(int currentAccount, boolean value);
+     public static native void native_applyDnsConfig(int currentAccount, long address, String phone, int date);
+     public static native long native_checkProxy(int currentAccount, String address, int port, String username, String password, String secret, RequestTimeDelegate requestTimeDelegate);
++    public static native void native_setWebProxyToken(String token);
+     public static native void native_onHostNameResolved(String host, long address, String ip);
+     public static native void native_discardConnection(int currentAccount, int datacenterId, int connectionType);
+     public static native void native_failNotRunningRequest(int currentAccount, int token);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java b/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
 index ece0e3925..c10adb2aa 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
@@ -3740,10 +4009,18 @@ index 40634647b..39be8a85d 100644
              put(++pointer, chatRow, sparseIntArray);
              put(++pointer, filtersRow, sparseIntArray);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProxyListActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProxyListActivity.java
-index be4d12ccd..a2a77854a 100644
+index be4d12ccd..c8cd78ede 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ProxyListActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/ProxyListActivity.java
-@@ -175,7 +175,11 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+@@ -47,6 +47,7 @@ import org.telegram.messenger.NotificationCenter;
+ import org.telegram.messenger.ProxyRotationController;
+ import org.telegram.messenger.R;
+ import org.telegram.messenger.SharedConfig;
++import org.telegram.messenger.WebProxyTransport;
+ import org.telegram.tgnet.ConnectionsManager;
+ import org.telegram.ui.ActionBar.ActionBar;
+ import org.telegram.ui.ActionBar.ActionBarMenu;
+@@ -175,7 +176,11 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
          }
  
          public void setProxy(SharedConfig.ProxyInfo proxyInfo) {
@@ -3756,28 +4033,34 @@ index be4d12ccd..a2a77854a 100644
              currentInfo = proxyInfo;
          }
  
-@@ -197,7 +201,11 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+@@ -197,7 +202,12 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                      valueTextView.setText(getString(R.string.Connecting));
                  }
              } else {
 -                if (currentInfo.checking) {
 +                if (currentInfo.isWeb()) {
-+                    // Never probed in the background, so "unavailable" would be a false claim.
++                    // Only probed while active, through its own carrier, so an inactive entry
++                    // has no result and "unavailable" would be a false claim.
 +                    valueTextView.setText(getString(R.string.ProxyNotTested));
 +                    colorKey = Theme.key_windowBackgroundWhiteGrayText2;
 +                } else if (currentInfo.checking) {
                      valueTextView.setText(getString(R.string.Checking));
                      colorKey = Theme.key_windowBackgroundWhiteGrayText2;
                  } else if (currentInfo.available) {
-@@ -406,6 +414,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
-                             editor.putString("proxy_user", SharedConfig.currentProxy.username);
-                             editor.putInt("proxy_port", SharedConfig.currentProxy.port);
-                             editor.putString("proxy_secret", SharedConfig.currentProxy.secret);
-+                            editor.putInt("proxy_type", SharedConfig.currentProxy.type);
+@@ -401,11 +411,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+                         if (!useProxySettings) {
+                             SharedPreferences preferences = MessagesController.getGlobalMainSettings();
+                             SharedPreferences.Editor editor = MessagesController.getGlobalMainSettings().edit();
+-                            editor.putString("proxy_ip", SharedConfig.currentProxy.address);
+-                            editor.putString("proxy_pass", SharedConfig.currentProxy.password);
+-                            editor.putString("proxy_user", SharedConfig.currentProxy.username);
+-                            editor.putInt("proxy_port", SharedConfig.currentProxy.port);
+-                            editor.putString("proxy_secret", SharedConfig.currentProxy.secret);
++                            SharedConfig.currentProxy.writeToPrefs(editor);
                              editor.commit();
                          }
                      } else {
-@@ -433,7 +442,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+@@ -433,7 +439,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                  editor.putBoolean("proxy_enabled", useProxySettings);
                  editor.commit();
  
@@ -3786,7 +4069,20 @@ index be4d12ccd..a2a77854a 100644
                  NotificationCenter.getGlobalInstance().removeObserver(ProxyListActivity.this, NotificationCenter.proxySettingsChanged);
                  NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
                  NotificationCenter.getGlobalInstance().addObserver(ProxyListActivity.this, NotificationCenter.proxySettingsChanged);
-@@ -493,7 +502,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+@@ -467,11 +473,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+                 SharedConfig.ProxyInfo info = proxyList.get(position - proxyStartRow);
+                 useProxySettings = true;
+                 SharedPreferences.Editor editor = MessagesController.getGlobalMainSettings().edit();
+-                editor.putString("proxy_ip", info.address);
+-                editor.putString("proxy_pass", info.password);
+-                editor.putString("proxy_user", info.username);
+-                editor.putInt("proxy_port", info.port);
+-                editor.putString("proxy_secret", info.secret);
++                info.writeToPrefs(editor);
+                 editor.putBoolean("proxy_enabled", useProxySettings);
+                 if (!info.secret.isEmpty()) {
+                     useProxyForCalls = false;
+@@ -493,7 +495,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                      TextCheckCell textCheckCell = (TextCheckCell) holder.itemView;
                      textCheckCell.setChecked(true);
                  }
@@ -3795,19 +4091,29 @@ index be4d12ccd..a2a77854a 100644
              } else if (position == proxyAddRow) {
                  presentFragment(new ProxySettingsActivity());
              } else if (position == deleteAllRow) {
-@@ -722,7 +731,9 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
-     private void checkProxyList() {
-         for (int a = 0, count = proxyList.size(); a < count; a++) {
-             final SharedConfig.ProxyInfo proxyInfo = proxyList.get(a);
--            if (proxyInfo.checking || SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime < 2 * 60 * 1000) {
-+            // Probing a WEB entry would start the process-wide WebView carrier, so it is never
-+            // checked in the background and shows as untested until the user activates it.
-+            if (proxyInfo.isWeb() || proxyInfo.checking || SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime < 2 * 60 * 1000) {
+@@ -725,8 +727,19 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
+             if (proxyInfo.checking || SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime < 2 * 60 * 1000) {
                  continue;
              }
++            // A WEB entry is reached through the carrier's loopback listener, so it can only be
++            // probed while its own carrier runs — that is, while it is the active proxy.
++            // Starting a carrier for any other entry would drop the live connection.
++            final boolean web = proxyInfo.isWeb();
++            final int checkPort = web ? WebProxyTransport.getInstance().portFor(proxyInfo.address, proxyInfo.secret) : proxyInfo.port;
++            if (web && checkPort == 0) {
++                continue;
++            }
++            final String checkAddress = web ? "127.0.0.1" : proxyInfo.address;
++            final String checkUser = web ? "" : proxyInfo.username;
++            final String checkPassword = web ? "" : proxyInfo.password;
              proxyInfo.checking = true;
+-            proxyInfo.proxyCheckPingId = ConnectionsManager.getInstance(currentAccount).checkProxy(proxyInfo.address, proxyInfo.port, proxyInfo.username, proxyInfo.password, proxyInfo.secret, time -> AndroidUtilities.runOnUIThread(() -> {
++            proxyInfo.proxyCheckPingId = ConnectionsManager.getInstance(currentAccount).checkProxy(checkAddress, checkPort, checkUser, checkPassword, proxyInfo.secret, time -> AndroidUtilities.runOnUIThread(() -> {
+                 proxyInfo.availableCheckTime = SystemClock.elapsedRealtime();
+                 proxyInfo.checking = false;
+                 if (time == -1) {
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
-index 5e5e6934c..98a0fe3bf 100644
+index 5e5e6934c..613fe23d9 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
 @@ -51,6 +51,7 @@ import org.telegram.messenger.R;
@@ -3974,7 +4280,7 @@ index 5e5e6934c..98a0fe3bf 100644
                          currentProxyInfo.secret = "";
                          currentProxyInfo.username = inputFields[FIELD_USER].getText().toString();
                          currentProxyInfo.password = inputFields[FIELD_PASSWORD].getText().toString();
-@@ -222,6 +324,9 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -222,12 +324,17 @@ public class ProxySettingsActivity extends BaseFragment {
                          currentProxyInfo.username = "";
                          currentProxyInfo.password = "";
                      }
@@ -3984,12 +4290,26 @@ index 5e5e6934c..98a0fe3bf 100644
  
                      SharedPreferences preferences = MessagesController.getGlobalMainSettings();
                      SharedPreferences.Editor editor = preferences.edit();
-@@ -241,8 +346,38 @@ public class ProxySettingsActivity extends BaseFragment {
-                         editor.putString("proxy_user", currentProxyInfo.username);
-                         editor.putInt("proxy_port", currentProxyInfo.port);
-                         editor.putString("proxy_secret", currentProxyInfo.secret);
+                     boolean enabled;
+                     if (addingNewProxy) {
+-                        SharedConfig.addProxy(currentProxyInfo);
++                        // addProxy returns the existing entry when this one duplicates it, so the
++                        // active proxy always stays an object the list actually holds.
++                        currentProxyInfo = SharedConfig.addProxy(currentProxyInfo);
+                         SharedConfig.currentProxy = currentProxyInfo;
+                         editor.putBoolean("proxy_enabled", true);
+                         enabled = true;
+@@ -236,13 +343,38 @@ public class ProxySettingsActivity extends BaseFragment {
+                         SharedConfig.saveProxyList();
+                     }
+                     if (addingNewProxy || SharedConfig.currentProxy == currentProxyInfo) {
+-                        editor.putString("proxy_ip", currentProxyInfo.address);
+-                        editor.putString("proxy_pass", currentProxyInfo.password);
+-                        editor.putString("proxy_user", currentProxyInfo.username);
+-                        editor.putInt("proxy_port", currentProxyInfo.port);
+-                        editor.putString("proxy_secret", currentProxyInfo.secret);
 -                        ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret);
-+                        editor.putInt("proxy_type", currentProxyInfo.type);
++                        currentProxyInfo.writeToPrefs(editor);
 +                        ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret, currentProxyInfo.type);
 +                    }
 +                    // Save and apply TLS fingerprint profile
@@ -4024,7 +4344,7 @@ index 5e5e6934c..98a0fe3bf 100644
                      editor.commit();
  
                      NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
-@@ -272,14 +407,16 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -272,14 +404,16 @@ public class ProxySettingsActivity extends BaseFragment {
  
          final View.OnClickListener typeCellClickListener = view -> setProxyType((Integer) view.getTag(), true);
  
@@ -4044,7 +4364,7 @@ index 5e5e6934c..98a0fe3bf 100644
              }
              linearLayout2.addView(typeCell[a], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 50));
              typeCell[a].setOnClickListener(typeCellClickListener);
-@@ -389,6 +526,26 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -389,6 +523,26 @@ public class ProxySettingsActivity extends BaseFragment {
                  inputFields[a].setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
                  inputFields[a].setTypeface(Typeface.DEFAULT);
                  inputFields[a].setTransformationMethod(PasswordTransformationMethod.getInstance());
@@ -4071,7 +4391,7 @@ index 5e5e6934c..98a0fe3bf 100644
              } else {
                  inputFields[a].setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
              }
-@@ -448,6 +605,256 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -448,6 +602,256 @@ public class ProxySettingsActivity extends BaseFragment {
              linearLayout2.addView(bottomCells[i], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
          }
  
@@ -4328,7 +4648,7 @@ index 5e5e6934c..98a0fe3bf 100644
          pasteCell = new TextSettingsCell(fragmentView.getContext());
          pasteCell.setBackground(Theme.getSelectorDrawable(true));
          pasteCell.setText(LocaleController.getString(R.string.PasteFromClipboard), false);
-@@ -458,7 +865,7 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -458,7 +862,7 @@ public class ProxySettingsActivity extends BaseFragment {
                      if (pasteType == TYPE_SOCKS5 && i == FIELD_SECRET) {
                          continue;
                      }
@@ -4337,7 +4657,7 @@ index 5e5e6934c..98a0fe3bf 100644
                          continue;
                      }
                      if (pasteFields[i] != null) {
-@@ -478,7 +885,7 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -478,7 +882,7 @@ public class ProxySettingsActivity extends BaseFragment {
                          if (pasteType == TYPE_SOCKS5 && i != FIELD_SECRET) {
                              continue;
                          }
@@ -4346,7 +4666,7 @@ index 5e5e6934c..98a0fe3bf 100644
                              continue;
                          }
                          inputFields[i].setText(null);
-@@ -507,6 +914,19 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -507,6 +911,19 @@ public class ProxySettingsActivity extends BaseFragment {
              String secret = inputFields[FIELD_SECRET].getText().toString();
              String url;
              try {
@@ -4366,7 +4686,7 @@ index 5e5e6934c..98a0fe3bf 100644
                  if (!TextUtils.isEmpty(address)) {
                      params.append("server=").append(URLEncoder.encode(address, "UTF-8"));
                  }
-@@ -537,6 +957,7 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -537,6 +954,7 @@ public class ProxySettingsActivity extends BaseFragment {
                          params.append("pass=").append(URLEncoder.encode(password, "UTF-8"));
                      }
                  }
@@ -4374,7 +4694,7 @@ index 5e5e6934c..98a0fe3bf 100644
              } catch (Exception ignore) {
                  return;
              }
-@@ -561,7 +982,7 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -561,7 +979,7 @@ public class ProxySettingsActivity extends BaseFragment {
          checkShareDone(false);
  
          currentType = -1;
@@ -4383,7 +4703,7 @@ index 5e5e6934c..98a0fe3bf 100644
  
          pasteType = -1;
          pasteString = null;
-@@ -570,6 +991,33 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -570,6 +988,33 @@ public class ProxySettingsActivity extends BaseFragment {
          return fragmentView;
      }
  
@@ -4417,7 +4737,7 @@ index 5e5e6934c..98a0fe3bf 100644
      private void updatePasteCell() {
          final ClipData clip = clipboardManager.getPrimaryClip();
  
-@@ -604,6 +1052,18 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -604,6 +1049,18 @@ public class ProxySettingsActivity extends BaseFragment {
                  }
              }
  
@@ -4436,7 +4756,7 @@ index 5e5e6934c..98a0fe3bf 100644
              if (params == null) {
                  final String[] proxyStrings = {"t.me/proxy?", "tg://proxy?"};
                  for (int i = 0; i < proxyStrings.length; i++) {
-@@ -625,7 +1085,9 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -625,7 +1082,9 @@ public class ProxySettingsActivity extends BaseFragment {
                              pasteFields[FIELD_IP] = pair[1];
                              break;
                          case "port":
@@ -4447,7 +4767,7 @@ index 5e5e6934c..98a0fe3bf 100644
                              break;
                          case "user":
                              if (pasteType == TYPE_SOCKS5) {
-@@ -638,12 +1100,15 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -638,12 +1097,15 @@ public class ProxySettingsActivity extends BaseFragment {
                              }
                              break;
                          case "secret":
@@ -4464,7 +4784,7 @@ index 5e5e6934c..98a0fe3bf 100644
              }
          }
  
-@@ -692,6 +1157,12 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -692,6 +1154,12 @@ public class ProxySettingsActivity extends BaseFragment {
          if (shareCell == null || doneItem == null || inputFields[FIELD_IP] == null || inputFields[FIELD_PORT] == null) {
              return;
          }
@@ -4477,7 +4797,7 @@ index 5e5e6934c..98a0fe3bf 100644
          setShareDoneEnabled(inputFields[FIELD_IP].length() != 0 && Utilities.parseInt(inputFields[FIELD_PORT].getText().toString()) != 0, animated);
      }
  
-@@ -740,21 +1211,44 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -740,21 +1208,44 @@ public class ProxySettingsActivity extends BaseFragment {
  
                  TransitionManager.beginDelayedTransition(linearLayout2, transitionSet);
              }
