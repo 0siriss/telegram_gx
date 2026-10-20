@@ -1,296 +1,10 @@
-diff --git a/.github/workflows/auto-update.yml b/.github/workflows/auto-update.yml
-new file mode 100644
-index 000000000..d8770992b
---- /dev/null
-+++ b/.github/workflows/auto-update.yml
-@@ -0,0 +1,137 @@
-+name: Auto-update from upstream
-+
-+on:
-+  schedule:
-+    - cron: '0 6 * * 1'  # Каждый понедельник в 06:00 UTC
-+  workflow_dispatch:      # Ручной запуск
-+
-+jobs:
-+  check-and-update:
-+    runs-on: ubuntu-latest
-+
-+    steps:
-+      - name: Checkout
-+        uses: actions/checkout@v4
-+        with:
-+          fetch-depth: 0
-+          token: ${{ secrets.GITHUB_TOKEN }}
-+
-+      - name: Fetch upstream
-+        run: |
-+          git remote add upstream https://github.com/DrKLO/Telegram.git
-+          git fetch upstream master --depth=1
-+
-+      - name: Check upstream version
-+        id: version
-+        run: |
-+          # Версия хранится в APP_VERSION_NAME в корневом gradle.properties, а не в
-+          # TMessagesProj/build.gradle (там его нет вообще — старая проверка сравнивала
-+          # две пустые строки и поэтому НИКОГДА не обнаруживала обновление).
-+          UPSTREAM=$(git show upstream/master:gradle.properties \
-+            | grep '^APP_VERSION_NAME=' | head -1 | cut -d= -f2-)
-+          CURRENT=$(grep '^APP_VERSION_NAME=' gradle.properties \
-+            | head -1 | cut -d= -f2-)
-+          echo "upstream=$UPSTREAM" >> $GITHUB_OUTPUT
-+          echo "current=$CURRENT"   >> $GITHUB_OUTPUT
-+          echo "Upstream: $UPSTREAM | Current: $CURRENT"
-+          if [ "$UPSTREAM" != "$CURRENT" ]; then
-+            echo "changed=true" >> $GITHUB_OUTPUT
-+          else
-+            echo "changed=false" >> $GITHUB_OUTPUT
-+          fi
-+
-+      - name: No update needed
-+        if: steps.version.outputs.changed == 'false'
-+        run: echo "Already up to date (${{ steps.version.outputs.current }}). Skipping."
-+
-+      - name: Apply patches on new upstream
-+        if: steps.version.outputs.changed == 'true'
-+        id: apply
-+        run: |
-+          git config user.email "github-actions@github.com"
-+          git config user.name "GitHub Actions"
-+
-+          # Запоминаем текущий форк-коммит: upstream/master его не содержит,
-+          # а .github/workflows, patches/ и CLAUDE.md не существуют в апстриме вовсе —
-+          # reset --hard их удалит, поэтому восстанавливаем их отдельно ниже.
-+          PREV=$(git rev-parse HEAD)
-+          echo "prev=$PREV" >> $GITHUB_OUTPUT
-+
-+          # upstream/master был получен с --depth=1 (shallow) для дешёвой проверки версии.
-+          # Пуш shallow-коммита ломается на приёмной стороне ("did not receive expected
-+          # object" / index-pack failed), т.к. у него нет полной цепочки родителей —
-+          # донабираем полную историю перед тем, как на него переключаться.
-+          git fetch upstream master --unshallow
-+
-+          # Сброс на чистый upstream
-+          git reset --hard upstream/master
-+
-+          # Возвращаем CI-инфраструктуру, набор патчей и заметки для Claude (их нет в апстриме,
-+          # поэтому конфликтовать с новым upstream-кодом им нечем)
-+          git checkout "$PREV" -- .github/workflows patches
-+          # CLAUDE.md появился позже — не валим апдейт, если его нет в прошлом коммите
-+          git checkout "$PREV" -- CLAUDE.md 2>/dev/null || true
-+
-+          # Применяем единый патч со всеми доработками форка
-+          # (TLS DPI bypass, ECH picker, updater, anti-recall и т.д.)
-+          FAILED=""
-+          if ! git apply --3way patches/fork-changes.patch; then
-+            FAILED="patches/fork-changes.patch"
-+          fi
-+
-+          if [ -n "$FAILED" ]; then
-+            echo "patch_failed=true"  >> $GITHUB_OUTPUT
-+            echo "failed_files=$FAILED" >> $GITHUB_OUTPUT
-+          else
-+            echo "patch_failed=false" >> $GITHUB_OUTPUT
-+          fi
-+
-+      - name: Notify patch failure via Telegram
-+        if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'true'
-+        run: |
-+          TEXT="❌ *Auto-update failed*%0A%0AНовая версия DrKLO: *${{ steps.version.outputs.upstream }}*%0AПатчи не применились автоматически — нужен ручной merge.%0A%0AФайлы:%0A${{ steps.apply.outputs.failed_files }}"
-+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-+            -d "text=$TEXT" \
-+            -d "parse_mode=Markdown"
-+          exit 1
-+
-+      - name: Commit, tag and push
-+        if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'false'
-+        id: push
-+        run: |
-+          git config user.email "github-actions@github.com"
-+          git config user.name "GitHub Actions"
-+
-+          # Добавляем всё: patch может создавать новые файлы (updater, anti-recall и т.д.),
-+          # а не только модифицировать уже существующие
-+          git add -A
-+
-+          git commit -m "Auto-update to DrKLO ${{ steps.version.outputs.upstream }} with fork patches"
-+
-+          # Определяем новый тег
-+          LATEST_TAG=$(git tag --sort=-v:refname | grep '^v' | head -1)
-+          MAJOR=$(echo "$LATEST_TAG" | grep -oP '\d+' | head -1)
-+          MINOR=$(echo "$LATEST_TAG" | grep -oP '\d+' | tail -1)
-+          NEW_TAG="v$MAJOR.$((MINOR + 1))"
-+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
-+
-+          git tag "$NEW_TAG"
-+          git push origin master --force
-+          git push origin "$NEW_TAG"
-+
-+      - name: Trigger build workflow
-+        if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'false'
-+        run: |
-+          gh workflow run build.yml --ref ${{ steps.push.outputs.new_tag }}
-+        env:
-+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-+
-+      - name: Notify update started via Telegram
-+        if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'false'
-+        run: |
-+          TEXT="🔄 *Auto-update started*%0A%0AНовая версия DrKLO: *${{ steps.version.outputs.upstream }}*%0AТег: *${{ steps.push.outputs.new_tag }}*%0A%0AПатчи применены ✅ Сборка запущена..."
-+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-+            -d "text=$TEXT" \
-+            -d "parse_mode=Markdown"
-diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
-new file mode 100644
-index 000000000..38a5174be
---- /dev/null
-+++ b/.github/workflows/build.yml
-@@ -0,0 +1,137 @@
-+name: Build Release APK
-+
-+on:
-+  push:
-+    tags:
-+      - 'v*'
-+
-+jobs:
-+  build:
-+    runs-on: ubuntu-latest
-+    permissions:
-+      contents: write
-+
-+    steps:
-+      - name: Notify build started via Telegram
-+        run: |
-+          TAG="${GITHUB_REF#refs/tags/}"
-+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-+            -d "text=🔨 <b>Сборка начата</b> — ${TAG}%0A%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-+            -d "parse_mode=HTML"
-+
-+      - name: Free disk space
-+        run: |
-+          sudo rm -rf /usr/share/dotnet
-+          sudo rm -rf /opt/ghc
-+          sudo rm -rf /usr/local/.ghcup
-+          sudo rm -rf /usr/local/share/boost
-+          sudo rm -rf /usr/share/swift
-+          sudo rm -rf /opt/hostedtoolcache/CodeQL
-+          sudo rm -rf /opt/hostedtoolcache/Ruby
-+          sudo rm -rf /opt/hostedtoolcache/PyPy
-+          sudo docker image prune -af || true
-+          df -h
-+
-+      - name: Checkout code
-+        uses: actions/checkout@v4
-+
-+      - name: Set up JDK 17
-+        uses: actions/setup-java@v4
-+        with:
-+          java-version: '17'
-+          distribution: 'temurin'
-+
-+      - name: Install NDK and build tools
-+        run: |
-+          echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
-+            "ndk;23.2.8568313" \
-+            "cmake;3.22.1" \
-+            "build-tools;36.0.0" \
-+            "platforms;android-36"
-+
-+      - name: Cache Gradle
-+        uses: actions/cache@v4
-+        with:
-+          path: |
-+            ~/.gradle/caches
-+            ~/.gradle/wrapper
-+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-+          restore-keys: gradle-
-+
-+      - name: Cache NDK build
-+        uses: actions/cache@v4
-+        with:
-+          path: |
-+            TMessagesProj/.cxx
-+            TMessagesProj/build/intermediates/cmake
-+          key: ndk-${{ hashFiles('TMessagesProj/jni/**') }}
-+          restore-keys: ndk-
-+
-+      - name: Create local.properties
-+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-+
-+      - name: Build Release APK
-+        run: ./gradlew :TMessagesProj_App:assembleRelease --no-daemon
-+        env:
-+          GRADLE_OPTS: "-Xmx6g -XX:MaxMetaspaceSize=512m"
-+          FORK_VERSION_TAG: ${{ github.ref_name }}
-+
-+      - name: Get tag name
-+        id: tag
-+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-+
-+      - name: Create GitHub Release
-+        id: release
-+        uses: softprops/action-gh-release@v2
-+        with:
-+          tag_name: ${{ steps.tag.outputs.tag }}
-+          name: "GramBas ${{ steps.tag.outputs.tag }}"
-+          body: |
-+            ## GramBas — ${{ steps.tag.outputs.tag }}
-+
-+            Telegram Android fork with TLS DPI bypass patches.
-+
-+            ### Что включено:
-+            - TLS ECH fix (0xfe0d)
-+            - Fingerprint profiles: Chrome 120+, Firefox 121+, Safari 17, Edge 120+, Random
-+            - TLS ClientHello fragmentation
-+            - Configurable rotation interval (30–240s)
-+            - Anti-recall: сообщения, удалённые отправителем, сохраняются локально и помечаются "удалено отправителем" (настраивается глобально и отдельно для каждого чата)
-+          files: |
-+            TMessagesProj_App/build/outputs/apk/afat/release/app.apk
-+          draft: false
-+          prerelease: false
-+        env:
-+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-+
-+      - name: Send APK via Telegram
-+        run: |
-+          APK_PATH="TMessagesProj_App/build/outputs/apk/afat/release/app.apk"
-+          APK_SIZE=$(stat -c%s "$APK_PATH" 2>/dev/null || echo 0)
-+          MAX_SIZE=$((50 * 1024 * 1024))  # 50 MB
-+
-+          if [ "$APK_SIZE" -le "$MAX_SIZE" ]; then
-+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
-+              -F "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-+              -F "document=@$APK_PATH" \
-+              -F "caption=✅ <b>GramBas ${{ steps.tag.outputs.tag }}</b> готов!%0A%0A• TLS ECH 0xfe0d%0A• Fingerprint: Chrome/Firefox/Safari/Edge/Random%0A• Фрагментация ClientHello" \
-+              -F "parse_mode=HTML"
-+          else
-+            RELEASE_URL="${{ steps.release.outputs.url }}"
-+            SIZE_MB=$(echo "scale=1; $APK_SIZE / 1048576" | bc)
-+            TEXT="✅ <b>GramBas ${{ steps.tag.outputs.tag }}</b> готов!%0A%0AAPK слишком большой для прямой отправки (${SIZE_MB} МБ).%0A%0A📥 <a href=\"$RELEASE_URL\">Скачать с GitHub Release</a>"
-+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-+              -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-+              -d "text=$TEXT" \
-+              -d "parse_mode=HTML"
-+          fi
-+
-+      - name: Notify build failure via Telegram
-+        if: failure()
-+        run: |
-+          TEXT="❌ <b>Сборка упала</b> — ${{ steps.tag.outputs.tag }}%0A%0AПосмотри логи:%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-+            -d "text=$TEXT" \
-+            -d "parse_mode=HTML"
 diff --git a/TMessagesProj/build.gradle b/TMessagesProj/build.gradle
-index 61a653057..aea0a38a3 100644
+index 70c567de..7aa7dc2b 100644
 --- a/TMessagesProj/build.gradle
 +++ b/TMessagesProj/build.gradle
-@@ -2,6 +2,23 @@ import org.gradle.nativeplatform.platform.internal.DefaultNativePlatform
- 
- apply plugin: 'com.android.library'
+@@ -27,6 +27,23 @@ idea {
+     }
+ }
  
 +def getForkVersionTag() {
 +    def envTag = System.getenv("FORK_VERSION_TAG")
@@ -312,56 +26,62 @@ index 61a653057..aea0a38a3 100644
  repositories {
      mavenCentral()
      google()
-@@ -134,6 +151,7 @@ android {
-             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
+@@ -158,6 +175,8 @@ android {
+             multiDexEnabled true
              ndk.debugSymbolLevel = 'FULL'
              buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
 +            buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
-             buildConfigField "String", "APP_CENTER_HASH", "\"\""
++            buildConfigField "String", "APP_CENTER_HASH", "\"\""
              buildConfigField "String", "BETA_URL", "\"" + getProps("BETA_PRIVATE_URL") + "\""
              buildConfigField "boolean", "DEBUG_VERSION", "true"
-@@ -150,6 +168,7 @@ android {
-             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
+             buildConfigField "boolean", "DEBUG_PRIVATE_VERSION", "true"
+@@ -171,6 +190,8 @@ android {
+             multiDexEnabled true
              ndk.debugSymbolLevel = 'FULL'
              buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
 +            buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
-             buildConfigField "String", "APP_CENTER_HASH", "\"" + getProps("APP_CENTER_HASH_PRIVATE") + "\""
++            buildConfigField "String", "APP_CENTER_HASH", "\"" + getProps("APP_CENTER_HASH_PRIVATE") + "\""
              buildConfigField "String", "BETA_URL", "\"" + getProps("BETA_PRIVATE_URL") + "\""
              buildConfigField "boolean", "DEBUG_VERSION", "true"
-@@ -166,6 +185,7 @@ android {
-             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
+             buildConfigField "boolean", "DEBUG_PRIVATE_VERSION", "true"
+@@ -184,6 +205,8 @@ android {
+             multiDexEnabled true
              ndk.debugSymbolLevel = 'FULL'
              buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
 +            buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
-             buildConfigField "String", "APP_CENTER_HASH", "\"" + getProps("APP_CENTER_HASH_PUBLIC") + "\""
++            buildConfigField "String", "APP_CENTER_HASH", "\"" + getProps("APP_CENTER_HASH_PUBLIC") + "\""
              buildConfigField "String", "BETA_URL", "\"" + getProps("BETA_PUBLIC_URL") + "\""
              buildConfigField "boolean", "DEBUG_VERSION", "true"
-@@ -182,6 +202,7 @@ android {
-             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
+             buildConfigField "boolean", "DEBUG_PRIVATE_VERSION", "false"
+@@ -197,6 +220,8 @@ android {
+             multiDexEnabled true
              ndk.debugSymbolLevel = 'FULL'
              buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
 +            buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
-             buildConfigField "String", "APP_CENTER_HASH", "\"" + getProps("APP_CENTER_HASH_HARDCORE") + "\""
++            buildConfigField "String", "APP_CENTER_HASH", "\"" + getProps("APP_CENTER_HASH_HARDCORE") + "\""
              buildConfigField "String", "BETA_URL", "\"" + getProps("BETA_HARDCORE_URL") + "\""
              buildConfigField "boolean", "DEBUG_VERSION", "true"
-@@ -198,6 +219,7 @@ android {
-             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro'
+             buildConfigField "boolean", "DEBUG_PRIVATE_VERSION", "true"
+@@ -210,6 +235,8 @@ android {
+             multiDexEnabled true
              ndk.debugSymbolLevel = 'FULL'
              buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
 +            buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
-             buildConfigField "String", "APP_CENTER_HASH", "\"\""
++            buildConfigField "String", "APP_CENTER_HASH", "\"\""
              buildConfigField "String", "BETA_URL", "\"\""
              buildConfigField "boolean", "DEBUG_VERSION", "false"
-@@ -215,6 +237,7 @@ android {
-             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro'
+             buildConfigField "boolean", "DEBUG_PRIVATE_VERSION", "false"
+@@ -223,6 +250,8 @@ android {
+             multiDexEnabled true
              ndk.debugSymbolLevel = 'FULL'
              buildConfigField "String", "BUILD_VERSION_STRING", "\"" + APP_VERSION_NAME + "\""
 +            buildConfigField "String", "FORK_VERSION_TAG", "\"" + getForkVersionTag() + "\""
-             buildConfigField "String", "APP_CENTER_HASH", "\"\""
++            buildConfigField "String", "APP_CENTER_HASH", "\"\""
              buildConfigField "String", "BETA_URL", "\"\""
              buildConfigField "boolean", "DEBUG_VERSION", "false"
+             buildConfigField "boolean", "DEBUG_PRIVATE_VERSION", "false"
 diff --git a/TMessagesProj/jni/TgNetWrapper.cpp b/TMessagesProj/jni/TgNetWrapper.cpp
-index 0f8bc556d..1101d8040 100644
+index e8ba9f4f..8797da67 100644
 --- a/TMessagesProj/jni/TgNetWrapper.cpp
 +++ b/TMessagesProj/jni/TgNetWrapper.cpp
 @@ -12,6 +12,21 @@
@@ -386,7 +106,7 @@ index 0f8bc556d..1101d8040 100644
  
  JavaVM *java;
  
-@@ -223,6 +238,30 @@ void applyDatacenterAddress(JNIEnv *env, jclass c, jint instanceNum, jint datace
+@@ -224,6 +239,30 @@ void applyDatacenterAddress(JNIEnv *env, jclass c, jint instanceNum, jint datace
      }
  }
  
@@ -417,7 +137,7 @@ index 0f8bc556d..1101d8040 100644
  void setProxySettings(JNIEnv *env, jclass c, jint instanceNum, jstring address, jint port, jstring username, jstring password, jstring secret) {
      const char *addressStr = env->GetStringUTFChars(address, 0);
      const char *usernameStr = env->GetStringUTFChars(username, 0);
-@@ -537,6 +576,10 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
+@@ -538,6 +577,10 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
          {"native_bindRequestToGuid", "(III)V", (void *) bindRequestToGuid},
          {"native_applyDatacenterAddress", "(IILjava/lang/String;I)V", (void *) applyDatacenterAddress},
          {"native_setProxySettings", "(ILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void *) setProxySettings},
@@ -429,7 +149,7 @@ index 0f8bc556d..1101d8040 100644
          {"native_setUserId", "(IJ)V", (void *) setUserId},
          {"native_init", "(IIIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IJZZZII)V", (void *) init},
 diff --git a/TMessagesProj/jni/tgnet/Connection.cpp b/TMessagesProj/jni/tgnet/Connection.cpp
-index 3ce0c222d..40dfb3d15 100644
+index 3ce0c222..40dfb3d1 100644
 --- a/TMessagesProj/jni/tgnet/Connection.cpp
 +++ b/TMessagesProj/jni/tgnet/Connection.cpp
 @@ -744,6 +744,10 @@ bool Connection::hasPendingRequests() {
@@ -444,7 +164,7 @@ index 3ce0c222d..40dfb3d15 100644
      return currentDatacenter;
  }
 diff --git a/TMessagesProj/jni/tgnet/Connection.h b/TMessagesProj/jni/tgnet/Connection.h
-index 81e4d5edc..8dce10b33 100644
+index 81e4d5ed..8dce10b3 100644
 --- a/TMessagesProj/jni/tgnet/Connection.h
 +++ b/TMessagesProj/jni/tgnet/Connection.h
 @@ -49,6 +49,7 @@ protected:
@@ -456,19 +176,19 @@ index 81e4d5edc..8dce10b33 100644
  
  private:
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
-index 4605c2fc5..41accaa34 100644
+index 3fa7ba69..5fc948a2 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.cpp
-@@ -31,6 +31,8 @@
- #include "BuffersStorage.h"
+@@ -32,6 +32,8 @@
  #include "Connection.h"
+ #include "TLSHello.h"
  #include <random>
 +#include <atomic>
 +#include <chrono>
  
  #ifndef EPOLLRDHUP
  #define EPOLLRDHUP 0x2000
-@@ -38,6 +40,21 @@
+@@ -39,11 +41,27 @@
  
  #define MAX_GREASE 8
  
@@ -487,369 +207,8 @@ index 4605c2fc5..41accaa34 100644
 +extern std::atomic<int>  gDpiTimingMode;       // 0=Off,1=Gentle,2=Balanced
 +extern std::atomic<int>  gDpiStartupCoverMode; // 0=Off,1=Soft,2=Strict
 +
- static BIGNUM *get_y2(BIGNUM *x, const BIGNUM *mod, BN_CTX *big_num_context) {
-     // returns y^2 = x^3 + 486662 * x^2 + x
-     BIGNUM *y = BN_dup(x);
-@@ -163,7 +180,7 @@ public:
- 
-     struct Op {
-         enum class Type {
--            String, Random, K, M, P, E, Zero, Domain, Grease, BeginScope, EndScope, Permutation
-+            String, Random, K, M, P, E, Zero, Domain, Grease, BeginScope, EndScope, Permutation, EchId
-         };
-         Type type;
-         size_t length;
-@@ -249,6 +266,12 @@ public:
-             return res;
-         }
- 
-+        static Op echId() {
-+            Op res;
-+            res.type = Type::EchId;
-+            return res;
-+        }
-+
-     };
- 
-     static const TlsHello &getDefault() {
-@@ -311,12 +334,13 @@ public:
-                         },
-                         { Op::string("\x44\xcd\x00\x05\x00\x03\x02\x68\x32", 9) },
-                         {
--                            Op::string("\xfe\x0d", 2),
-+                            Op::echId(),
-                             Op::begin_scope(),
--                            Op::string("\x00\x00\x01\x00\x01", 5),
-+                            Op::string("\x00\x01\x00\x01", 4),
-                             Op::random(1),
--                            Op::string("\x00\x20", 2),
--                            Op::random(32),
-+                            Op::begin_scope(),
-+                            Op::K(),
-+                            Op::end_scope(),
-                             Op::begin_scope(),
-                             Op::E(),
-                             Op::end_scope(),
-@@ -336,6 +360,284 @@ public:
-         return result;
-     }
- 
-+    // Firefox 121+ profile: CHACHA20 before AES-256, no ML-KEM, no compress_certificate, no SCT
-+    static const TlsHello &getFirefox() {
-+        static TlsHello result = [] {
-+            TlsHello res;
-+            res.ops = {
-+                    Op::string("\x16\x03\x01", 3),
-+                    Op::begin_scope(),
-+                    Op::string("\x01\x00", 2),
-+                    Op::begin_scope(),
-+                    Op::string("\x03\x03", 2),
-+                    Op::zero(32),
-+                    Op::string("\x20", 1),
-+                    Op::random(32),
-+                    // Firefox cipher order: AES-128, CHACHA20, AES-256, then legacy
-+                    Op::string("\x00\x1e", 2),
-+                    Op::string("\x13\x01\x13\x03\x13\x02\xc0\x2b\xc0\x2f\xcc\xa9\xcc\xa8\xc0\x2c\xc0\x30\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x01\x00", 30),
-+                    Op::begin_scope(),
-+                    Op::string("\x00\x00", 2),
-+                    Op::permutation({
-+                        {
-+                            Op::string("\x00\x00", 2),
-+                            Op::begin_scope(),
-+                            Op::begin_scope(),
-+                            Op::string("\x00", 1),
-+                            Op::begin_scope(),
-+                            Op::domain(),
-+                            Op::end_scope(),
-+                            Op::end_scope(),
-+                            Op::end_scope()
-+                        },
-+                        { Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9) },
-+                        // supported_groups without ML-KEM (0x11ec)
-+                        {
-+                            Op::string("\x00\x0a\x00\x0a\x00\x08", 6),
-+                            Op::string("\x00\x1d\x00\x17\x00\x18\x00\x19", 8)
-+                        },
-+                        { Op::string("\x00\x0b\x00\x02\x01\x00", 6) },
-+                        // Firefox sig algs: includes rsa_pkcs1_sha1 (\x02\x01) and rsa_pkcs1_sha256 (\x04\x01)
-+                        { Op::string("\x00\x0d\x00\x14\x00\x12\x04\x03\x08\x04\x04\x01\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01", 24) },
-+                        { Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31", 18) },
-+                        { Op::string("\x00\x17\x00\x00", 4) },
-+                        { Op::string("\x00\x23\x00\x00", 4) },
-+                        {
-+                            Op::string("\x00\x2b\x00\x05\x04", 5),
-+                            Op::string("\x03\x04\x03\x03", 4)
-+                        },
-+                        { Op::string("\x00\x2d\x00\x02\x01\x01", 6) },
-+                        // key_share: X25519 only (no ML-KEM)
-+                        {
-+                            Op::string("\x00\x33\x00\x26\x00\x24", 6),
-+                            Op::string("\x00\x1d\x00\x20", 4),
-+                            Op::K(),
-+                        },
-+                        {
-+                            Op::echId(),
-+                            Op::begin_scope(),
-+                            Op::string("\x00\x01\x00\x01", 4),
-+                            Op::random(1),
-+                            Op::begin_scope(),
-+                            Op::K(),
-+                            Op::end_scope(),
-+                            Op::begin_scope(),
-+                            Op::E(),
-+                            Op::end_scope(),
-+                            Op::end_scope()
-+                        },
-+                        { Op::string("\xff\x01\x00\x01\x00", 5) }
-+                    }),
-+                    Op::string("\x00\x01\x00", 3),
-+                    Op::P(),
-+                    Op::end_scope(),
-+                    Op::end_scope(),
-+                    Op::end_scope()
-+            };
-+            return res;
-+        }();
-+        return result;
-+    }
-+
-+    // Safari 17 — no GREASE ciphers, different groups (incl. secp521r1), fixed extension order
-+    static const TlsHello &getSafari() {
-+        static TlsHello result = [] {
-+            TlsHello res;
-+            res.ops = {
-+                    Op::string("\x16\x03\x01", 3),
-+                    Op::begin_scope(),
-+                    Op::string("\x01\x00", 2),
-+                    Op::begin_scope(),
-+                    Op::string("\x03\x03", 2),
-+                    Op::zero(32),
-+                    Op::string("\x20", 1),
-+                    Op::random(32),
-+                    // Safari cipher suites: 17 ciphers × 2 = 34 bytes, no GREASE
-+                    Op::string("\x00\x22", 2),
-+                    Op::string("\x13\x01\x13\x02\x13\x03\xc0\x2c\xc0\x2b\xc0\x30\xc0\x2f"
-+                               "\xcc\xa9\xcc\xa8\xc0\x0a\xc0\x09\xc0\x14\xc0\x13"
-+                               "\x00\x9d\x00\x9c\x00\x35\x00\x2f", 34),
-+                    Op::begin_scope(), // extensions total length
-+                    // renegotiation_info (ff01)
-+                    Op::string("\xff\x01\x00\x01\x00", 5),
-+                    // server_name (0000)
-+                    Op::string("\x00\x00", 2),
-+                    Op::begin_scope(),
-+                    Op::begin_scope(),
-+                    Op::string("\x00", 1),
-+                    Op::begin_scope(),
-+                    Op::domain(),
-+                    Op::end_scope(),
-+                    Op::end_scope(),
-+                    Op::end_scope(),
-+                    // extended_master_secret (0017)
-+                    Op::string("\x00\x17\x00\x00", 4),
-+                    // session_ticket (0023)
-+                    Op::string("\x00\x23\x00\x00", 4),
-+                    // ALPN (0010): h2, http/1.1
-+                    Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31", 18),
-+                    // status_request (0005)
-+                    Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9),
-+                    // supported_groups (000a): X25519, secp256r1, secp384r1, secp521r1 — no GREASE, no ML-KEM
-+                    Op::string("\x00\x0a\x00\x0a\x00\x08\x00\x1d\x00\x17\x00\x18\x00\x19", 14),
-+                    // ec_point_formats (000b)
-+                    Op::string("\x00\x0b\x00\x02\x01\x00", 6),
-+                    // signature_algorithms (000d) — Safari includes rsa_pkcs1_sha1
-+                    Op::string("\x00\x0d\x00\x14\x00\x12\x04\x03\x08\x04\x04\x01\x05\x03"
-+                               "\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01", 24),
-+                    // supported_versions (002b): TLS 1.3 + TLS 1.2, no GREASE
-+                    Op::string("\x00\x2b\x00\x05\x04\x03\x04\x03\x03", 9),
-+                    // psk_key_exchange_modes (002d)
-+                    Op::string("\x00\x2d\x00\x02\x01\x01", 6),
-+                    // key_share (0033): X25519 only, no ML-KEM
-+                    Op::string("\x00\x33\x00\x26\x00\x24\x00\x1d\x00\x20", 10),
-+                    Op::K(),
-+                    // compress_certificate (001b)
-+                    Op::string("\x00\x1b\x00\x03\x02\x00\x02", 7),
-+                    // ECH extension (configurable, default fe0d)
-+                    Op::echId(),
-+                    Op::begin_scope(),
-+                    Op::string("\x00\x01\x00\x01", 4),
-+                    Op::random(1),
-+                    Op::begin_scope(),
-+                    Op::K(),
-+                    Op::end_scope(),
-+                    Op::begin_scope(),
-+                    Op::E(),
-+                    Op::end_scope(),
-+                    Op::end_scope(),
-+                    Op::P(),
-+                    Op::end_scope(), // extensions
-+                    Op::end_scope(), // ClientHello body
-+                    Op::end_scope()  // TLS record
-+            };
-+            return res;
-+        }();
-+        return result;
-+    }
-+
-+    // Edge 120+ — Chromium-based: GREASE like Chrome but different supported_versions order,
-+    // no compress_certificate (0x001b), no SCT (0x0012), adds ApplicationSettings (0x4469)
-+    static const TlsHello &getEdge() {
-+        static TlsHello result = [] {
-+            TlsHello res;
-+            res.ops = {
-+                    Op::string("\x16\x03\x01", 3),
-+                    Op::begin_scope(),
-+                    Op::string("\x01\x00", 2),
-+                    Op::begin_scope(),
-+                    Op::string("\x03\x03", 2),
-+                    Op::zero(32),
-+                    Op::string("\x20", 1),
-+                    Op::random(32),
-+                    Op::string("\x00\x20", 2),
-+                    Op::grease(0),
-+                    Op::string("\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30"
-+                               "\xcc\xa9\xcc\xa8\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x01\x00", 32),
-+                    Op::begin_scope(),
-+                    Op::grease(2),
-+                    Op::string("\x00\x00", 2),
-+                    Op::permutation({
-+                        {
-+                            Op::string("\x00\x00", 2),
-+                            Op::begin_scope(),
-+                            Op::begin_scope(),
-+                            Op::string("\x00", 1),
-+                            Op::begin_scope(),
-+                            Op::domain(),
-+                            Op::end_scope(),
-+                            Op::end_scope(),
-+                            Op::end_scope()
-+                        },
-+                        { Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9) },
-+                        {
-+                            Op::string("\x00\x0a\x00\x0c\x00\x0a", 6),
-+                            Op::grease(4),
-+                            Op::string("\x11\xec\x00\x1d\x00\x17\x00\x18", 8)
-+                        },
-+                        { Op::string("\x00\x0b\x00\x02\x01\x00", 6) },
-+                        { Op::string("\x00\x0d\x00\x12\x00\x10\x04\x03\x08\x04\x04\x01"
-+                                     "\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01", 22) },
-+                        { Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74"
-+                                     "\x74\x70\x2f\x31\x2e\x31", 18) },
-+                        { Op::string("\x00\x17\x00\x00", 4) },
-+                        { Op::string("\x00\x23\x00\x00", 4) },
-+                        {
-+                            Op::string("\x00\x2b\x00\x07\x06", 5),
-+                            Op::grease(6),
-+                            Op::string("\x03\x04\x03\x03", 4)
-+                        },
-+                        { Op::string("\x00\x2d\x00\x02\x01\x01", 6) },
-+                        {
-+                            Op::string("\x00\x33\x04\xef\x04\xed", 6),
-+                            Op::grease(4),
-+                            Op::string("\x00\x01\x00\x11\xec\x04\xc0", 7),
-+                            Op::M(),
-+                            Op::K(),
-+                            Op::string("\x00\x1d\x00\x20", 4),
-+                            Op::K(),
-+                        },
-+                        // Edge-specific: ApplicationSettings (4469)
-+                        { Op::string("\x44\x69\x00\x05\x00\x03\x02\x68\x32", 9) },
-+                        {
-+                            Op::echId(),
-+                            Op::begin_scope(),
-+                            Op::string("\x00\x01\x00\x01", 4),
-+                            Op::random(1),
-+                            Op::begin_scope(),
-+                            Op::K(),
-+                            Op::end_scope(),
-+                            Op::begin_scope(),
-+                            Op::E(),
-+                            Op::end_scope(),
-+                            Op::end_scope()
-+                        },
-+                        { Op::string("\xff\x01\x00\x01\x00", 5) }
-+                    }),
-+                    Op::grease(3),
-+                    Op::string("\x00\x01\x00", 3),
-+                    Op::P(),
-+                    Op::end_scope(),
-+                    Op::end_scope(),
-+                    Op::end_scope()
-+            };
-+            return res;
-+        }();
-+        return result;
-+    }
-+
-+    static const TlsHello &getForProfile(int profile) {
-+        if (profile == 1) return getFirefox();
-+        if (profile == 2) return getSafari();
-+        if (profile == 3) return getEdge();
-+        if (profile == 4) {
-+            // Random profile: per-connection or timed rotation
-+            int interval = gTlsRotationIntervalSec.load();
-+            if (interval > 0) {
-+                using namespace std::chrono;
-+                int64_t now = duration_cast<seconds>(steady_clock::now().time_since_epoch()).count();
-+                int64_t last = gTlsLastRotationSec.load();
-+                if (now - last >= interval) {
-+                    int next = rand() % 4; // pick from Chrome/Firefox/Safari/Edge
-+                    gTlsCurrentRandomProfile.store(next);
-+                    gTlsLastRotationSec.store(now);
-+                }
-+                int cur = gTlsCurrentRandomProfile.load();
-+                if (cur == 1) return getFirefox();
-+                if (cur == 2) return getSafari();
-+                if (cur == 3) return getEdge();
-+                return getDefault();
-+            }
-+            // per-connection random
-+            int r = rand() % 4;
-+            if (r == 1) return getFirefox();
-+            if (r == 2) return getSafari();
-+            if (r == 3) return getEdge();
-+            return getDefault();
-+        }
-+        return getDefault();
-+    }
-+
-     uint32_t writeToBuffer(uint8_t *data) {
-         uint32_t offset = 0;
-         for (auto op : ops) {
-@@ -392,6 +694,13 @@ private:
-                 offset += 2;
-                 break;
-             }
-+            case Type::EchId: {
-+                int id = gTlsEchExtensionId.load() & 0xffff;
-+                data[offset] = static_cast<uint8_t>((id >> 8) & 0xff);
-+                data[offset + 1] = static_cast<uint8_t>(id & 0xff);
-+                offset += 2;
-+                break;
-+            }
-             case Type::BeginScope:
-                 scopeOffset.push_back(offset);
-                 offset += 2;
-@@ -415,11 +724,14 @@ private:
-             }
-             case Type::P: {
-                 auto length = offset;
--                if (length <= 513) {
--                    writeOp(Op::string("\x00\x15", 2), data, offset);
--                    writeOp(Op::begin_scope(), data, offset);
--                    writeOp(Op::zero(513 - length), data, offset);
--                    writeOp(Op::end_scope(), data, offset);
-+                if (length < 512) {
-+                    uint32_t padSize = 512 - length - 4; // 4 = extension type (2) + scope length (2)
-+                    if ((int32_t)padSize > 0) {
-+                        writeOp(Op::string("\x00\x15", 2), data, offset);
-+                        writeOp(Op::begin_scope(), data, offset);
-+                        writeOp(Op::zero(padSize), data, offset);
-+                        writeOp(Op::end_scope(), data, offset);
-+                    }
-                 }
-                 break;
-             }
-@@ -451,6 +763,7 @@ ConnectionSocket::ConnectionSocket(int32_t instance) {
+ ConnectionSocket::ConnectionSocket(int32_t instance) {
+     instanceNum = instance;
      outgoingByteStream = new ByteStream();
      lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
      eventObject = new EventObject(this, EventObjectTypeConnection);
@@ -857,7 +216,7 @@ index 4605c2fc5..41accaa34 100644
  }
  
  ConnectionSocket::~ConnectionSocket() {
-@@ -470,6 +783,10 @@ ConnectionSocket::~ConnectionSocket() {
+@@ -63,6 +81,10 @@ ConnectionSocket::~ConnectionSocket() {
          tlsBuffer->reuse();
          tlsBuffer = nullptr;
      }
@@ -868,7 +227,7 @@ index 4605c2fc5..41accaa34 100644
  }
  
  void ConnectionSocket::openConnection(std::string address, uint16_t port, std::string secret, bool ipv6, int32_t networkType) {
-@@ -775,6 +1092,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -368,6 +390,14 @@ void ConnectionSocket::onEvent(uint32_t events) {
                              tlsState = 1;
                              proxyAuthState = 0;
                              bytesRead = 0;
@@ -883,16 +242,16 @@ index 4605c2fc5..41accaa34 100644
                              adjustWriteOp();
                          } else {
                              std::memcpy(tempBuffer->bytes + bytesRead, buffer->bytes(), (size_t) readCount);
-@@ -920,7 +1245,7 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -513,7 +543,7 @@ void ConnectionSocket::onEvent(uint32_t events) {
                          lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
                          tlsHashMismatch = false;
                          proxyAuthState = 11;
--                        TlsHello hello = TlsHello::getDefault();
-+                        TlsHello hello = TlsHello::getForProfile(gTlsFingerprintProfile.load());
+-                        TLSHello hello = TLSHello::getDefault();
++                        TLSHello hello = TLSHello::getForProfile(gTlsFingerprintProfile.load());
                          hello.setDomain(currentSecretDomain);
                          uint32_t size = hello.writeToBuffer(tempBuffer->bytes);
                          uint32_t outLength;
-@@ -933,7 +1258,21 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -526,7 +556,21 @@ void ConnectionSocket::onEvent(uint32_t events) {
                          memcpy(tempBuffer->bytes + 11, tempBuffer->bytes + 64 * 1024, 32);
                          bytesRead = 0;
  
@@ -915,7 +274,7 @@ index 4605c2fc5..41accaa34 100644
                              if (LOGS_ENABLED) DEBUG_E("connection(%p) send failed", this);
                              closeSocket(1, -1);
                              return;
-@@ -1011,9 +1350,20 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -604,9 +648,20 @@ void ConnectionSocket::onEvent(uint32_t events) {
                  if (remaining) {
                      ssize_t sentLength;
                      if (tlsState != 0) {
@@ -939,7 +298,7 @@ index 4605c2fc5..41accaa34 100644
                          size_t headersSize = 0;
                          if (tlsState == 1) {
                              static std::string header1 = std::string("\x14\x03\x03\x00\x01\x01", 6);
-@@ -1040,8 +1390,22 @@ void ConnectionSocket::onEvent(uint32_t events) {
+@@ -633,8 +688,22 @@ void ConnectionSocket::onEvent(uint32_t events) {
                                  ConnectionsManager::getInstance(instanceNum).delegate->onBytesSent((int32_t) sentLength, currentNetworkType, instanceNum);
                              }
                              outgoingByteStream->discard((uint32_t) (sentLength - headersSize));
@@ -962,7 +321,7 @@ index 4605c2fc5..41accaa34 100644
                      } else {
                          if ((sentLength = send(socketFd, buffer->bytes(), remaining, 0)) < 0) {
                              if (LOGS_ENABLED) DEBUG_D("connection(%p) send failed", this);
-@@ -1086,6 +1450,78 @@ void ConnectionSocket::writeBuffer(NativeByteBuffer *buffer) {
+@@ -679,6 +748,78 @@ void ConnectionSocket::writeBuffer(NativeByteBuffer *buffer) {
      adjustWriteOp();
  }
  
@@ -1042,7 +401,7 @@ index 4605c2fc5..41accaa34 100644
      if (!waitingForHostResolve.empty()) {
          adjustWriteOpAfterResolve = true;
 diff --git a/TMessagesProj/jni/tgnet/ConnectionSocket.h b/TMessagesProj/jni/tgnet/ConnectionSocket.h
-index 15ffee898..6d048c501 100644
+index 15ffee89..6d048c50 100644
 --- a/TMessagesProj/jni/tgnet/ConnectionSocket.h
 +++ b/TMessagesProj/jni/tgnet/ConnectionSocket.h
 @@ -18,6 +18,7 @@ class ConnectionsManager;
@@ -1083,11 +442,382 @@ index 15ffee898..6d048c501 100644
      int32_t checkSocketError(int32_t *error);
      void closeSocket(int32_t reason, int32_t error);
      void openConnectionInternal(bool ipv6);
+diff --git a/TMessagesProj/jni/tgnet/TLSHello.cpp b/TMessagesProj/jni/tgnet/TLSHello.cpp
+index f5b1a407..3db16346 100644
+--- a/TMessagesProj/jni/tgnet/TLSHello.cpp
++++ b/TMessagesProj/jni/tgnet/TLSHello.cpp
+@@ -1,6 +1,17 @@
+ #include "TLSHello.h"
+ #include "openssl/bn.h"
+ #include <cassert>
++#include <atomic>
++#include <chrono>
++#include <cstdlib>
++
++// GramBas: TLS fingerprint config, set via JNI from Java (see TgNetWrapper.cpp)
++// 0=Chrome, 1=Firefox, 2=Safari, 3=Edge, 4=Random
++extern std::atomic<int>  gTlsFingerprintProfile;
++extern std::atomic<int>  gTlsRotationIntervalSec; // 0=per-connection, 30-240=timed
++extern std::atomic<int>  gTlsCurrentRandomProfile;
++extern std::atomic<int64_t> gTlsLastRotationSec;
++extern std::atomic<int>  gTlsEchExtensionId; // default 0xfe0d
+ 
+ static BIGNUM *get_y2(BIGNUM *x, const BIGNUM *mod, BN_CTX *big_num_context) {
+     // returns y^2 = x^3 + 486662 * x^2 + x
+@@ -200,6 +211,12 @@ TLSHello::Op TLSHello::Op::permutation(std::vector<std::vector<Op>> entities) {
+     return res;
+ }
+ 
++TLSHello::Op TLSHello::Op::echId() {
++    Op res;
++    res.type = Type::EchId;
++    return res;
++}
++
+ const TLSHello &TLSHello::getDefault() {
+     static TLSHello result = [] {
+         TLSHello res;
+@@ -260,7 +277,7 @@ const TLSHello &TLSHello::getDefault() {
+                                         },
+                                         { Op::string("\x44\xcd\x00\x05\x00\x03\x02\x68\x32", 9) },
+                                         {
+-                                                Op::string("\xfe\x0d", 2),
++                                                Op::echId(),
+                                                 Op::begin_scope(),
+                                                 Op::string("\x00\x00\x01\x00\x01", 5),
+                                                 Op::random(1),
+@@ -285,6 +302,281 @@ const TLSHello &TLSHello::getDefault() {
+     return result;
+ }
+ 
++    // Firefox 121+ profile: CHACHA20 before AES-256, no ML-KEM, no compress_certificate, no SCT
++const TLSHello &TLSHello::getFirefox() {
++        static TLSHello result = [] {
++            TLSHello res;
++            res.ops = {
++                    Op::string("\x16\x03\x01", 3),
++                    Op::begin_scope(),
++                    Op::string("\x01\x00", 2),
++                    Op::begin_scope(),
++                    Op::string("\x03\x03", 2),
++                    Op::zero(32),
++                    Op::string("\x20", 1),
++                    Op::random(32),
++                    // Firefox cipher order: AES-128, CHACHA20, AES-256, then legacy
++                    Op::string("\x00\x1e", 2),
++                    Op::string("\x13\x01\x13\x03\x13\x02\xc0\x2b\xc0\x2f\xcc\xa9\xcc\xa8\xc0\x2c\xc0\x30\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x01\x00", 30),
++                    Op::begin_scope(),
++                    Op::string("\x00\x00", 2),
++                    Op::permutation({
++                        {
++                            Op::string("\x00\x00", 2),
++                            Op::begin_scope(),
++                            Op::begin_scope(),
++                            Op::string("\x00", 1),
++                            Op::begin_scope(),
++                            Op::domain(),
++                            Op::end_scope(),
++                            Op::end_scope(),
++                            Op::end_scope()
++                        },
++                        { Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9) },
++                        // supported_groups without ML-KEM (0x11ec)
++                        {
++                            Op::string("\x00\x0a\x00\x0a\x00\x08", 6),
++                            Op::string("\x00\x1d\x00\x17\x00\x18\x00\x19", 8)
++                        },
++                        { Op::string("\x00\x0b\x00\x02\x01\x00", 6) },
++                        // Firefox sig algs: includes rsa_pkcs1_sha1 (\x02\x01) and rsa_pkcs1_sha256 (\x04\x01)
++                        { Op::string("\x00\x0d\x00\x14\x00\x12\x04\x03\x08\x04\x04\x01\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01", 24) },
++                        { Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31", 18) },
++                        { Op::string("\x00\x17\x00\x00", 4) },
++                        { Op::string("\x00\x23\x00\x00", 4) },
++                        {
++                            Op::string("\x00\x2b\x00\x05\x04", 5),
++                            Op::string("\x03\x04\x03\x03", 4)
++                        },
++                        { Op::string("\x00\x2d\x00\x02\x01\x01", 6) },
++                        // key_share: X25519 only (no ML-KEM)
++                        {
++                            Op::string("\x00\x33\x00\x26\x00\x24", 6),
++                            Op::string("\x00\x1d\x00\x20", 4),
++                            Op::K(),
++                        },
++                        {
++                            Op::echId(),
++                            Op::begin_scope(),
++                            Op::string("\x00\x00\x01\x00\x01", 5),
++                            Op::random(1),
++                            Op::string("\x00\x20", 2),
++                            Op::K(),
++                            Op::begin_scope(),
++                            Op::E(),
++                            Op::end_scope(),
++                            Op::end_scope()
++                        },
++                        { Op::string("\xff\x01\x00\x01\x00", 5) }
++                    }),
++                    Op::string("\x00\x01\x00", 3),
++                    Op::P(),
++                    Op::end_scope(),
++                    Op::end_scope(),
++                    Op::end_scope()
++            };
++            return res;
++        }();
++        return result;
++    }
++
++    // Safari 17 — no GREASE ciphers, different groups (incl. secp521r1), fixed extension order
++const TLSHello &TLSHello::getSafari() {
++        static TLSHello result = [] {
++            TLSHello res;
++            res.ops = {
++                    Op::string("\x16\x03\x01", 3),
++                    Op::begin_scope(),
++                    Op::string("\x01\x00", 2),
++                    Op::begin_scope(),
++                    Op::string("\x03\x03", 2),
++                    Op::zero(32),
++                    Op::string("\x20", 1),
++                    Op::random(32),
++                    // Safari cipher suites: 17 ciphers × 2 = 34 bytes, no GREASE
++                    Op::string("\x00\x22", 2),
++                    Op::string("\x13\x01\x13\x02\x13\x03\xc0\x2c\xc0\x2b\xc0\x30\xc0\x2f"
++                               "\xcc\xa9\xcc\xa8\xc0\x0a\xc0\x09\xc0\x14\xc0\x13"
++                               "\x00\x9d\x00\x9c\x00\x35\x00\x2f", 34),
++                    Op::begin_scope(), // extensions total length
++                    // renegotiation_info (ff01)
++                    Op::string("\xff\x01\x00\x01\x00", 5),
++                    // server_name (0000)
++                    Op::string("\x00\x00", 2),
++                    Op::begin_scope(),
++                    Op::begin_scope(),
++                    Op::string("\x00", 1),
++                    Op::begin_scope(),
++                    Op::domain(),
++                    Op::end_scope(),
++                    Op::end_scope(),
++                    Op::end_scope(),
++                    // extended_master_secret (0017)
++                    Op::string("\x00\x17\x00\x00", 4),
++                    // session_ticket (0023)
++                    Op::string("\x00\x23\x00\x00", 4),
++                    // ALPN (0010): h2, http/1.1
++                    Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31", 18),
++                    // status_request (0005)
++                    Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9),
++                    // supported_groups (000a): X25519, secp256r1, secp384r1, secp521r1 — no GREASE, no ML-KEM
++                    Op::string("\x00\x0a\x00\x0a\x00\x08\x00\x1d\x00\x17\x00\x18\x00\x19", 14),
++                    // ec_point_formats (000b)
++                    Op::string("\x00\x0b\x00\x02\x01\x00", 6),
++                    // signature_algorithms (000d) — Safari includes rsa_pkcs1_sha1
++                    Op::string("\x00\x0d\x00\x14\x00\x12\x04\x03\x08\x04\x04\x01\x05\x03"
++                               "\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01", 24),
++                    // supported_versions (002b): TLS 1.3 + TLS 1.2, no GREASE
++                    Op::string("\x00\x2b\x00\x05\x04\x03\x04\x03\x03", 9),
++                    // psk_key_exchange_modes (002d)
++                    Op::string("\x00\x2d\x00\x02\x01\x01", 6),
++                    // key_share (0033): X25519 only, no ML-KEM
++                    Op::string("\x00\x33\x00\x26\x00\x24\x00\x1d\x00\x20", 10),
++                    Op::K(),
++                    // compress_certificate (001b)
++                    Op::string("\x00\x1b\x00\x03\x02\x00\x02", 7),
++                    // ECH extension (configurable, default fe0d)
++                    Op::echId(),
++                    Op::begin_scope(),
++                    Op::string("\x00\x00\x01\x00\x01", 5),
++                    Op::random(1),
++                    Op::string("\x00\x20", 2),
++                    Op::K(),
++                    Op::begin_scope(),
++                    Op::E(),
++                    Op::end_scope(),
++                    Op::end_scope(),
++                    Op::P(),
++                    Op::end_scope(), // extensions
++                    Op::end_scope(), // ClientHello body
++                    Op::end_scope()  // TLS record
++            };
++            return res;
++        }();
++        return result;
++    }
++
++    // Edge 120+ — Chromium-based: GREASE like Chrome but different supported_versions order,
++    // no compress_certificate (0x001b), no SCT (0x0012), adds ApplicationSettings (0x4469)
++const TLSHello &TLSHello::getEdge() {
++        static TLSHello result = [] {
++            TLSHello res;
++            res.ops = {
++                    Op::string("\x16\x03\x01", 3),
++                    Op::begin_scope(),
++                    Op::string("\x01\x00", 2),
++                    Op::begin_scope(),
++                    Op::string("\x03\x03", 2),
++                    Op::zero(32),
++                    Op::string("\x20", 1),
++                    Op::random(32),
++                    Op::string("\x00\x20", 2),
++                    Op::grease(0),
++                    Op::string("\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30"
++                               "\xcc\xa9\xcc\xa8\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x01\x00", 32),
++                    Op::begin_scope(),
++                    Op::grease(2),
++                    Op::string("\x00\x00", 2),
++                    Op::permutation({
++                        {
++                            Op::string("\x00\x00", 2),
++                            Op::begin_scope(),
++                            Op::begin_scope(),
++                            Op::string("\x00", 1),
++                            Op::begin_scope(),
++                            Op::domain(),
++                            Op::end_scope(),
++                            Op::end_scope(),
++                            Op::end_scope()
++                        },
++                        { Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9) },
++                        {
++                            Op::string("\x00\x0a\x00\x0c\x00\x0a", 6),
++                            Op::grease(4),
++                            Op::string("\x11\xec\x00\x1d\x00\x17\x00\x18", 8)
++                        },
++                        { Op::string("\x00\x0b\x00\x02\x01\x00", 6) },
++                        { Op::string("\x00\x0d\x00\x12\x00\x10\x04\x03\x08\x04\x04\x01"
++                                     "\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01", 22) },
++                        { Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74"
++                                     "\x74\x70\x2f\x31\x2e\x31", 18) },
++                        { Op::string("\x00\x17\x00\x00", 4) },
++                        { Op::string("\x00\x23\x00\x00", 4) },
++                        {
++                            Op::string("\x00\x2b\x00\x07\x06", 5),
++                            Op::grease(6),
++                            Op::string("\x03\x04\x03\x03", 4)
++                        },
++                        { Op::string("\x00\x2d\x00\x02\x01\x01", 6) },
++                        {
++                            Op::string("\x00\x33\x04\xef\x04\xed", 6),
++                            Op::grease(4),
++                            Op::string("\x00\x01\x00\x11\xec\x04\xc0", 7),
++                            Op::M(),
++                            Op::K(),
++                            Op::string("\x00\x1d\x00\x20", 4),
++                            Op::K(),
++                        },
++                        // Edge-specific: ApplicationSettings (4469)
++                        { Op::string("\x44\x69\x00\x05\x00\x03\x02\x68\x32", 9) },
++                        {
++                            Op::echId(),
++                            Op::begin_scope(),
++                            Op::string("\x00\x00\x01\x00\x01", 5),
++                            Op::random(1),
++                            Op::string("\x00\x20", 2),
++                            Op::K(),
++                            Op::begin_scope(),
++                            Op::E(),
++                            Op::end_scope(),
++                            Op::end_scope()
++                        },
++                        { Op::string("\xff\x01\x00\x01\x00", 5) }
++                    }),
++                    Op::grease(3),
++                    Op::string("\x00\x01\x00", 3),
++                    Op::P(),
++                    Op::end_scope(),
++                    Op::end_scope(),
++                    Op::end_scope()
++            };
++            return res;
++        }();
++        return result;
++    }
++
++const TLSHello &TLSHello::getForProfile(int profile) {
++        if (profile == 1) return getFirefox();
++        if (profile == 2) return getSafari();
++        if (profile == 3) return getEdge();
++        if (profile == 4) {
++            // Random profile: per-connection or timed rotation
++            int interval = gTlsRotationIntervalSec.load();
++            if (interval > 0) {
++                using namespace std::chrono;
++                int64_t now = duration_cast<seconds>(steady_clock::now().time_since_epoch()).count();
++                int64_t last = gTlsLastRotationSec.load();
++                if (now - last >= interval) {
++                    int next = rand() % 4; // pick from Chrome/Firefox/Safari/Edge
++                    gTlsCurrentRandomProfile.store(next);
++                    gTlsLastRotationSec.store(now);
++                }
++                int cur = gTlsCurrentRandomProfile.load();
++                if (cur == 1) return getFirefox();
++                if (cur == 2) return getSafari();
++                if (cur == 3) return getEdge();
++                return getDefault();
++            }
++            // per-connection random
++            int r = rand() % 4;
++            if (r == 1) return getFirefox();
++            if (r == 2) return getSafari();
++            if (r == 3) return getEdge();
++            return getDefault();
++        }
++        return getDefault();
++    }
++
+ uint32_t TLSHello::writeToBuffer(uint8_t *data) {
+     uint32_t offset = 0;
+     for (auto op : ops) {
+@@ -335,6 +627,13 @@ void TLSHello::writeOp(const TLSHello::Op &op, uint8_t *data, uint32_t &offset)
+             offset += 2;
+             break;
+         }
++        case Type::EchId: {
++            int id = gTlsEchExtensionId.load() & 0xffff;
++            data[offset] = static_cast<uint8_t>((id >> 8) & 0xff);
++            data[offset + 1] = static_cast<uint8_t>(id & 0xff);
++            offset += 2;
++            break;
++        }
+         case Type::BeginScope:
+             scopeOffset.push_back(offset);
+             offset += 2;
+diff --git a/TMessagesProj/jni/tgnet/TLSHello.h b/TMessagesProj/jni/tgnet/TLSHello.h
+index 0cb39ec3..f8e88b10 100644
+--- a/TMessagesProj/jni/tgnet/TLSHello.h
++++ b/TMessagesProj/jni/tgnet/TLSHello.h
+@@ -21,7 +21,7 @@ public:
+ 
+     struct Op {
+         enum class Type {
+-            String, Random, K, M, P, E, Zero, Domain, Grease, BeginScope, EndScope, Permutation
++            String, Random, K, M, P, E, Zero, Domain, Grease, BeginScope, EndScope, Permutation, EchId
+         };
+         Type type;
+         size_t length = 0;
+@@ -41,9 +41,17 @@ public:
+         static Op begin_scope();
+         static Op end_scope();
+         static Op permutation(std::vector<std::vector<Op>> entities);
++        // GramBas: writes the ECH extension id from gTlsEchExtensionId instead of a fixed 0xfe0d
++        static Op echId();
+     };
+ 
+     static const TLSHello &getDefault();
++    // GramBas: browser fingerprint profiles, selected by gTlsFingerprintProfile
++    static const TLSHello &getFirefox();
++    static const TLSHello &getSafari();
++    static const TLSHello &getEdge();
++    // 0=Chrome(default), 1=Firefox, 2=Safari, 3=Edge, 4=Random (per-connection or timed)
++    static const TLSHello &getForProfile(int profile);
+ 
+     uint32_t writeToBuffer(uint8_t *data);
+ 
 diff --git a/TMessagesProj/proguard-rules.pro b/TMessagesProj/proguard-rules.pro
-index aeab02b29..fae6790df 100644
+index 049c7b7a..b200a584 100644
 --- a/TMessagesProj/proguard-rules.pro
 +++ b/TMessagesProj/proguard-rules.pro
-@@ -19,6 +19,10 @@
+@@ -24,6 +24,14 @@
  -keep class org.telegram.tgnet.NativeByteBuffer { *; }
  -keep class org.telegram.tgnet.RequestTimeDelegate { *; }
  -keep class org.telegram.tgnet.RequestDelegate { *; }
@@ -1095,11 +825,15 @@ index aeab02b29..fae6790df 100644
 +# R8 pass can't see that cross-module call, so it strips them as unused.
 +-keep class org.telegram.ui.web.HttpGetTask { *; }
 +-keep class org.telegram.ui.web.HttpGetFileTask { *; }
- -keep class com.google.android.exoplayer2.ext.** { *; }
- -keep class com.google.android.exoplayer2.extractor.FlacStreamMetadata { *; }
- -keep class com.google.android.exoplayer2.metadata.flac.PictureFrame { *; }
++-keep class com.google.android.exoplayer2.ext.** { *; }
++-keep class com.google.android.exoplayer2.extractor.FlacStreamMetadata { *; }
++-keep class com.google.android.exoplayer2.metadata.flac.PictureFrame { *; }
++-keep class com.google.android.exoplayer2.decoder.SimpleDecoderOutputBuffer { *; }
+ -keep class org.telegram.ui.Stories.recorder.FfmpegAudioWaveformLoader { *; }
+ -keep class androidx.mediarouter.app.MediaRouteButton { *; }
+ -keepclassmembers class ** {
 diff --git a/TMessagesProj/src/main/AndroidManifest.xml b/TMessagesProj/src/main/AndroidManifest.xml
-index 6f6d377d0..132e484bf 100644
+index 63c819b2..6af9c8fe 100644
 --- a/TMessagesProj/src/main/AndroidManifest.xml
 +++ b/TMessagesProj/src/main/AndroidManifest.xml
 @@ -29,6 +29,7 @@
@@ -1110,7 +844,7 @@ index 6f6d377d0..132e484bf 100644
      <uses-permission android:name="android.permission.RECORD_AUDIO" />
      <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
      <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-@@ -506,6 +507,12 @@
+@@ -518,6 +519,12 @@
              android:exported="true"
              android:foregroundServiceType="location|dataSync"
          />
@@ -1124,7 +858,7 @@ index 6f6d377d0..132e484bf 100644
              android:name=".voip.VoIPService"
              android:enabled="true"
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
-index b1caaddb4..08a513544 100644
+index 4ed7e649..8d3936da 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
 @@ -25,9 +25,10 @@ public class BuildVars {
@@ -1142,7 +876,7 @@ index b1caaddb4..08a513544 100644
      public static String SAFETYNET_KEY = "AIzaSyDqt8P-7F7CPCseMkOiVRgb1LY8RN1bvH8";
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/ConnectionKeepAliveService.java b/TMessagesProj/src/main/java/org/telegram/messenger/ConnectionKeepAliveService.java
 new file mode 100644
-index 000000000..cde15c8ac
+index 00000000..cde15c8a
 --- /dev/null
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/ConnectionKeepAliveService.java
 @@ -0,0 +1,82 @@
@@ -1229,27 +963,37 @@ index 000000000..cde15c8ac
 +    }
 +}
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/DatabaseMigrationHelper.java b/TMessagesProj/src/main/java/org/telegram/messenger/DatabaseMigrationHelper.java
-index 91fefa223..2759efdb7 100644
+index 45fa3c1a..2fa33c8c 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/DatabaseMigrationHelper.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/DatabaseMigrationHelper.java
-@@ -1679,6 +1679,12 @@ public class DatabaseMigrationHelper {
-             database.executeFast("PRAGMA user_version = 176").stepThis().dispose();
-             version = 176;
+@@ -1698,6 +1698,22 @@ public class DatabaseMigrationHelper {
+             database.executeFast("PRAGMA user_version = 179").stepThis().dispose();
+             version = 179;
          }
-+        if (version == 176) {
-+            // TGX: locally-retained tombstones for messages recalled by the sender (anti-recall feature)
-+            database.executeFast("CREATE TABLE recalled_messages(uid INTEGER, mid INTEGER, recalled_date INTEGER, PRIMARY KEY(uid, mid))").stepThis().dispose();
-+            database.executeFast("PRAGMA user_version = 177").stepThis().dispose();
-+            version = 177;
++        if (version == 179) {
++            // TGX: locally-retained tombstones for messages recalled by the sender (anti-recall feature).
++            // IF NOT EXISTS because forks built on 12.10.1 already created this table at their own
++            // user_version 177 -- upstream later claimed 177 for welcome_messages.
++            database.executeFast("CREATE TABLE IF NOT EXISTS recalled_messages(uid INTEGER, mid INTEGER, recalled_date INTEGER, PRIMARY KEY(uid, mid))").stepThis().dispose();
++            // Those same installs skipped upstream's 176 -> 177 step (their user_version was already 177),
++            // so welcome_messages and its indices never got created there. Create them here if missing.
++            database.executeFast("CREATE TABLE IF NOT EXISTS welcome_messages(mid INTEGER, dialog_id INTEGER, send_state INTEGER, date INTEGER, data BLOB, ttl INTEGER, replydata BLOB, reply_to_message_id INTEGER, PRIMARY KEY(mid, dialog_id))").stepThis().dispose();
++            database.executeFast("CREATE INDEX IF NOT EXISTS send_state_idx_welcome_messages ON welcome_messages(mid, send_state, date);").stepThis().dispose();
++            database.executeFast("CREATE INDEX IF NOT EXISTS dialog_date_idx_welcome_messages ON welcome_messages(dialog_id, date);").stepThis().dispose();
++            database.executeFast("CREATE INDEX IF NOT EXISTS reply_to_idx_welcome_messages ON welcome_messages(mid, reply_to_message_id);").stepThis().dispose();
++            database.executeFast("CREATE INDEX IF NOT EXISTS idx_to_reply_welcome_messages ON welcome_messages(reply_to_message_id, mid);").stepThis().dispose();
++            database.executeFast("CREATE INDEX IF NOT EXISTS media_v4_music_browse_idx ON media_v4(uid, date DESC, mid DESC) WHERE type = 4 AND mid > 0 AND uid != 0;").stepThis().dispose();
++            database.executeFast("PRAGMA user_version = 180").stepThis().dispose();
++            version = 180;
 +        }
  
          return version;
      }
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
-index fea32835f..636cb9001 100644
+index 85c8e84c..86a9e23a 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
-@@ -1805,7 +1805,9 @@ public class MediaController implements AudioManager.OnAudioFocusChangeListener,
+@@ -1807,7 +1807,9 @@ public class MediaController implements AudioManager.OnAudioFocusChangeListener,
          }
          if (send) {
              if (lastSecretChat != null) {
@@ -1261,10 +1005,10 @@ index fea32835f..636cb9001 100644
                  SendMessagesHelper.getInstance(lastChatAccount).sendScreenshotMessage(lastUser, lastMessageId, null);
              }
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
-index 80374e50c..2b8a14643 100644
+index ec503d93..082f9570 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
-@@ -222,6 +222,8 @@ public class MessageObject {
+@@ -226,6 +226,8 @@ public class MessageObject {
      public String monthKey;
      public boolean deleted;
      public boolean deletedByThanos;
@@ -1274,10 +1018,10 @@ index 80374e50c..2b8a14643 100644
      public float forceSeekTo = -1;
      public int audioProgressMs;
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
-index 2e65a2ca4..4bfa57dbe 100644
+index 93bc81cb..9726f5bd 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
-@@ -8298,13 +8298,17 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -8273,13 +8273,17 @@ public class MessagesController extends BaseController implements NotificationCe
              LongSparseArray<ArrayList<Integer>> task = currentDeletingTaskMids != null ? currentDeletingTaskMids.clone() : null;
              LongSparseArray<ArrayList<Integer>> taskMedia = currentDeletingTaskMediaMids != null ? currentDeletingTaskMediaMids.clone() : null;
              AndroidUtilities.runOnUIThread(() -> {
@@ -1297,7 +1041,7 @@ index 2e65a2ca4..4bfa57dbe 100644
                      final boolean checkViewer = SecretMediaViewer.hasInstance() && SecretMediaViewer.getInstance().isVisible();
                      final MessageObject viewerObject = checkViewer ? SecretMediaViewer.getInstance().getCurrentMessageObject() : null;
                      for (int a = 0, N = taskMedia.size(); a < N; a++) {
-@@ -14346,6 +14350,10 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -14389,6 +14393,10 @@ public class MessagesController extends BaseController implements NotificationCe
          long dialogId = messageObject.getDialogId();
          getMessagesStorage().markMessagesContentAsRead(dialogId, arrayList, 0, 0);
          getNotificationCenter().postNotificationName(NotificationCenter.messagesReadContent, dialogId, arrayList);
@@ -1308,7 +1052,7 @@ index 2e65a2ca4..4bfa57dbe 100644
          if (messageObject.getId() < 0) {
              markMessageAsRead(messageObject.getDialogId(), messageObject.messageOwner.random_id, Integer.MIN_VALUE);
          } else {
-@@ -14411,6 +14419,11 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -14454,6 +14462,11 @@ public class MessagesController extends BaseController implements NotificationCe
  
      public void doDeleteShowOnceTask(long taskId, long dialogId, int mid) {
          getMessagesStorage().removePendingTask(taskId);
@@ -1320,7 +1064,7 @@ index 2e65a2ca4..4bfa57dbe 100644
          ArrayList<Integer> mids = new ArrayList<>();
          mids.add(mid);
          getMessagesStorage().emptyMessagesMedia(dialogId, mids);
-@@ -14421,6 +14434,15 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -14464,6 +14477,15 @@ public class MessagesController extends BaseController implements NotificationCe
      }
  
      public void markMessageAsRead2(long dialogId, int mid, TLRPC.InputChannel inputChannel, int ttl, long taskId, boolean createDeleteTask) {
@@ -1336,7 +1080,7 @@ index 2e65a2ca4..4bfa57dbe 100644
          if (mid == 0 || ttl < 0) {
              return;
          }
-@@ -18370,6 +18392,10 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -18448,6 +18470,10 @@ public class MessagesController extends BaseController implements NotificationCe
          LongSparseArray<ArrayList<Integer>> markContentAsReadMessages = null;
          SparseIntArray markAsReadEncrypted = null;
          LongSparseArray<ArrayList<Integer>> deletedMessages = null;
@@ -1347,7 +1091,7 @@ index 2e65a2ca4..4bfa57dbe 100644
          LongSparseArray<ArrayList<Integer>> deletedQuickReplyMessages = null;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessages = null;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSent = null;
-@@ -18758,6 +18784,11 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -18836,6 +18862,11 @@ public class MessagesController extends BaseController implements NotificationCe
                  dialogs_read_outbox_max.put(dialogId, Math.max(value, update.max_id));
              } else if (baseUpdate instanceof TL_update.TL_updateDeleteMessages) {
                  TL_update.TL_updateDeleteMessages update = (TL_update.TL_updateDeleteMessages) baseUpdate;
@@ -1359,7 +1103,7 @@ index 2e65a2ca4..4bfa57dbe 100644
                  if (deletedMessages == null) {
                      deletedMessages = new LongSparseArray<>();
                  }
-@@ -19283,16 +19314,33 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -19361,16 +19392,33 @@ public class MessagesController extends BaseController implements NotificationCe
                  if (BuildVars.LOGS_ENABLED) {
                      FileLog.d(baseUpdate + " channelId = " + update.channel_id);
                  }
@@ -1401,7 +1145,7 @@ index 2e65a2ca4..4bfa57dbe 100644
              } else if (baseUpdate instanceof TL_update.TL_updateChannel) {
                  if (BuildVars.LOGS_ENABLED) {
                      TL_update.TL_updateChannel update = (TL_update.TL_updateChannel) baseUpdate;
-@@ -20910,6 +20958,7 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21043,6 +21091,7 @@ public class MessagesController extends BaseController implements NotificationCe
          LongSparseArray<ArrayList<Integer>> markContentAsReadMessagesFinal = markContentAsReadMessages;
          SparseIntArray markAsReadEncryptedFinal = markAsReadEncrypted;
          LongSparseArray<ArrayList<Integer>> deletedMessagesFinal = deletedMessages;
@@ -1409,7 +1153,7 @@ index 2e65a2ca4..4bfa57dbe 100644
          LongSparseArray<ArrayList<Integer>> deletedQuickRepliesMessagesFinal = deletedQuickReplyMessages;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesFinal = scheduledDeletedMessages;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSentFinal = scheduledDeletedMessagesSent;
-@@ -21034,6 +21083,35 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21167,6 +21216,35 @@ public class MessagesController extends BaseController implements NotificationCe
                  }
                  getNotificationsController().removeDeletedMessagesFromNotifications(deletedMessagesFinal, false);
              }
@@ -1445,7 +1189,7 @@ index 2e65a2ca4..4bfa57dbe 100644
              if (deletedQuickRepliesMessagesFinal != null) {
                  for (int a = 0, size = deletedQuickRepliesMessagesFinal.size(); a < size; a++) {
                      long topicId = deletedQuickRepliesMessagesFinal.keyAt(a);
-@@ -21120,6 +21198,20 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21253,6 +21331,20 @@ public class MessagesController extends BaseController implements NotificationCe
              for (int a = 0, size = deletedMessages.size(); a < size; a++) {
                  long key = deletedMessages.keyAt(a);
                  ArrayList<Integer> arrayList = deletedMessages.valueAt(a);
@@ -1466,7 +1210,7 @@ index 2e65a2ca4..4bfa57dbe 100644
                  getMessagesStorage().getStorageQueue().postRunnable(() -> {
                      ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, arrayList, false, true, 0, 0);
                      getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, arrayList, dialogIds);
-@@ -21458,6 +21550,147 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21591,6 +21683,147 @@ public class MessagesController extends BaseController implements NotificationCe
          return false;
      }
  
@@ -1615,19 +1359,19 @@ index 2e65a2ca4..4bfa57dbe 100644
          if (topicId == 0) {
              TLRPC.Dialog dialog = dialogs_dict.get(dialogId);
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
-index 4d719fab6..91d5ee211 100644
+index 98e066ea..e58da350 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
-@@ -117,7 +117,7 @@ public class MessagesStorage extends BaseController {
+@@ -118,7 +118,7 @@ public class MessagesStorage extends BaseController {
          }
      }
  
--    public final static int LAST_DB_VERSION = 176;
-+    public final static int LAST_DB_VERSION = 177;
+-    public final static int LAST_DB_VERSION = 179;
++    public final static int LAST_DB_VERSION = 180;
      private boolean databaseMigrationInProgress;
      public boolean showClearDatabaseAlert;
  
-@@ -548,6 +548,9 @@ public class MessagesStorage extends BaseController {
+@@ -549,6 +549,9 @@ public class MessagesStorage extends BaseController {
          database.executeFast("CREATE INDEX IF NOT EXISTS idx_to_reply_scheduled_messages_v2 ON scheduled_messages_v2(reply_to_message_id, mid);").stepThis().dispose();
  
          database.executeFast("CREATE TABLE messages_v2(mid INTEGER, uid INTEGER, read_state INTEGER, send_state INTEGER, date INTEGER, data BLOB, out INTEGER, ttl INTEGER, media INTEGER, replydata BLOB, imp INTEGER, mention INTEGER, forwards INTEGER, replies_data BLOB, thread_reply_id INTEGER, is_channel INTEGER, reply_to_message_id INTEGER, custom_params BLOB, group_id INTEGER, reply_to_story_id INTEGER, PRIMARY KEY(mid, uid))").stepThis().dispose();
@@ -1637,7 +1381,7 @@ index 4d719fab6..91d5ee211 100644
          database.executeFast("CREATE INDEX IF NOT EXISTS uid_mid_read_out_idx_messages_v2 ON messages_v2(uid, mid, read_state, out);").stepThis().dispose();
          database.executeFast("CREATE INDEX IF NOT EXISTS uid_date_mid_idx_messages_v2 ON messages_v2(uid, date, mid);").stepThis().dispose();
          database.executeFast("CREATE INDEX IF NOT EXISTS mid_out_idx_messages_v2 ON messages_v2(mid, out);").stepThis().dispose();
-@@ -14849,6 +14852,119 @@ public class MessagesStorage extends BaseController {
+@@ -15312,6 +15315,119 @@ public class MessagesStorage extends BaseController {
          executeInStorageQueue(() -> updateDialogsWithDeletedMessagesInternal(dialogId, channelId, messages, additionalDialogsToUpdate));
      }
  
@@ -1758,10 +1502,10 @@ index 4d719fab6..91d5ee211 100644
          if (messages.isEmpty()) {
              return null;
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationCenter.java b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationCenter.java
-index cdefac769..d62564b4f 100644
+index 544a8e6a..03cd245a 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationCenter.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationCenter.java
-@@ -34,6 +34,8 @@ public class NotificationCenter {
+@@ -42,6 +42,8 @@ public class NotificationCenter {
      public static final int closeChatActivity = totalEvents++;
      public static final int closeProfileActivity = totalEvents++;
      public static final int messagesDeleted = totalEvents++;
@@ -1771,10 +1515,10 @@ index cdefac769..d62564b4f 100644
      public static final int messagesRead = totalEvents++;
      public static final int threadMessagesRead = totalEvents++;
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
-index 0a8a9bd08..7b8656dc2 100644
+index ac2f0cb7..7a86fee9 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
-@@ -1051,6 +1051,26 @@ public class NotificationsController extends BaseController implements Notificat
+@@ -1111,6 +1111,26 @@ public class NotificationsController extends BaseController implements Notificat
              return;
          }
  
@@ -1802,10 +1546,10 @@ index 0a8a9bd08..7b8656dc2 100644
          notificationsQueue.postRunnable(() -> {
              boolean added = false;
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java b/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java
-index e8ea5120e..3678770bf 100644
+index a402447d..b65220eb 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java
-@@ -182,7 +182,7 @@ public class VideoAds {
+@@ -195,7 +195,7 @@ public static VideoAds make(
      private void load() {
          if (loading || loaded) return;
  
@@ -1815,10 +1559,10 @@ index e8ea5120e..3678770bf 100644
          }
  
 diff --git a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
-index 470e3c4a6..9ba590be9 100644
+index 778af485..b563760c 100644
 --- a/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
 +++ b/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
-@@ -999,6 +999,28 @@ public class ConnectionsManager extends BaseController {
+@@ -1022,6 +1022,28 @@ public class ConnectionsManager extends BaseController {
      public static native void native_setUserId(int currentAccount, long id);
      public static native void native_init(int currentAccount, int version, int layer, int apiId, String deviceModel, String systemVersion, String appVersion, String langCode, String systemLangCode, String configPath, String logPath, String regId, String cFingerprint, String installer, String packageId, int timezoneOffset, long userId, boolean userPremium, boolean enablePushConnection, boolean hasNetwork, int networkType, int performanceClass);
      public static native void native_setProxySettings(int currentAccount, String address, int port, String username, String password, String secret);
@@ -1848,7 +1592,7 @@ index 470e3c4a6..9ba590be9 100644
      public static native void native_setRegId(int currentAccount, String regId);
      public static native void native_setSystemLangCode(int currentAccount, String langCode);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java b/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
-index 7d7291c05..c5d9d3cd4 100644
+index 6b45401b..80812797 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
 @@ -70,6 +70,7 @@ import android.text.TextUtils;
@@ -1859,15 +1603,15 @@ index 7d7291c05..c5d9d3cd4 100644
  import android.text.style.LeadingMarginSpan;
  import android.text.style.StrikethroughSpan;
  import android.text.style.URLSpan;
-@@ -12014,6 +12015,7 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+@@ -12063,6 +12064,7 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
              Window window = activity == null ? null : activity.getWindow();
              if (window != null) {
                  flagSecure = new FlagSecureReason(window, () ->
 +                    !MessagesController.isAllowScreenshotsEnabled() &&
                      currentMessageObject != null && currentMessageObject.messageOwner != null && (
                          currentMessageObject.type == MessageObject.TYPE_PAID_MEDIA && (groupMedia == null || !groupMedia.hidden) ||
-                         currentMessageObject.messageOwner.noforwards ||
-@@ -18394,6 +18396,15 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+                         currentMessageObject.messageOwner.noforwards && !currentMessageObject.isEphemeral() ||
+@@ -18467,6 +18469,15 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
              timeString = LocaleController.formatSmallDateChat(currentMessageObject.realDate) + ", " + LocaleController.getInstance().getFormatterDay().format((long) (currentMessageObject.realDate) * 1000);
          } else if (currentMessageObject.isRepostPreview) {
              timeString = LocaleController.formatSmallDateChat(messageObject.messageOwner.date) + ", " + LocaleController.getInstance().getFormatterDay().format((long) (messageObject.messageOwner.date) * 1000);
@@ -1881,9 +1625,9 @@ index 7d7291c05..c5d9d3cd4 100644
 +            long dateToShow = recalledDate != 0 ? recalledDate : messageObject.messageOwner.date;
 +            timeString = "удалено отправителем" + " " + LocaleController.getInstance().getFormatterDay().format(dateToShow * 1000L);
          } else if (edited) {
-             timeString = AppGlobalConfig.getInstance(currentAccount).messagePrimaryEditedDate.get() ?
-                 LocaleController.formatPmEditedDate(currentMessagesGroup != null ? currentMessagesGroup.getMaxEditDate() : messageObject.messageOwner.edit_date) :
-@@ -18421,6 +18432,18 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+             if (AppGlobalConfig.getInstance(currentAccount).messagePrimaryEditedDate.get()) {
+                 int editDate = currentMessagesGroup != null ? currentMessagesGroup.getMaxEditDate() : messageObject.messageOwner.edit_date;
+@@ -18500,6 +18511,18 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
          } else {
              currentTimeString = timeString;
          }
@@ -1903,10 +1647,10 @@ index 7d7291c05..c5d9d3cd4 100644
              currentTimeString = TextUtils.concat("💎", StarsIntroActivity.formatTON(currentMessageObject.getStakedDiceAmount()), "  ", currentTimeString);
              currentTimeString = StarsIntroActivity.replaceDiamond(currentTimeString, 0.55f, null, 0, dp(-.33f), 1.05f);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
-index f2ccd7e90..e21779918 100644
+index 9dec6beb..c5882da7 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
-@@ -487,6 +487,7 @@ public class ChatActivity extends BaseFragment implements
+@@ -503,6 +503,7 @@ public class ChatActivity extends BaseFragment implements
      private RecyclerListView.OnItemClickListener mentionsOnItemClickListener;
      private SuggestEmojiView suggestEmojiPanel;
      private ActionBarMenuItem.Item muteItem;
@@ -1914,7 +1658,7 @@ index f2ccd7e90..e21779918 100644
      private ActionBarMenuItem.Item muteItemGap;
      private ActionBarMenuItem.Item feeItemGap;
      private ActionBarMenuItem.Item feeItemText;
-@@ -1619,6 +1620,7 @@ public class ChatActivity extends BaseFragment implements
+@@ -1657,6 +1658,7 @@ public class ChatActivity extends BaseFragment implements
      private final static int save_to = 25;
      private final static int auto_delete_timer = 26;
      private final static int change_colors = 27;
@@ -1922,7 +1666,7 @@ index f2ccd7e90..e21779918 100644
      private final static int tag_message = 28;
      private final static int boost_group = 29;
  
-@@ -2896,6 +2898,7 @@ public class ChatActivity extends BaseFragment implements
+@@ -2972,6 +2974,7 @@ public class ChatActivity extends BaseFragment implements
              .add(NotificationCenter.didLoadSendAsPeers)
              .add(NotificationCenter.closeChatActivity)
              .add(NotificationCenter.messagesDeleted)
@@ -1930,7 +1674,7 @@ index f2ccd7e90..e21779918 100644
              .add(NotificationCenter.historyCleared)
              .add(NotificationCenter.messageReceivedByServer)
              .add(NotificationCenter.messageReceivedByAck)
-@@ -3864,6 +3867,8 @@ public class ChatActivity extends BaseFragment implements
+@@ -3936,6 +3939,8 @@ public class ChatActivity extends BaseFragment implements
                      }
                  } else if (id == mute) {
                      toggleMute(false);
@@ -1939,7 +1683,7 @@ index f2ccd7e90..e21779918 100644
                  } else if (id == add_shortcut) {
                      try {
                          getMediaDataController().installShortcut(currentUser.id, MediaDataController.SHORTCUT_TYPE_USER_OR_CHAT);
-@@ -4398,6 +4403,10 @@ public class ChatActivity extends BaseFragment implements
+@@ -4485,6 +4490,10 @@ public class ChatActivity extends BaseFragment implements
              if (themeDelegate.isThemeChangeAvailable(true)) {
                  headerItem.lazilyAddSubItem(change_colors, R.drawable.msg_background, LocaleController.getString(R.string.SetWallpapers));
              }
@@ -1950,7 +1694,7 @@ index f2ccd7e90..e21779918 100644
              if (currentUser != null && currentUser.self && getDialogId() != UserObject.VERIFY) {
                  headerItem.lazilyAddSubItem(add_shortcut, R.drawable.msg_home, LocaleController.getString(R.string.AddShortcut));
              }
-@@ -8622,8 +8631,10 @@ public class ChatActivity extends BaseFragment implements
+@@ -8719,8 +8728,10 @@ public class ChatActivity extends BaseFragment implements
          chatScrollHelper.setAnimationCallback(chatScrollHelperCallback);
  
          flagSecure = new FlagSecureReason(getParentActivity().getWindow(), () ->
@@ -1963,7 +1707,7 @@ index f2ccd7e90..e21779918 100644
          );
  
          if (oldMessage != null) {
-@@ -16485,6 +16496,22 @@ public class ChatActivity extends BaseFragment implements
+@@ -16726,6 +16737,22 @@ public class ChatActivity extends BaseFragment implements
          }
      }
  
@@ -1986,7 +1730,7 @@ index f2ccd7e90..e21779918 100644
      private void toggleMute(boolean instant) {
          boolean muted = getMessagesController().isDialogMuted(dialog_id, getTopicId());
          if (!muted) {
-@@ -19481,6 +19508,9 @@ public class ChatActivity extends BaseFragment implements
+@@ -19748,6 +19775,9 @@ public class ChatActivity extends BaseFragment implements
              leftIcon = avatarContainer.getBotVerificationDrawable(DialogObject.getBotVerificationIcon(currentUser), false);
          }
          avatarContainer.setTitleIcons(leftIcon, rightIcon);
@@ -1996,7 +1740,7 @@ index f2ccd7e90..e21779918 100644
          if (!forceToggleMuted && muteItem != null) {
              if (isMuted) {
                  muteItem.setRightIconVisibility(View.GONE);
-@@ -22102,6 +22132,44 @@ public class ChatActivity extends BaseFragment implements
+@@ -22384,6 +22414,44 @@ public class ChatActivity extends BaseFragment implements
                  return;
              }
              ArrayList<Integer> markAsDeletedMessages = (ArrayList<Integer>) args[0];
@@ -2041,7 +1785,7 @@ index f2ccd7e90..e21779918 100644
              long channelId = (Long) args[1];
              boolean update = args.length > 2 && (boolean) args[2];
              boolean sent = args.length > 3 && (boolean) args[3];
-@@ -22165,6 +22233,29 @@ public class ChatActivity extends BaseFragment implements
+@@ -22447,6 +22515,29 @@ public class ChatActivity extends BaseFragment implements
                      removeSelfFromStack();
                  }
              }
@@ -2071,7 +1815,7 @@ index f2ccd7e90..e21779918 100644
          } else if (id == NotificationCenter.quickRepliesDeleted) {
              if (chatMode != MODE_QUICK_REPLIES) return;
              if ((Long) args[1] != getQuickReplyId()) return;
-@@ -24746,7 +24837,7 @@ public class ChatActivity extends BaseFragment implements
+@@ -25028,7 +25119,7 @@ public class ChatActivity extends BaseFragment implements
      private Pattern sponsoredUrlPattern;
      private MessageObject botSponsoredMessage;
      private void addSponsoredMessages(boolean animated) {
@@ -2081,7 +1825,7 @@ index f2ccd7e90..e21779918 100644
          }
          MessagesController.SponsoredMessagesInfo res = getMessagesController().getSponsoredMessages(dialog_id);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Components/TranslateAlert2.java b/TMessagesProj/src/main/java/org/telegram/ui/Components/TranslateAlert2.java
-index b31069f25..371967fb3 100644
+index b31069f2..371967fb 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/Components/TranslateAlert2.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/Components/TranslateAlert2.java
 @@ -1034,7 +1034,7 @@ public class TranslateAlert2 extends BottomSheet implements NotificationCenter.N
@@ -2094,7 +1838,7 @@ index b31069f25..371967fb3 100644
              AndroidUtilities.logFlagSecure();
          } else {
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java
-index 910de86ec..b66687c31 100644
+index 910de86e..b66687c3 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java
 @@ -11,6 +11,7 @@ package org.telegram.ui;
@@ -2117,7 +1861,7 @@ index 910de86ec..b66687c31 100644
  import org.telegram.messenger.LocaleController;
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java
 new file mode 100644
-index 000000000..c33556875
+index 00000000..c3355687
 --- /dev/null
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java
 @@ -0,0 +1,151 @@
@@ -2273,10 +2017,10 @@ index 000000000..c33556875
 +    }
 +}
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
-index f0994562a..4c48919b2 100644
+index fd968804..a04a62e0 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
-@@ -8802,7 +8802,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
+@@ -8814,7 +8814,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
          AndroidUtilities.runOnUIThread(showProxyButtonDelayed = () -> {
              proxyButtonVisible = false;
              showProxyButton(true, true);
@@ -2286,10 +2030,10 @@ index f0994562a..4c48919b2 100644
  
      private void showProxyButton(boolean show, boolean animated) {
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java b/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java
-index 776d83c01..c140b3adf 100644
+index 80e6e907..e9257def 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java
-@@ -17645,11 +17645,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
+@@ -17442,11 +17442,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                  WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR |
                  WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM |
                  WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS;
@@ -2304,10 +2048,10 @@ index 776d83c01..c140b3adf 100644
                  AndroidUtilities.logFlagSecure();
              } else {
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
-index e748e47b6..5d37a5dd4 100644
+index f0a3ad01..5d926cc9 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
-@@ -622,6 +622,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -630,6 +630,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
      private int languageRow;
      private int privacyRow;
      private int dataRow;
@@ -2315,7 +2059,16 @@ index e748e47b6..5d37a5dd4 100644
      private int chatRow;
      private int filtersRow;
      private int liteModeRow;
-@@ -2512,7 +2513,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -659,6 +660,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+     private int userInfoRow;
+     private int channelInfoRow;
+     private int usernameRow;
++    // GramBas: always-visible numeric peer id row
++    private int userIdRow;
+     private int notificationsDividerRow;
+     private int notificationsRow;
+     private int bizHoursRow;
+@@ -2522,7 +2525,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
              flagSecure = null;
          }
          if (layout != null && layout.getParentActivity() != null) {
@@ -2324,7 +2077,7 @@ index e748e47b6..5d37a5dd4 100644
          }
      }
  
-@@ -4507,6 +4508,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -4540,6 +4543,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                  presentFragment(new PrivacySettingsActivity().setCurrentPassword(currentPassword));
              } else if (position == dataRow) {
                  presentFragment(new DataSettingsActivity());
@@ -2333,7 +2086,20 @@ index e748e47b6..5d37a5dd4 100644
              } else if (position == chatRow) {
                  presentFragment(new ThemeActivity(ThemeActivity.THEME_TYPE_BASIC));
              } else if (position == filtersRow) {
-@@ -10445,6 +10448,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -7407,6 +7412,12 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+             return true;
+         } else if (position == noteRow) {
+ 
++        } else if (position == userIdRow) {
++            final long id = userId != 0 ? userId : chatId;
++            if (AndroidUtilities.addToClipboard(String.valueOf(id))) {
++                BulletinFactory.of(this).createCopyBulletin(getString(R.string.TextCopied)).show();
++            }
++            return true;
+         } else if (position == phoneRow || position == numberRow) {
+             if (editRow(view, position)) return true;
+ 
+@@ -10481,6 +10492,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
          premiumSectionsRow = -1;
          privacyRow = -1;
          dataRow = -1;
@@ -2341,7 +2107,15 @@ index e748e47b6..5d37a5dd4 100644
          chatRow = -1;
          filtersRow = -1;
          liteModeRow = -1;
-@@ -10610,6 +10614,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -10525,6 +10537,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+         locationRow = -1;
+         channelInfoRow = -1;
+         usernameRow = -1;
++        userIdRow = -1;
+         settingsTimerRow = -1;
+         settingsKeyRow = -1;
+         notificationsDividerRow = -1;
+@@ -10646,6 +10659,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                  privacyRow = rowCount++;
                  notificationRow = rowCount++;
                  dataRow = rowCount++;
@@ -2349,7 +2123,44 @@ index e748e47b6..5d37a5dd4 100644
                  liteModeRow = rowCount++;
  //                stickersRow = rowCount++;
                  if (getMessagesController().filtersEnabled || !getMessagesController().dialogFilters.isEmpty()) {
-@@ -13803,6 +13808,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -10717,6 +10731,9 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+                 if (user != null && username != null) {
+                     usernameRow = rowCount++;
+                 }
++                if (user != null) {
++                    userIdRow = rowCount++;
++                }
+                 if (userInfo != null) {
+                     if (userInfo.birthday != null) {
+                         birthdayRow = rowCount++;
+@@ -10841,6 +10858,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+                 }
+             }
+             usernameRow = rowCount++;
++            userIdRow = rowCount++;
+             if (actionsView == null) {
+                 notificationsSimpleRow = rowCount++;
+             }
+@@ -10875,6 +10893,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+                 if (ChatObject.isPublic(currentChat)) {
+                     usernameRow = rowCount++;
+                 }
++                userIdRow = rowCount++;
+             }
+             if (emptyRow < 0 && emptyRow2 < 0) {
+                 if (hasMusic || peerColor != null || actionsView == null) {
+@@ -13490,6 +13509,10 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+ 
+                             containsGift = !myProfile && today && !getMessagesController().premiumPurchaseBlocked();
+                         }
++                    } else if (position == userIdRow) {
++                        final long id = userId != 0 ? userId : chatId;
++                        detailCell.setTextAndValue(String.valueOf(id), "ID", infoEndRowEmpty == -1 && (isTopic || bizHoursRow != -1 || bizLocationRow != -1) && birthdayRow < 0);
++                        detailCell.setContentDescriptionValueFirst(false);
+                     } else if (position == phoneRow) {
+                         String text;
+                         TLRPC.User user = getMessagesController().getUser(userId);
+@@ -13846,6 +13869,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                          textCell.setTextAndIcon(LocaleController.getString(R.string.PrivacySettings), R.drawable.msg2_secret, true);
                      } else if (position == dataRow) {
                          textCell.setTextAndIcon(LocaleController.getString(R.string.DataSettings), R.drawable.msg2_data, true);
@@ -2358,7 +2169,7 @@ index e748e47b6..5d37a5dd4 100644
                      } else if (position == chatRow) {
                          textCell.setTextAndIcon(LocaleController.getString(R.string.ChatSettings), R.drawable.msg2_discussion, true);
                      } else if (position == filtersRow) {
-@@ -14244,7 +14251,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -14287,7 +14312,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                  int position = holder.getAdapterPosition();
                  return position == notificationRow || position == numberRow || position == privacyRow ||
                          position == languageRow || position == setUsernameRow || position == bioRow ||
@@ -2367,7 +2178,16 @@ index e748e47b6..5d37a5dd4 100644
                          position == questionRow || position == devicesRow || position == filtersRow || position == stickersRow ||
                          position == faqRow || position == policyRow || position == sendLogsRow || position == sendLastLogsRow ||
                          position == clearLogsRow || position == switchBackendRow || position == setAvatarRow ||
-@@ -14290,7 +14297,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -14321,7 +14346,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+             if (position == infoHeaderRow || position == membersHeaderRow || position == settingsSectionRow2 ||
+                     position == numberSectionRow || position == helpHeaderRow || position == debugHeaderRow || position == botPermissionsHeader) {
+                 return VIEW_TYPE_HEADER;
+-            } else if (position == phoneRow || position == locationRow || position == numberRow || position == birthdayRow) {
++            } else if (position == phoneRow || position == locationRow || position == numberRow || position == birthdayRow || position == userIdRow) {
+                 return VIEW_TYPE_TEXT_DETAIL;
+             } else if (position == usernameRow || position == setUsernameRow) {
+                 return VIEW_TYPE_TEXT_DETAIL_MULTILINE;
+@@ -14333,7 +14358,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                      position == subscribersRow || position == subscribersRequestsRow || position == administratorsRow || position == settingsRow || position == blockedUsersRow ||
                      position == addMemberRow || position == joinRow || position == unblockRow ||
                      position == sendMessageRow || position == notificationRow || position == privacyRow ||
@@ -2376,7 +2196,7 @@ index e748e47b6..5d37a5dd4 100644
                      position == questionRow || position == devicesRow || position == filtersRow || position == stickersRow ||
                      position == faqRow || position == policyRow || position == sendLogsRow || position == sendLastLogsRow ||
                      position == clearLogsRow || position == switchBackendRow || position == setAvatarRow || position == addToGroupButtonRow ||
-@@ -15654,6 +15661,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+@@ -15696,6 +15721,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
              put(++pointer, premiumGiftingRow, sparseIntArray);
              put(++pointer, privacyRow, sparseIntArray);
              put(++pointer, dataRow, sparseIntArray);
@@ -2384,20 +2204,25 @@ index e748e47b6..5d37a5dd4 100644
              put(++pointer, liteModeRow, sparseIntArray);
              put(++pointer, chatRow, sparseIntArray);
              put(++pointer, filtersRow, sparseIntArray);
+@@ -15725,6 +15751,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+             put(++pointer, userInfoRow, sparseIntArray);
+             put(++pointer, channelInfoRow, sparseIntArray);
+             put(++pointer, usernameRow, sparseIntArray);
++            put(++pointer, userIdRow, sparseIntArray);
+             put(++pointer, notificationsDividerRow, sparseIntArray);
+             put(++pointer, reportDividerRow, sparseIntArray);
+             put(++pointer, notificationsRow, sparseIntArray);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
-index 5e5e6934c..6cbb74811 100644
+index 08f074f7..658fd240 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
-@@ -72,12 +72,28 @@ import java.io.UnsupportedEncodingException;
+@@ -76,9 +76,25 @@ import java.io.UnsupportedEncodingException;
  import java.net.URLDecoder;
  import java.net.URLEncoder;
  import java.util.ArrayList;
 +import java.util.Locale;
  
  public class ProxySettingsActivity extends BaseFragment {
- 
-     private final static int TYPE_SOCKS5 = 0;
-     private final static int TYPE_MTPROTO = 1;
  
 +    private static int parseEchExtensionId(String text) {
 +        if (text == null) {
@@ -2523,9 +2348,9 @@ index 5e5e6934c..6cbb74811 100644
              actionBar.setOccupyStatusBar(false);
          }
  
-@@ -243,6 +342,35 @@ public class ProxySettingsActivity extends BaseFragment {
-                         editor.putString("proxy_secret", currentProxyInfo.secret);
-                         ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret);
+@@ -237,6 +336,35 @@ public class ProxySettingsActivity extends BaseFragment {
+                         currentProxyInfo.settings.toSharedPreferences(editor);
+                         ConnectionsManager.setProxySettings(enabled, currentProxyInfo.settings);
                      }
 +                    // Save and apply TLS fingerprint profile
 +                    if (rotationIntervalField != null) {
@@ -2559,7 +2384,7 @@ index 5e5e6934c..6cbb74811 100644
                      editor.commit();
  
                      NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
-@@ -448,6 +576,256 @@ public class ProxySettingsActivity extends BaseFragment {
+@@ -474,6 +602,256 @@ public class ProxySettingsActivity extends BaseFragment {
              linearLayout2.addView(bottomCells[i], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
          }
  
@@ -2816,26 +2641,36 @@ index 5e5e6934c..6cbb74811 100644
          pasteCell = new TextSettingsCell(fragmentView.getContext());
          pasteCell.setBackground(Theme.getSelectorDrawable(true));
          pasteCell.setText(LocaleController.getString(R.string.PasteFromClipboard), false);
-@@ -746,12 +1124,14 @@ public class ProxySettingsActivity extends BaseFragment {
-                 ((View) inputFields[FIELD_SECRET].getParent()).setVisibility(View.GONE);
+@@ -761,6 +1139,7 @@ public class ProxySettingsActivity extends BaseFragment {
                  ((View) inputFields[FIELD_PASSWORD].getParent()).setVisibility(View.VISIBLE);
                  ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.VISIBLE);
+                 ((View) inputFields[FIELD_PORT].getParent()).setVisibility(View.VISIBLE);
 +                if (fragmentContainer != null) fragmentContainer.setVisibility(View.GONE);
-             } else if (currentType == 1) {
+             } else if (currentType == ProxySettings.Type.MTPROTO) {
                  bottomCells[0].setVisibility(View.GONE);
                  bottomCells[1].setVisibility(View.VISIBLE);
-                 ((View) inputFields[FIELD_SECRET].getParent()).setVisibility(View.VISIBLE);
+@@ -769,6 +1148,8 @@ public class ProxySettingsActivity extends BaseFragment {
                  ((View) inputFields[FIELD_PASSWORD].getParent()).setVisibility(View.GONE);
                  ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.GONE);
+                 ((View) inputFields[FIELD_PORT].getParent()).setVisibility(View.VISIBLE);
++                // masking applies to the FakeTLS MTProto transport only
 +                if (fragmentContainer != null) fragmentContainer.setVisibility(View.VISIBLE);
+             } else if (currentType == ProxySettings.Type.WEB) {
+                 bottomCells[0].setVisibility(View.GONE);
+                 bottomCells[1].setVisibility(View.VISIBLE);
+@@ -778,6 +1159,7 @@ public class ProxySettingsActivity extends BaseFragment {
+                 ((View) inputFields[FIELD_USER].getParent()).setVisibility(View.GONE);
+                 ((View) inputFields[FIELD_PORT].getParent()).setVisibility(View.GONE);
+                 inputFields[FIELD_PORT].setText("443");
++                if (fragmentContainer != null) fragmentContainer.setVisibility(View.GONE);
              }
-             typeCell[0].setChecked(currentType == 0, animated);
-             typeCell[1].setChecked(currentType == 1, animated);
+             shareCell.setVisibility(currentType == ProxySettings.Type.WEB ? View.GONE : View.VISIBLE);
+             typeCell[0].setChecked(currentType == ProxySettings.Type.SOCKS5, animated);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/SecretMediaViewer.java b/TMessagesProj/src/main/java/org/telegram/ui/SecretMediaViewer.java
-index ee09cca09..393d918c9 100644
+index 635b933a..0a47cdc0 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/SecretMediaViewer.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/SecretMediaViewer.java
-@@ -977,8 +977,10 @@ public class SecretMediaViewer implements NotificationCenter.NotificationCenterD
+@@ -965,8 +965,10 @@ public class SecretMediaViewer implements NotificationCenter.NotificationCenterD
                  WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR |
                  WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
                  WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS;
@@ -2849,23 +2684,23 @@ index ee09cca09..393d918c9 100644
          centerImage.setForceCrossfade(true);
  
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/SecretVoicePlayer.java b/TMessagesProj/src/main/java/org/telegram/ui/SecretVoicePlayer.java
-index b22d350f5..57c8d1834 100644
+index c43df675..f50d637d 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/SecretVoicePlayer.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/SecretVoicePlayer.java
-@@ -257,7 +257,7 @@ public class SecretVoicePlayer extends Dialog {
-                 WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS |
-                 WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION;
-         }
+@@ -238,7 +238,7 @@ public class SecretVoicePlayer extends Dialog {
+             WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR |
+             WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS |
+             WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION;
 -        if (!BuildVars.DEBUG_PRIVATE_VERSION) {
 +        if (!BuildVars.DEBUG_PRIVATE_VERSION && !MessagesController.isAllowScreenshotsEnabled()) {
              params.flags |= WindowManager.LayoutParams.FLAG_SECURE;
              AndroidUtilities.logFlagSecure();
          }
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java
-index c5799ee80..d47e18e80 100644
+index 693df787..7f3033ea 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java
-@@ -692,6 +692,7 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
+@@ -702,6 +702,7 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
          items.add(SettingCell.Factory.of(3, IconBackgroundColors.GREEN.top, IconBackgroundColors.GREEN.bottom, R.drawable.settings_privacy, getString(R.string.SettingsPrivacySecurity), getString(R.string.SettingsPrivacySecurityInfo)));
          items.add(SettingCell.Factory.of(5, IconBackgroundColors.RED.top, IconBackgroundColors.RED.bottom, R.drawable.settings_sounds, getString(R.string.SettingsNotifications), getString(R.string.SettingsNotificationsInfo)));
          items.add(SettingCell.Factory.of(6, IconBackgroundColors.BLUE_DEEP.top, IconBackgroundColors.BLUE_DEEP.bottom, R.drawable.settings_data, getString(R.string.SettingsData), getString(R.string.SettingsDataInfo)));
@@ -2873,7 +2708,7 @@ index c5799ee80..d47e18e80 100644
          items.add(SettingCell.Factory.of(7, IconBackgroundColors.BLUE_ALT.top, IconBackgroundColors.BLUE_ALT.bottom, R.drawable.settings_folders, getString(R.string.SettingsFolders), getString(R.string.SettingsFoldersInfo)));
          items.add(SettingCell.Factory.of(8, IconBackgroundColors.CYAN.top, IconBackgroundColors.CYAN.bottom, R.drawable.settings_devices, getString(R.string.SettingsDevices), getString(R.string.SettingsDevicesInfo)));
          items.add(SettingCell.Factory.of(9, IconBackgroundColors.ORANGE_DEEP.top, IconBackgroundColors.ORANGE_DEEP.bottom, R.drawable.settings_power, getString(R.string.SettingsPowerSaving), getString(R.string.SettingsPowerSavingInfo)));
-@@ -823,6 +824,9 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
+@@ -832,6 +833,9 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
              case 6:
                  presentSettingFragment(new DataSettingsActivity());
                  break;
@@ -2883,7 +2718,7 @@ index c5799ee80..d47e18e80 100644
              case 7:
                  presentSettingFragment(new FiltersSetupActivity());
                  break;
-@@ -932,7 +936,9 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
+@@ -948,7 +952,9 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
                      }
                      break;
              }
@@ -2895,10 +2730,10 @@ index c5799ee80..d47e18e80 100644
              FileLog.e(e);
          }
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Stories/StoryViewer.java b/TMessagesProj/src/main/java/org/telegram/ui/Stories/StoryViewer.java
-index ed2143fde..109bc7de0 100644
+index 8ce1270e..c386849a 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/Stories/StoryViewer.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/Stories/StoryViewer.java
-@@ -2885,7 +2885,7 @@ public class StoryViewer implements NotificationCenter.NotificationCenterDelegat
+@@ -2873,7 +2873,7 @@ public class StoryViewer implements NotificationCenter.NotificationCenterDelegat
          if (BuildVars.DEBUG_PRIVATE_VERSION) {
              return;
          }
@@ -2908,7 +2743,7 @@ index ed2143fde..109bc7de0 100644
              this.allowScreenshots = allowScreenshots;
  
 diff --git a/TMessagesProj/src/main/res/values/strings.xml b/TMessagesProj/src/main/res/values/strings.xml
-index 71702261c..3203fefb3 100644
+index 169ab902..d36a5612 100644
 --- a/TMessagesProj/src/main/res/values/strings.xml
 +++ b/TMessagesProj/src/main/res/values/strings.xml
 @@ -1,7 +1,7 @@
@@ -2921,7 +2756,7 @@ index 71702261c..3203fefb3 100644
      <string name="LanguageName">English</string>
      <string name="English">English</string>
      <string name="LanguageNameInEnglish">English</string>
-@@ -2622,6 +2622,7 @@
+@@ -2630,6 +2630,7 @@
      <string name="Emoji">Emoji</string>
      <string name="LargeEmoji">Large Emoji</string>
      <string name="TelegramVersion">Telegram for Android %1$s</string>
@@ -2930,11 +2765,12 @@ index 71702261c..3203fefb3 100644
      <string name="DebugMenuLongPress">Long press again for debug menu</string>
      <string name="DebugSendLogs">Send Logs</string>
 diff --git a/TMessagesProj_App/build.gradle b/TMessagesProj_App/build.gradle
-index 2aa197cb3..632593bdf 100644
+index 0bc33062..45566e71 100644
 --- a/TMessagesProj_App/build.gradle
 +++ b/TMessagesProj_App/build.gradle
-@@ -1,5 +1,22 @@
+@@ -1,6 +1,23 @@
  apply plugin: 'com.android.application'
+ apply plugin: 'org.telegram.build-app-plugin'
  
 +def getForkVersionTag() {
 +    def envTag = System.getenv("FORK_VERSION_TAG")
@@ -2956,7 +2792,7 @@ index 2aa197cb3..632593bdf 100644
  repositories {
      mavenCentral()
      google()
-@@ -18,6 +35,7 @@ dependencies {
+@@ -19,6 +36,7 @@ dependencies {
      implementation project(':TMessagesProj')
      coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
      implementation files('../TMessagesProj/libs/libgsaverification-client.aar')
@@ -2964,7 +2800,7 @@ index 2aa197cb3..632593bdf 100644
  }
  
  android {
-@@ -176,6 +194,8 @@ android {
+@@ -171,6 +189,8 @@ android {
          versionName APP_VERSION_NAME
          ndkVersion "27.2.12479018"
  
@@ -2974,7 +2810,7 @@ index 2aa197cb3..632593bdf 100644
  
          vectorDrawables.generatedDensities = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi']
 diff --git a/TMessagesProj_App/google-services.json b/TMessagesProj_App/google-services.json
-index 640e841b2..e2b704296 100644
+index 640e841b..e2b70429 100644
 --- a/TMessagesProj_App/google-services.json
 +++ b/TMessagesProj_App/google-services.json
 @@ -10,7 +10,7 @@
@@ -3005,7 +2841,7 @@ index 640e841b2..e2b704296 100644
        },
        "oauth_client": [
 diff --git a/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java b/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
-index 7b80edfd4..a67fc533e 100644
+index 7b80edfd..a67fc533 100644
 --- a/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
 +++ b/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
 @@ -1,10 +1,117 @@
@@ -3128,7 +2964,7 @@ index 7b80edfd4..a67fc533e 100644
  }
 diff --git a/TMessagesProj_App/src/main/java/org/telegram/messenger/GithubUpdaterController.java b/TMessagesProj_App/src/main/java/org/telegram/messenger/GithubUpdaterController.java
 new file mode 100644
-index 000000000..96ae4aa6e
+index 00000000..96ae4aa6
 --- /dev/null
 +++ b/TMessagesProj_App/src/main/java/org/telegram/messenger/GithubUpdaterController.java
 @@ -0,0 +1,294 @@
@@ -3428,7 +3264,7 @@ index 000000000..96ae4aa6e
 +}
 diff --git a/TMessagesProj_App/src/main/java/org/telegram/ui/Components/UpdateAppAlertDialog.java b/TMessagesProj_App/src/main/java/org/telegram/ui/Components/UpdateAppAlertDialog.java
 new file mode 100644
-index 000000000..4adfb3ee3
+index 00000000..4adfb3ee
 --- /dev/null
 +++ b/TMessagesProj_App/src/main/java/org/telegram/ui/Components/UpdateAppAlertDialog.java
 @@ -0,0 +1,376 @@
@@ -3810,7 +3646,7 @@ index 000000000..4adfb3ee3
 +}
 diff --git a/TMessagesProj_App/src/main/java/org/telegram/ui/Components/UpdateLayout.java b/TMessagesProj_App/src/main/java/org/telegram/ui/Components/UpdateLayout.java
 new file mode 100644
-index 000000000..677a0a34b
+index 00000000..677a0a34
 --- /dev/null
 +++ b/TMessagesProj_App/src/main/java/org/telegram/ui/Components/UpdateLayout.java
 @@ -0,0 +1,150 @@
@@ -3965,13 +3801,13 @@ index 000000000..677a0a34b
 +    }
 +}
 diff --git a/gradle.properties b/gradle.properties
-index 5e1ad1dde..b0a7c353b 100644
+index 55d530f0..a600f568 100644
 --- a/gradle.properties
 +++ b/gradle.properties
 @@ -15,7 +15,7 @@
  #Sat Mar 12 05:53:50 MSK 2016
- APP_VERSION_CODE=6966
- APP_VERSION_NAME=12.9.0
+ APP_VERSION_CODE=7175
+ APP_VERSION_NAME=13.0.2
 -APP_PACKAGE=org.telegram.messenger
 +APP_PACKAGE=com.rework.grambas
  IS_PRIVATE=false

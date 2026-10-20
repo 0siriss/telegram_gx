@@ -47,7 +47,7 @@ jobs:
       - name: Install NDK and build tools
         run: |
           echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
-            "ndk;23.2.8568313" \
+            "ndk;27.2.12479018" \
             "cmake;3.22.1" \
             "build-tools;36.0.0" \
             "platforms;android-36"
