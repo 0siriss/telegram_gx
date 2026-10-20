@@ -123,7 +123,12 @@ jobs:
       - name: Trigger build workflow
         if: steps.version.outputs.changed == 'true' && steps.apply.outputs.patch_failed == 'false'
         run: |
-          gh workflow run build.yml --ref ${{ steps.push.outputs.new_tag }}
+          # Пуш тега выше сделан с GITHUB_TOKEN, а события от него не запускают другие
+          # workflow — поэтому сборку дёргаем явно. build.yml объявляет workflow_dispatch
+          # с обязательным version_tag, его и передаём.
+          gh workflow run build.yml \
+            --ref "${{ steps.push.outputs.new_tag }}" \
+            -f version_tag="${{ steps.push.outputs.new_tag }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 'Версия сборки, например v2.3.1. Тег создаётся при публикации релиза.'
+        required: true
+        type: string
 
 jobs:
   build:
@@ -12,9 +18,18 @@ jobs:
       contents: write
 
     steps:
+      - name: Resolve version tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.version_tag }}" ]; then
+            echo "tag=${{ inputs.version_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Notify build started via Telegram
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${{ steps.tag.outputs.tag }}"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d "text=🔨 <b>Сборка начата</b> — ${TAG}%0A%0Ahttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
@@ -77,11 +92,7 @@ jobs:
         run: ./gradlew :TMessagesProj_App:assembleRelease --no-daemon
         env:
           GRADLE_OPTS: "-Xmx6g -XX:MaxMetaspaceSize=512m"
-          FORK_VERSION_TAG: ${{ github.ref_name }}
-
-      - name: Get tag name
-        id: tag
-        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          FORK_VERSION_TAG: ${{ steps.tag.outputs.tag }}
 
       - name: Publish GitHub Release
         id: release
@@ -110,6 +121,7 @@ jobs:
             echo "No release for $TAG yet — creating with default notes"
             gh release create "$TAG" "$APK" \
               --repo "$REPO" \
+              --target "${{ github.sha }}" \
               $PRERELEASE \
               --title "GramBas $TAG" \
               --notes "## GramBas — $TAG
