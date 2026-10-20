@@ -93,6 +93,16 @@ jobs:
           REPO="${{ github.repository }}"
           APK="TMessagesProj_App/build/outputs/apk/afat/release/app.apk"
 
+          # Тестовые сборки (тег с третьим компонентом, например v2.3.1) публикуем как
+          # prerelease: встроенный апдейтер читает /releases/latest, а GitHub никогда не
+          # отдаёт туда prerelease, поэтому такая сборка не предлагается пользователям.
+          # Обычные релизы (v2.4) остаются latest и обновление получают все.
+          PRERELEASE=""
+          if echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+'; then
+            PRERELEASE="--prerelease"
+            echo "$TAG looks like a test build — publishing as prerelease"
+          fi
+
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release $TAG already exists — uploading APK only, leaving notes/prerelease flag untouched"
             gh release upload "$TAG" "$APK" --repo "$REPO" --clobber
@@ -100,6 +110,7 @@ jobs:
             echo "No release for $TAG yet — creating with default notes"
             gh release create "$TAG" "$APK" \
               --repo "$REPO" \
+              $PRERELEASE \
               --title "GramBas $TAG" \
               --notes "## GramBas — $TAG
 
@@ -117,6 +128,7 @@ jobs:
 
           ### Удобство
           - Голосовые сообщения загружаются заранее, ещё до открытия чата
+          - Числовой идентификатор виден в профиле, нажатие копирует его
           - Скрытие рекламных сообщений в каналах и в видео
           - Соединение не прерывается, когда приложение свёрнуто
           - Приложение само проверяет и предлагает установить новые версии
