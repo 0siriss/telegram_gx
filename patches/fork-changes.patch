@@ -1018,7 +1018,7 @@ index ec503d93..082f9570 100644
      public float forceSeekTo = -1;
      public int audioProgressMs;
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
-index 93bc81cb..9726f5bd 100644
+index 93bc81cb..2991506d 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
 @@ -8273,13 +8273,17 @@ public class MessagesController extends BaseController implements NotificationCe
@@ -1041,7 +1041,54 @@ index 93bc81cb..9726f5bd 100644
                      final boolean checkViewer = SecretMediaViewer.hasInstance() && SecretMediaViewer.getInstance().isVisible();
                      final MessageObject viewerObject = checkViewer ? SecretMediaViewer.getInstance().getCurrentMessageObject() : null;
                      for (int a = 0, N = taskMedia.size(); a < N; a++) {
-@@ -14389,6 +14393,10 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -10847,6 +10851,23 @@ public class MessagesController extends BaseController implements NotificationCe
+         if (reset && checkingPromoInfo) {
+             checkingPromoInfo = false;
+         }
++        if (isSponsoredMessagesHidden()) {
++            // GramBas: the ad toggle covers every promo dialog, not only the proxy sponsor one --
++            // PSA and other promo types arrive through the same request, so it is not sent at all
++            // and a dialog stored by an earlier check is dropped. This runs ahead of the next-check
++            // time guard, because a promo dialog is kept in local storage and would otherwise stay
++            // in the list for the rest of the session. Turning the toggle off calls back in with
++            // reset = true, which fetches again.
++            if (checkingPromoInfoRequestId != 0) {
++                getConnectionsManager().cancelRequest(checkingPromoInfoRequestId, true);
++                checkingPromoInfoRequestId = 0;
++            }
++            checkingPromoInfo = false;
++            if (promoDialogId != 0) {
++                dropPromoDialog();
++            }
++            return;
++        }
+         if (!reset && nextPromoInfoCheckTime > getConnectionsManager().getCurrentTime() || checkingPromoInfo) {
+             return;
+         }
+@@ -11131,6 +11152,22 @@ public class MessagesController extends BaseController implements NotificationCe
+         }
+     }
+ 
++    /**
++     * Forgets the stored promo dialog and takes it out of the list. Runs on the stage queue,
++     * where the promo state is owned; the list itself is touched on the UI thread.
++     */
++    private void dropPromoDialog() {
++        promoDialogId = 0;
++        proxyDialogAddress = null;
++        nextPromoInfoCheckTime = getConnectionsManager().getCurrentTime() + 60 * 60;
++        getGlobalMainSettings().edit()
++                .putLong("proxy_dialog", 0)
++                .remove("proxyDialogAddress")
++                .putInt("nextPromoInfoCheckTime", nextPromoInfoCheckTime)
++                .commit();
++        AndroidUtilities.runOnUIThread(this::removePromoDialog);
++    }
++
+     private void removePromoDialog() {
+         if (promoDialog == null) {
+             return;
+@@ -14389,6 +14426,10 @@ public class MessagesController extends BaseController implements NotificationCe
          long dialogId = messageObject.getDialogId();
          getMessagesStorage().markMessagesContentAsRead(dialogId, arrayList, 0, 0);
          getNotificationCenter().postNotificationName(NotificationCenter.messagesReadContent, dialogId, arrayList);
@@ -1052,7 +1099,7 @@ index 93bc81cb..9726f5bd 100644
          if (messageObject.getId() < 0) {
              markMessageAsRead(messageObject.getDialogId(), messageObject.messageOwner.random_id, Integer.MIN_VALUE);
          } else {
-@@ -14454,6 +14462,11 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -14454,6 +14495,11 @@ public class MessagesController extends BaseController implements NotificationCe
  
      public void doDeleteShowOnceTask(long taskId, long dialogId, int mid) {
          getMessagesStorage().removePendingTask(taskId);
@@ -1064,7 +1111,7 @@ index 93bc81cb..9726f5bd 100644
          ArrayList<Integer> mids = new ArrayList<>();
          mids.add(mid);
          getMessagesStorage().emptyMessagesMedia(dialogId, mids);
-@@ -14464,6 +14477,15 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -14464,6 +14510,15 @@ public class MessagesController extends BaseController implements NotificationCe
      }
  
      public void markMessageAsRead2(long dialogId, int mid, TLRPC.InputChannel inputChannel, int ttl, long taskId, boolean createDeleteTask) {
@@ -1080,7 +1127,7 @@ index 93bc81cb..9726f5bd 100644
          if (mid == 0 || ttl < 0) {
              return;
          }
-@@ -18448,6 +18470,10 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -18448,6 +18503,10 @@ public class MessagesController extends BaseController implements NotificationCe
          LongSparseArray<ArrayList<Integer>> markContentAsReadMessages = null;
          SparseIntArray markAsReadEncrypted = null;
          LongSparseArray<ArrayList<Integer>> deletedMessages = null;
@@ -1091,7 +1138,7 @@ index 93bc81cb..9726f5bd 100644
          LongSparseArray<ArrayList<Integer>> deletedQuickReplyMessages = null;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessages = null;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSent = null;
-@@ -18836,6 +18862,11 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -18836,6 +18895,11 @@ public class MessagesController extends BaseController implements NotificationCe
                  dialogs_read_outbox_max.put(dialogId, Math.max(value, update.max_id));
              } else if (baseUpdate instanceof TL_update.TL_updateDeleteMessages) {
                  TL_update.TL_updateDeleteMessages update = (TL_update.TL_updateDeleteMessages) baseUpdate;
@@ -1103,7 +1150,7 @@ index 93bc81cb..9726f5bd 100644
                  if (deletedMessages == null) {
                      deletedMessages = new LongSparseArray<>();
                  }
-@@ -19361,16 +19392,33 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -19361,16 +19425,33 @@ public class MessagesController extends BaseController implements NotificationCe
                  if (BuildVars.LOGS_ENABLED) {
                      FileLog.d(baseUpdate + " channelId = " + update.channel_id);
                  }
@@ -1145,7 +1192,7 @@ index 93bc81cb..9726f5bd 100644
              } else if (baseUpdate instanceof TL_update.TL_updateChannel) {
                  if (BuildVars.LOGS_ENABLED) {
                      TL_update.TL_updateChannel update = (TL_update.TL_updateChannel) baseUpdate;
-@@ -21043,6 +21091,7 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21043,6 +21124,7 @@ public class MessagesController extends BaseController implements NotificationCe
          LongSparseArray<ArrayList<Integer>> markContentAsReadMessagesFinal = markContentAsReadMessages;
          SparseIntArray markAsReadEncryptedFinal = markAsReadEncrypted;
          LongSparseArray<ArrayList<Integer>> deletedMessagesFinal = deletedMessages;
@@ -1153,7 +1200,7 @@ index 93bc81cb..9726f5bd 100644
          LongSparseArray<ArrayList<Integer>> deletedQuickRepliesMessagesFinal = deletedQuickReplyMessages;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesFinal = scheduledDeletedMessages;
          LongSparseArray<ArrayList<Integer>> scheduledDeletedMessagesSentFinal = scheduledDeletedMessagesSent;
-@@ -21167,6 +21216,35 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21167,6 +21249,35 @@ public class MessagesController extends BaseController implements NotificationCe
                  }
                  getNotificationsController().removeDeletedMessagesFromNotifications(deletedMessagesFinal, false);
              }
@@ -1189,7 +1236,7 @@ index 93bc81cb..9726f5bd 100644
              if (deletedQuickRepliesMessagesFinal != null) {
                  for (int a = 0, size = deletedQuickRepliesMessagesFinal.size(); a < size; a++) {
                      long topicId = deletedQuickRepliesMessagesFinal.keyAt(a);
-@@ -21253,6 +21331,20 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21253,6 +21364,20 @@ public class MessagesController extends BaseController implements NotificationCe
              for (int a = 0, size = deletedMessages.size(); a < size; a++) {
                  long key = deletedMessages.keyAt(a);
                  ArrayList<Integer> arrayList = deletedMessages.valueAt(a);
@@ -1210,7 +1257,7 @@ index 93bc81cb..9726f5bd 100644
                  getMessagesStorage().getStorageQueue().postRunnable(() -> {
                      ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, arrayList, false, true, 0, 0);
                      getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, arrayList, dialogIds);
-@@ -21591,6 +21683,147 @@ public class MessagesController extends BaseController implements NotificationCe
+@@ -21591,6 +21716,154 @@ public class MessagesController extends BaseController implements NotificationCe
          return false;
      }
  
@@ -1281,6 +1328,13 @@ index 93bc81cb..9726f5bd 100644
 +
 +    public static void setSponsoredMessagesHidden(boolean hidden) {
 +        getGlobalMainSettings().edit().putBoolean("sponsored_messages_hidden", hidden).commit();
++        // Promo dialogs are held per account and survive in the dialog list, so the switch has to
++        // reach them now: hiding drops the current one, showing fetches it again.
++        for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
++            if (UserConfig.getInstance(a).isClientActivated()) {
++                getInstance(a).checkPromoInfo(true);
++            }
++        }
 +    }
 +
 +    // TGX: suppress the "took a screenshot" service message sent to the other party in secret
