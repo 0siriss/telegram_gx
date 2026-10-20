@@ -2799,19 +2799,9 @@ index 8ce1270e..c386849a 100644
              this.allowScreenshots = allowScreenshots;
  
 diff --git a/TMessagesProj/src/main/res/values/strings.xml b/TMessagesProj/src/main/res/values/strings.xml
-index 169ab902..d36a5612 100644
+index 169ab902..c89688e2 100644
 --- a/TMessagesProj/src/main/res/values/strings.xml
 +++ b/TMessagesProj/src/main/res/values/strings.xml
-@@ -1,7 +1,7 @@
- <?xml version="1.0" encoding="utf-8"?>
- <resources>
--    <string name="AppName">Telegram</string>
--    <string name="AppNameBeta">Telegram Beta</string>
-+    <string name="AppName">GramBas</string>
-+    <string name="AppNameBeta">GramBas Beta</string>
-     <string name="LanguageName">English</string>
-     <string name="English">English</string>
-     <string name="LanguageNameInEnglish">English</string>
 @@ -2630,6 +2630,7 @@
      <string name="Emoji">Emoji</string>
      <string name="LargeEmoji">Large Emoji</string>
