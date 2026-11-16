@@ -115,7 +115,7 @@ class MaxLoginFragment : BaseFragment() {
                     hint.text = "Введите номер телефона, на который зарегистрирован MAX"
                 }
                 if (error != null) {
-                    status.text = "Не удалось подключиться: " + (error.message ?: "нет связи")
+                    status.text = "Не удалось подключиться: " + MaxLog.describe(error)
                 }
             }
         }
@@ -191,7 +191,7 @@ class MaxLoginFragment : BaseFragment() {
     }
 
     private fun fail(error: Throwable?) {
-        status.text = error?.message ?: "Не получилось, попробуйте ещё раз"
+        status.text = if (error == null) "Не получилось, попробуйте ещё раз" else MaxLog.describe(error)
         button.text = when (step) {
             STEP_PHONE -> "Получить код"
             STEP_CODE -> "Войти"

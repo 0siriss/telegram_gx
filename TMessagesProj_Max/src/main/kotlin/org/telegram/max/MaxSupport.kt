@@ -36,6 +36,24 @@ object MaxLog {
             FileLog.e("MAX: $message")
         }
     }
+
+    /**
+     * Текст ошибки для экрана. У исключения может не быть сообщения — тогда показываем
+     * хотя бы имя класса и причину, иначе пользователь видит пустую строку и сказать по
+     * ней нечего.
+     */
+    fun describe(e: Throwable?): String {
+        if (e == null) return "неизвестная ошибка"
+        val own = e.message?.trim().orEmpty()
+        val cause = e.cause?.message?.trim().orEmpty()
+        val text = when {
+            own.isNotEmpty() && cause.isNotEmpty() && own != cause -> "$own ($cause)"
+            own.isNotEmpty() -> own
+            cause.isNotEmpty() -> cause
+            else -> e.javaClass.simpleName
+        }
+        return text
+    }
 }
 
 /**

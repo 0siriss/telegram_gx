@@ -27,6 +27,9 @@ android {
     defaultConfig {
         minSdkVersion 23
         targetSdkVersion 36
+        // Правила уезжают в релизную сборку приложения: без них R8 вырезает классы,
+        // которые нужны только нативной стороне ядра.
+        consumerProguardFiles 'consumer-rules.pro'
     }
 
     compileOptions {

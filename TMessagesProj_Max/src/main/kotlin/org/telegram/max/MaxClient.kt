@@ -10,9 +10,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 import ru.kolibri.Auth
 import ru.kolibri.Config
+import ru.kolibri.Kolibri
 import ru.kolibri.Session
 import ru.kolibri.SessionState
 import android.util.Base64
+import java.io.File
 
 /**
  * Сессия MAX поверх ядра kolibri. Живёт отдельно от MTProto: свой сокет, свой токен,
@@ -119,6 +121,7 @@ object MaxClient {
      */
     private fun connectIfNeeded() {
         synchronized(connectLock) {
+            configureCore()
             var live = session
             if (live == null) {
                 live = Session.open(
@@ -140,6 +143,31 @@ object MaxClient {
                 forEachListener { it.onStateChanged() }
                 startPushLoop()
             }
+        }
+    }
+
+    private var coreConfigured = false
+
+    /**
+     * Настройки ядра, общие на весь процесс. Ставятся один раз до первого соединения.
+     *
+     * `api2.oneme.ru` отдаёт сертификат Минцифры, которого нет в системном хранилище
+     * Android: без этого флага TLS падает с UnknownIssuer и до рукопожатия дело не
+     * доходит. Ядро держит этот корень внутри себя и добавляет его только к своим
+     * исходящим соединениям, системное хранилище не трогается.
+     *
+     * Кеш адресов на диске нужен, чтобы соединение поднималось и когда DNS в сети
+     * подменён или не отвечает.
+     */
+    private fun configureCore() {
+        if (coreConfigured) return
+        try {
+            Kolibri.setTrustMincifryCa(true)
+            val dir = org.telegram.messenger.ApplicationLoader.applicationContext.filesDir
+            Kolibri.setDnsCachePath(File(dir, "kolibri_dns").path)
+            coreConfigured = true
+        } catch (e: Throwable) {
+            MaxLog.e("не удалось настроить ядро", e)
         }
     }
 

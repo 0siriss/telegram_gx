@@ -86,7 +86,7 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
         }
         MaxClient.start { error ->
             AndroidUtilities.runOnUIThread {
-                if (error != null) showEmpty("Не удалось подключиться: " + (error.message ?: ""))
+                if (error != null) showEmpty("Не удалось подключиться: " + MaxLog.describe(error))
                 else updateUi()
             }
         }
@@ -109,7 +109,7 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
         showEmpty("Обновляем…")
         MaxClient.reloadChats { error ->
             AndroidUtilities.runOnUIThread {
-                if (error != null) showEmpty("Не удалось обновить: " + (error.message ?: ""))
+                if (error != null) showEmpty("Не удалось обновить: " + MaxLog.describe(error))
                 else updateUi()
             }
         }
