@@ -66,20 +66,30 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
         root.addView(empty, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER))
 
         fragmentView = root
+        loadChats()
         return root
     }
 
     override fun onFragmentCreate(): Boolean {
         MaxClient.addListener(this)
-        if (MaxClient.chats.isEmpty()) {
-            MaxClient.start { error ->
-                AndroidUtilities.runOnUIThread {
-                    if (error != null) showEmpty("Не удалось подключиться: " + (error.message ?: ""))
-                    else updateUi()
-                }
+        return super.onFragmentCreate()
+    }
+
+    /**
+     * Загрузку начинаем из createView, а не из onFragmentCreate: там поля экрана ещё не
+     * созданы, и ответ, пришедший раньше вёрстки, ронял бы фрагмент.
+     */
+    private fun loadChats() {
+        if (MaxClient.chats.isNotEmpty()) {
+            updateUi()
+            return
+        }
+        MaxClient.start { error ->
+            AndroidUtilities.runOnUIThread {
+                if (error != null) showEmpty("Не удалось подключиться: " + (error.message ?: ""))
+                else updateUi()
             }
         }
-        return super.onFragmentCreate()
     }
 
     override fun onFragmentDestroy() {
@@ -106,6 +116,7 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
     }
 
     private fun updateUi() {
+        if (!::empty.isInitialized) return
         adapter?.notifyDataSetChanged()
         if (MaxClient.chats.isEmpty()) {
             showEmpty("Пока нет чатов")
@@ -115,6 +126,7 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
     }
 
     private fun showEmpty(text: String) {
+        if (!::empty.isInitialized) return
         empty.text = text
         empty.visibility = View.VISIBLE
     }

@@ -75,11 +75,17 @@ class MaxChatFragment(private val chatId: Long, private val chatTitle: String) :
         root.addView(bottom, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
 
         fragmentView = root
+        loadHistory()
         return root
     }
 
     override fun onFragmentCreate(): Boolean {
         MaxClient.addListener(this)
+        return super.onFragmentCreate()
+    }
+
+    /** Историю грузим из createView: ответ может прийти раньше, чем будет создана вёрстка. */
+    private fun loadHistory() {
         MaxClient.loadHistory(chatId, 50) { list, error ->
             AndroidUtilities.runOnUIThread {
                 if (error != null || list == null) {
@@ -92,7 +98,6 @@ class MaxChatFragment(private val chatId: Long, private val chatTitle: String) :
                 scrollToBottom()
             }
         }
-        return super.onFragmentCreate()
     }
 
     override fun onFragmentDestroy() {
@@ -127,6 +132,8 @@ class MaxChatFragment(private val chatId: Long, private val chatTitle: String) :
     }
 
     private fun scrollToBottom() {
+        // Пуш может прийти раньше вёрстки: слушателя мы ставим в onFragmentCreate.
+        if (!::listView.isInitialized) return
         if (messages.isNotEmpty()) {
             listView.scrollToPosition(messages.size - 1)
         }

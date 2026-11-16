@@ -97,7 +97,28 @@ class MaxLoginFragment : BaseFragment() {
 
         root.addView(column, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.TOP))
         fragmentView = root
+        connect()
         return root
+    }
+
+    /**
+     * Поднимаем соединение сразу при открытии экрана: до рукопожатия сервер не примет ни
+     * запрос кода, ни вход, а пользователь должен видеть, что идёт подключение.
+     */
+    private fun connect() {
+        hint.text = "Подключаемся к MAX…"
+        button.isEnabled = false
+        MaxClient.start { error ->
+            AndroidUtilities.runOnUIThread {
+                button.isEnabled = true
+                if (step == STEP_PHONE) {
+                    hint.text = "Введите номер телефона, на который зарегистрирован MAX"
+                }
+                if (error != null) {
+                    status.text = "Не удалось подключиться: " + (error.message ?: "нет связи")
+                }
+            }
+        }
     }
 
     private fun onButtonClick() {

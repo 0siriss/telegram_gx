@@ -39,6 +39,7 @@ object MaxClient {
     private var callsSeed: Long = 0
     private var scope: CoroutineScope? = null
     private var pushJob: Job? = null
+    private val connectLock = Any()
 
     @Volatile
     var chats: List<MaxChat> = emptyList()
@@ -93,27 +94,13 @@ object MaxClient {
 
     /**
      * Поднимает сокет и делает рукопожатие. Если токен уже сохранён, сразу выполняет
-     * вход и забирает список чатов.
+     * вход и забирает список чатов. Вызывать не обязательно: любой запрос сам поднимает
+     * сессию, но экран может позвать это заранее, чтобы показать состояние.
      */
     fun start(onDone: (Throwable?) -> Unit) {
         ensureScope().launch {
             try {
-                if (session == null) {
-                    session = Session.open(
-                        Config(
-                            host = HOST,
-                            deviceId = MaxStore.deviceId,
-                            instanceId = MaxStore.deviceId,
-                            deviceName = android.os.Build.MODEL ?: "Android",
-                            osVersion = "Android " + android.os.Build.VERSION.RELEASE,
-                            arch = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a",
-                        )
-                    )
-                }
-                val handshake = JSONObject(session!!.connect())
-                callsSeed = handshake.optLong("callsSeed", 0L)
-                forEachListener { it.onStateChanged() }
-                startPushLoop()
+                connectIfNeeded()
                 val token = MaxStore.token
                 if (token != null) {
                     login(token)
@@ -122,6 +109,36 @@ object MaxClient {
             } catch (e: Throwable) {
                 MaxLog.e("start failed", e)
                 onDone(e)
+            }
+        }
+    }
+
+    /**
+     * Открывает сессию и делает рукопожатие, если это ещё не сделано. Синхронно и под
+     * блокировкой: два экрана могут позвать запрос одновременно, а сессия нужна одна.
+     */
+    private fun connectIfNeeded() {
+        synchronized(connectLock) {
+            var live = session
+            if (live == null) {
+                live = Session.open(
+                    Config(
+                        host = HOST,
+                        deviceId = MaxStore.deviceId,
+                        instanceId = MaxStore.deviceId,
+                        deviceName = android.os.Build.MODEL ?: "Android",
+                        osVersion = "Android " + android.os.Build.VERSION.RELEASE,
+                        arch = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a",
+                    )
+                )
+                session = live
+            }
+            if (live.state != SessionState.ONLINE) {
+                val handshake = JSONObject(live.blocking.connect())
+                callsSeed = handshake.optLong("callsSeed", 0L)
+                MaxLog.i("рукопожатие выполнено, callsSeed=" + callsSeed)
+                forEachListener { it.onStateChanged() }
+                startPushLoop()
             }
         }
     }
@@ -382,6 +399,9 @@ object MaxClient {
     }
 
     private fun request(opcode: Int, payload: JSONObject): String {
+        // Соединение поднимается здесь, а не на экране: иначе первый же запрос с экрана
+        // входа падал с "сессия не открыта".
+        connectIfNeeded()
         val live = session ?: throw IllegalStateException("сессия не открыта")
         return live.blocking.requestJson(opcode, payload.toString())
     }
@@ -391,7 +411,10 @@ object MaxClient {
      * дайджестов эталонного клиента; в JSON двоичное поле помечается как $bin.
      */
     private fun fingerprint(): JSONObject? {
-        if (callsSeed == 0L) return null
+        if (callsSeed == 0L) {
+            MaxLog.e("callsSeed неизвестен — отпечаток не отправляется")
+            return null
+        }
         return try {
             val bytes = Auth.fingerprint(callsSeed, MaxStore.deviceId)
             JSONObject().put("\$bin", Base64.encodeToString(bytes, Base64.NO_WRAP))
