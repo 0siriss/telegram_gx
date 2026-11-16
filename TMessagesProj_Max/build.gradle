@@ -1,0 +1,45 @@
+// Раздел MAX: отдельный модуль, чтобы код мессенджера MAX не смешивался с MTProto.
+// Зависимость строго односторонняя: этот модуль видит TMessagesProj (тема, компоненты,
+// BaseFragment), а TMessagesProj о нём не знает — точка входа регистрируется из
+// модуля приложения через MaxSectionProvider.
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+repositories {
+    mavenCentral()
+    google()
+}
+
+dependencies {
+    implementation project(':TMessagesProj')
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
+}
+
+android {
+    namespace 'org.telegram.max'
+    compileSdkVersion 36
+    buildToolsVersion '36.0.0'
+
+    defaultConfig {
+        minSdkVersion 23
+        targetSdkVersion 36
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
+    sourceSets {
+        main {
+            // Kotlin-обёртка ядра берётся прямо из подмодуля, без копирования в репозиторий.
+            kotlin.srcDirs += 'kolibri/kolibri-kotlin/library/src/main/kotlin'
+            // libkolibri_kotlin.so собирается в CI из того же подмодуля (см. build.yml).
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+}

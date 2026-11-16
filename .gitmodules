@@ -55,3 +55,7 @@
 [submodule "TMessagesProj/jni/third_party/libprisma"]
 	path = TMessagesProj/jni/third_party/libprisma
 	url = https://github.com/TelegramMessenger/libprisma.git
+[submodule "TMessagesProj_Max/kolibri"]
+	path = TMessagesProj_Max/kolibri
+	url = https://github.com/KometTeam/kolibri
+	branch = main

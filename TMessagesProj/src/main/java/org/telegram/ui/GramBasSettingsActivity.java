@@ -12,6 +12,7 @@ import android.widget.FrameLayout;
 
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.FileLog;
+import org.telegram.messenger.MaxSection;
 import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.R;
 import org.telegram.ui.ActionBar.ActionBar;
@@ -41,6 +42,7 @@ public class GramBasSettingsActivity extends BaseFragment {
     private static final int ID_MUTE_SCREENSHOT_PING = 5;
     private static final int ID_VOICE_PRELOAD = 6;
     private static final int ID_HIDE_SPONSORED = 7;
+    private static final int ID_MAX_SECTION = 8;
 
     @Override
     public View createView(Context context) {
@@ -83,13 +85,24 @@ public class GramBasSettingsActivity extends BaseFragment {
         items.add(UItem.asCheck(ID_HIDE_SPONSORED, "Скрывать рекламные сообщения").setChecked(MessagesController.isSponsoredMessagesHidden()));
         items.add(UItem.asShadow("Скрывает спонсорские сообщения в каналах и рекламу в видео независимо от Telegram Premium."));
 
+        if (MaxSection.isAvailable()) {
+            items.add(UItem.asHeader("MAX"));
+            items.add(UItem.asButton(ID_MAX_SECTION, "Открыть MAX"));
+            items.add(UItem.asShadow("Отдельный аккаунт мессенджера MAX. Работает сам по себе: свой вход, свои чаты, своё соединение. Неофициальный доступ, аккаунт может быть заблокирован."));
+        }
+
         items.add(UItem.asHeader("Соединение"));
         items.add(UItem.asCheck(ID_KEEP_ALIVE, "Держать соединение в фоне").setChecked(MessagesController.isKeepAliveEnabled()));
         items.add(UItem.asShadow("Настоящие push-уведомления недоступны для этой сборки (FCM не работает с самоподписанным APK). Держит соединение открытым, пока приложение свёрнуто, чтобы сообщения приходили без задержки — расходует больше заряда батареи. Рекомендуется также разрешить автозапуск и отключить оптимизацию батареи для приложения в настройках системы."));
     }
 
     private void onItemClick(UItem item, View view, int position, float x, float y) {
-        if (item.id == ID_ANTI_RECALL) {
+        if (item.id == ID_MAX_SECTION) {
+            BaseFragment fragment = MaxSection.createFragment();
+            if (fragment != null) {
+                presentFragment(fragment);
+            }
+        } else if (item.id == ID_ANTI_RECALL) {
             boolean enabled = !MessagesController.isAntiRecallEnabledGlobally();
             MessagesController.setAntiRecallEnabledGlobally(enabled);
             if (view instanceof TextCheckCell) {

@@ -1,3 +1,15 @@
+diff --git a/.gitmodules b/.gitmodules
+index 88430c54..88de180d 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -55,3 +55,7 @@
+ [submodule "TMessagesProj/jni/third_party/libprisma"]
+ 	path = TMessagesProj/jni/third_party/libprisma
+ 	url = https://github.com/TelegramMessenger/libprisma.git
++[submodule "TMessagesProj_Max/kolibri"]
++	path = TMessagesProj_Max/kolibri
++	url = https://github.com/KometTeam/kolibri
++	branch = main
 diff --git a/TMessagesProj/build.gradle b/TMessagesProj/build.gradle
 index 70c567de..7aa7dc2b 100644
 --- a/TMessagesProj/build.gradle
@@ -989,6 +1001,59 @@ index 45fa3c1a..2fa33c8c 100644
  
          return version;
      }
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MaxSection.java b/TMessagesProj/src/main/java/org/telegram/messenger/MaxSection.java
+new file mode 100644
+index 00000000..619c3198
+--- /dev/null
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MaxSection.java
+@@ -0,0 +1,47 @@
++/*
++ * This is the source code of Telegram for Android v. 5.x.x.
++ * It is licensed under GNU GPL v. 2 or later.
++ * You should have received a copy of the license in this archive (see LICENSE).
++ */
++
++package org.telegram.messenger;
++
++import org.telegram.ui.ActionBar.BaseFragment;
++
++/**
++ * GramBas: точка входа в раздел MAX. Код MAX живёт в отдельном модуле, который этот
++ * модуль не видит, поэтому реализацию регистрирует модуль приложения при старте.
++ * Зависимость строго односторонняя: раздел знает про тему и компоненты, ядро про
++ * раздел — только через этот интерфейс.
++ */
++public class MaxSection {
++
++    public interface Provider {
++        /** Готов ли раздел работать: собрана ли нативная часть под эту архитектуру. */
++        boolean isAvailable();
++
++        /** Экран раздела: список чатов, если вход уже выполнен, иначе экран входа. */
++        BaseFragment createFragment();
++
++        /** Непрочитанные для счётчика. Ноль, если вход не выполнен. */
++        int getUnreadCount();
++    }
++
++    private static Provider provider;
++
++    public static void setProvider(Provider value) {
++        provider = value;
++    }
++
++    public static boolean isAvailable() {
++        return provider != null && provider.isAvailable();
++    }
++
++    public static BaseFragment createFragment() {
++        return provider == null ? null : provider.createFragment();
++    }
++
++    public static int getUnreadCount() {
++        return provider == null ? 0 : provider.getUnreadCount();
++    }
++}
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
 index 85c8e84c..86a9e23a 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
@@ -1915,10 +1980,10 @@ index 910de86e..b66687c3 100644
  import org.telegram.messenger.LocaleController;
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java
 new file mode 100644
-index 00000000..c3355687
+index 00000000..70fab972
 --- /dev/null
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,164 @@
 +package org.telegram.ui;
 +
 +import static org.telegram.messenger.LocaleController.getString;
@@ -1933,6 +1998,7 @@ index 00000000..c3355687
 +
 +import org.telegram.messenger.ApplicationLoader;
 +import org.telegram.messenger.FileLog;
++import org.telegram.messenger.MaxSection;
 +import org.telegram.messenger.MessagesController;
 +import org.telegram.messenger.R;
 +import org.telegram.ui.ActionBar.ActionBar;
@@ -1962,6 +2028,7 @@ index 00000000..c3355687
 +    private static final int ID_MUTE_SCREENSHOT_PING = 5;
 +    private static final int ID_VOICE_PRELOAD = 6;
 +    private static final int ID_HIDE_SPONSORED = 7;
++    private static final int ID_MAX_SECTION = 8;
 +
 +    @Override
 +    public View createView(Context context) {
@@ -2004,13 +2071,24 @@ index 00000000..c3355687
 +        items.add(UItem.asCheck(ID_HIDE_SPONSORED, "Скрывать рекламные сообщения").setChecked(MessagesController.isSponsoredMessagesHidden()));
 +        items.add(UItem.asShadow("Скрывает спонсорские сообщения в каналах и рекламу в видео независимо от Telegram Premium."));
 +
++        if (MaxSection.isAvailable()) {
++            items.add(UItem.asHeader("MAX"));
++            items.add(UItem.asButton(ID_MAX_SECTION, "Открыть MAX"));
++            items.add(UItem.asShadow("Отдельный аккаунт мессенджера MAX. Работает сам по себе: свой вход, свои чаты, своё соединение. Неофициальный доступ, аккаунт может быть заблокирован."));
++        }
++
 +        items.add(UItem.asHeader("Соединение"));
 +        items.add(UItem.asCheck(ID_KEEP_ALIVE, "Держать соединение в фоне").setChecked(MessagesController.isKeepAliveEnabled()));
 +        items.add(UItem.asShadow("Настоящие push-уведомления недоступны для этой сборки (FCM не работает с самоподписанным APK). Держит соединение открытым, пока приложение свёрнуто, чтобы сообщения приходили без задержки — расходует больше заряда батареи. Рекомендуется также разрешить автозапуск и отключить оптимизацию батареи для приложения в настройках системы."));
 +    }
 +
 +    private void onItemClick(UItem item, View view, int position, float x, float y) {
-+        if (item.id == ID_ANTI_RECALL) {
++        if (item.id == ID_MAX_SECTION) {
++            BaseFragment fragment = MaxSection.createFragment();
++            if (fragment != null) {
++                presentFragment(fragment);
++            }
++        } else if (item.id == ID_ANTI_RECALL) {
 +            boolean enabled = !MessagesController.isAntiRecallEnabledGlobally();
 +            MessagesController.setAntiRecallEnabledGlobally(enabled);
 +            if (view instanceof TextCheckCell) {
@@ -2811,7 +2889,7 @@ index 169ab902..c89688e2 100644
      <string name="DebugMenuLongPress">Long press again for debug menu</string>
      <string name="DebugSendLogs">Send Logs</string>
 diff --git a/TMessagesProj_App/build.gradle b/TMessagesProj_App/build.gradle
-index 0bc33062..45566e71 100644
+index 0bc33062..ab38634a 100644
 --- a/TMessagesProj_App/build.gradle
 +++ b/TMessagesProj_App/build.gradle
 @@ -1,6 +1,23 @@
@@ -2838,15 +2916,18 @@ index 0bc33062..45566e71 100644
  repositories {
      mavenCentral()
      google()
-@@ -19,6 +36,7 @@ dependencies {
+@@ -17,8 +34,10 @@ configurations.all {
+ 
+ dependencies {
      implementation project(':TMessagesProj')
++    implementation project(':TMessagesProj_Max')
      coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
      implementation files('../TMessagesProj/libs/libgsaverification-client.aar')
 +    implementation 'androidx.core:core:1.16.0'
  }
  
  android {
-@@ -171,6 +189,8 @@ android {
+@@ -171,6 +190,8 @@ android {
          versionName APP_VERSION_NAME
          ndkVersion "27.2.12479018"
  
@@ -2887,10 +2968,10 @@ index 640e841b..e2b70429 100644
        },
        "oauth_client": [
 diff --git a/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java b/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
-index 7b80edfd..a67fc533 100644
+index 7b80edfd..12e8801f 100644
 --- a/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
 +++ b/TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java
-@@ -1,10 +1,117 @@
+@@ -1,10 +1,128 @@
  package org.telegram.messenger;
  
 +import android.app.Activity;
@@ -2908,6 +2989,17 @@ index 7b80edfd..a67fc533 100644
 +import java.io.File;
  
  public class ApplicationLoaderImpl extends ApplicationLoader {
++
++    static {
++        // GramBas: раздел MAX живёт в отдельном модуле; TMessagesProj его не видит, поэтому
++        // реализацию точки входа подставляем здесь -- этот модуль зависит от обоих.
++        try {
++            MaxSection.setProvider(new org.telegram.max.MaxSectionProviderImpl());
++        } catch (Throwable e) {
++            FileLog.e("MAX: не удалось зарегистрировать раздел", e);
++        }
++    }
++
      @Override
      protected String onGetApplicationId() {
          return BuildConfig.APPLICATION_ID;
@@ -3859,3 +3951,14 @@ index 55d530f0..a600f568 100644
  IS_PRIVATE=false
  RELEASE_KEY_PASSWORD=android
  RELEASE_KEY_ALIAS=androidkey
+diff --git a/settings.gradle b/settings.gradle
+index 7d4f1ab1..30398694 100644
+--- a/settings.gradle
++++ b/settings.gradle
+@@ -1,5 +1,6 @@
+ include ':TMessagesProj'
+ include ':TMessagesProj_App'
++include ':TMessagesProj_Max'
+ include ':TMessagesProj_AppHuawei'
+ include ':TMessagesProj_AppHockeyApp'
+ include ':TMessagesProj_AppStandalone'

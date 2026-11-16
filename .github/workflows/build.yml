@@ -88,6 +88,36 @@ jobs:
       - name: Create local.properties
         run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 
+      # Нативное ядро раздела MAX (подмодуль TMessagesProj_Max/kolibri, Rust).
+      # Собираем только под реальные устройства: arm64 и armv7. На x86-сборках
+      # библиотеки не будет, и раздел сам спрячется (MaxNative.available).
+      - name: Cache Rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            TMessagesProj_Max/kolibri/kolibri-kotlin/rust/target
+          key: rust-max-${{ hashFiles('TMessagesProj_Max/kolibri/kolibri-kotlin/rust/Cargo.toml') }}
+          restore-keys: rust-max-
+
+      - name: Build MAX native core
+        run: |
+          set -e
+          if [ ! -f TMessagesProj_Max/kolibri/kolibri-kotlin/rust/Cargo.toml ]; then
+            echo "подмодуль kolibri не выгружен — раздел MAX будет собран без нативной части"
+            exit 0
+          fi
+          rustup target add aarch64-linux-android armv7-linux-androideabi
+          command -v cargo-ndk >/dev/null 2>&1 || cargo install cargo-ndk --locked
+          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
+          cargo ndk -t arm64-v8a -t armeabi-v7a \
+            -o TMessagesProj_Max/src/main/jniLibs \
+            build --release \
+            --manifest-path TMessagesProj_Max/kolibri/kolibri-kotlin/rust/Cargo.toml
+          ls -la TMessagesProj_Max/src/main/jniLibs/*/
+
       - name: Build Release APK
         run: ./gradlew :TMessagesProj_App:assembleRelease --no-daemon
         env:

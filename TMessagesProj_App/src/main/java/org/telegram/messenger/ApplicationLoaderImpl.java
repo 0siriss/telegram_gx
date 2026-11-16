@@ -15,6 +15,17 @@ import org.telegram.ui.Components.UpdateLayout;
 import java.io.File;
 
 public class ApplicationLoaderImpl extends ApplicationLoader {
+
+    static {
+        // GramBas: раздел MAX живёт в отдельном модуле; TMessagesProj его не видит, поэтому
+        // реализацию точки входа подставляем здесь -- этот модуль зависит от обоих.
+        try {
+            MaxSection.setProvider(new org.telegram.max.MaxSectionProviderImpl());
+        } catch (Throwable e) {
+            FileLog.e("MAX: не удалось зарегистрировать раздел", e);
+        }
+    }
+
     @Override
     protected String onGetApplicationId() {
         return BuildConfig.APPLICATION_ID;

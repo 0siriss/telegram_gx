@@ -71,6 +71,9 @@ jobs:
           git checkout "$PREV" -- .github/workflows patches
           # CLAUDE.md появился позже — не валим апдейт, если его нет в прошлом коммите
           git checkout "$PREV" -- CLAUDE.md 2>/dev/null || true
+          # Раздел MAX — отдельный модуль целиком из нашего кода, в патч он не входит:
+          # там подмодуль kolibri и собираемые в CI библиотеки, которым в diff не место.
+          git checkout "$PREV" -- TMessagesProj_Max .gitmodules 2>/dev/null || true
 
           # Применяем единый патч со всеми доработками форка
           # (TLS DPI bypass, ECH picker, updater, anti-recall и т.д.)
