@@ -12,6 +12,10 @@ repositories {
 
 dependencies {
     implementation project(':TMessagesProj')
+    // Вендоренный в TMessagesProj RecyclerView наследует интерфейсы из androidx.core.view,
+    // а сам androidx.core подключён там без транзитивности — без этой строки Kotlin не видит
+    // супертипы RecyclerView. Модуль приложения объявляет её по той же причине.
+    implementation 'androidx.core:core:1.16.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
 }
 
