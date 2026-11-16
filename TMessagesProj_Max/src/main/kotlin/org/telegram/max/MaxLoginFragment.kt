@@ -22,12 +22,16 @@ import org.telegram.ui.Components.LayoutHelper
 class MaxLoginFragment : BaseFragment() {
 
     private lateinit var input: EditText
+    private lateinit var lastNameInput: EditText
     private lateinit var hint: TextView
     private lateinit var button: TextView
     private lateinit var status: TextView
 
     private var tempToken: String? = null
     private var busy = false
+
+    /** Шаг: номер -> код -> имя (последний только для нового номера). */
+    private var step = STEP_PHONE
 
     override fun createView(context: Context): View {
         actionBar.setBackButtonImage(org.telegram.messenger.R.drawable.ic_ab_back)
@@ -60,6 +64,16 @@ class MaxLoginFragment : BaseFragment() {
         input.inputType = InputType.TYPE_CLASS_PHONE
         input.setBackgroundColor(0)
         column.addView(input, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 16f, 0f, 0f))
+
+        lastNameInput = EditText(context)
+        lastNameInput.textSize = 18f
+        lastNameInput.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+        lastNameInput.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText))
+        lastNameInput.hint = "Фамилия (необязательно)"
+        lastNameInput.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+        lastNameInput.setBackgroundColor(0)
+        lastNameInput.visibility = View.GONE
+        column.addView(lastNameInput, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 12f, 0f, 0f))
 
         button = TextView(context)
         button.textSize = 15f
@@ -94,9 +108,8 @@ class MaxLoginFragment : BaseFragment() {
         status.text = ""
         button.text = "Подождите…"
 
-        val pending = tempToken
-        if (pending == null) {
-            MaxClient.requestCode(value) { token, error ->
+        when (step) {
+            STEP_PHONE -> MaxClient.requestCode(value) { token, error ->
                 AndroidUtilities.runOnUIThread {
                     busy = false
                     if (token == null) {
@@ -104,6 +117,7 @@ class MaxLoginFragment : BaseFragment() {
                         return@runOnUIThread
                     }
                     tempToken = token
+                    step = STEP_CODE
                     hint.text = "Код отправлен. Введите его, чтобы войти"
                     input.setText("")
                     input.inputType = InputType.TYPE_CLASS_NUMBER
@@ -111,13 +125,42 @@ class MaxLoginFragment : BaseFragment() {
                     button.text = "Войти"
                 }
             }
-        } else {
-            MaxClient.verifyCode(value, pending) { error ->
+
+            STEP_CODE -> {
+                val pending = tempToken
+                if (pending == null) {
+                    busy = false
+                    fail(IllegalStateException("потерян токен, запросите код заново"))
+                    return
+                }
+                MaxClient.verifyCode(value, pending) { error ->
+                AndroidUtilities.runOnUIThread {
+                    busy = false
+                    if (error is RegistrationRequired) {
+                        // Номера ещё нет в MAX: остаётся представиться и завершить регистрацию.
+                        step = STEP_NAME
+                        hint.text = "Этого номера ещё нет в MAX. Как вас зовут?"
+                        input.setText("")
+                        input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+                        input.hint = "Имя"
+                        lastNameInput.visibility = View.VISIBLE
+                        button.text = "Зарегистрироваться"
+                        return@runOnUIThread
+                    }
+                    if (error != null) {
+                        fail(error)
+                        return@runOnUIThread
+                    }
+                    presentFragment(MaxDialogsFragment(), true)
+                    }
+                }
+            }
+
+            else -> MaxClient.completeRegistration(value, lastNameInput.text.toString().trim()) { error ->
                 AndroidUtilities.runOnUIThread {
                     busy = false
                     if (error != null) {
                         fail(error)
-                        button.text = "Войти"
                         return@runOnUIThread
                     }
                     presentFragment(MaxDialogsFragment(), true)
@@ -128,6 +171,16 @@ class MaxLoginFragment : BaseFragment() {
 
     private fun fail(error: Throwable?) {
         status.text = error?.message ?: "Не получилось, попробуйте ещё раз"
-        button.text = if (tempToken == null) "Получить код" else "Войти"
+        button.text = when (step) {
+            STEP_PHONE -> "Получить код"
+            STEP_CODE -> "Войти"
+            else -> "Зарегистрироваться"
+        }
+    }
+
+    companion object {
+        private const val STEP_PHONE = 0
+        private const val STEP_CODE = 1
+        private const val STEP_NAME = 2
     }
 }

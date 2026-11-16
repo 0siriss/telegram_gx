@@ -26,6 +26,7 @@ object MaxClient {
     private const val OP_AUTH_REQUEST = 17
     private const val OP_AUTH = 18
     private const val OP_LOGIN = 19
+    private const val OP_AUTH_CONFIRM = 23
     private const val OP_CHAT_HISTORY = 49
     private const val OP_MSG_SEND = 64
     private const val OP_CONTACT_INFO_BY_PHONE = 46
@@ -177,15 +178,18 @@ object MaxClient {
                 val attrs = answer.optJSONObject("tokenAttrs")
                 val loginToken = attrs?.optJSONObject("LOGIN")?.optString("token", "")
                 if (loginToken.isNullOrEmpty()) {
-                    val isRegister = attrs?.has("REGISTER") == true
-                    onResult(
-                        IllegalStateException(
-                            if (isRegister) "этот номер не зарегистрирован в MAX"
-                            else "сервер не вернул токен входа"
-                        )
-                    )
+                    // Номера ещё нет в MAX: сервер вместо входа отдаёт токен регистрации,
+                    // её надо завершить, прислав имя (см. completeRegistration).
+                    val registerToken = attrs?.optJSONObject("REGISTER")?.optString("token", "")
+                    if (!registerToken.isNullOrEmpty()) {
+                        pendingRegisterToken = registerToken
+                        onResult(RegistrationRequired())
+                    } else {
+                        onResult(IllegalStateException("сервер не вернул токен входа"))
+                    }
                     return@launch
                 }
+                pendingRegisterToken = null
                 MaxStore.token = loginToken
                 answer.optJSONObject("profile")?.optLong("id", 0L)?.let {
                     if (it != 0L) MaxStore.accountId = it
@@ -199,7 +203,50 @@ object MaxClient {
         }
     }
 
+    /** Токен регистрации, если номер оказался новым. Живёт до завершения регистрации. */
+    @Volatile
+    private var pendingRegisterToken: String? = null
+
+    val needsRegistration: Boolean
+        get() = pendingRegisterToken != null
+
+    /**
+     * Завершение регистрации нового номера: сервер ждёт имя, фамилия необязательна.
+     * После успеха сразу выполняется вход.
+     */
+    fun completeRegistration(firstName: String, lastName: String, onResult: (Throwable?) -> Unit) {
+        val token = pendingRegisterToken
+        if (token == null) {
+            onResult(IllegalStateException("нет токена регистрации"))
+            return
+        }
+        ensureScope().launch {
+            try {
+                val payload = JSONObject()
+                    .put("token", token)
+                    .put("tokenType", "REGISTER")
+                    .put("firstName", firstName)
+                if (lastName.isNotEmpty()) payload.put("lastName", lastName)
+                val answer = JSONObject(request(OP_AUTH_CONFIRM, payload))
+                val profile = answer.optJSONObject("profile")
+                    ?: throw IllegalStateException("сервер не вернул профиль")
+                val accountId = profile.optJSONObject("contact")?.optLong("id", 0L) ?: 0L
+                if (accountId == 0L) throw IllegalStateException("сервер не вернул номер аккаунта")
+                MaxStore.accountId = accountId
+                // Токен регистрации после подтверждения становится рабочим токеном входа.
+                MaxStore.token = token
+                pendingRegisterToken = null
+                login(token)
+                onResult(null)
+            } catch (e: Throwable) {
+                MaxLog.e("completeRegistration failed", e)
+                onResult(e)
+            }
+        }
+    }
+
     fun logout() {
+        pendingRegisterToken = null
         MaxStore.clear()
         chats = emptyList()
         stop()
@@ -359,6 +406,9 @@ object MaxClient {
         return "+$digits"
     }
 }
+
+/** Номер не зарегистрирован: вместо входа нужно завершить регистрацию. */
+class RegistrationRequired : Exception("нужна регистрация")
 
 /** Чат MAX: ровно то, что нужно списку и экрану переписки. */
 class MaxChat(
