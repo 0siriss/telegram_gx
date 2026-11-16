@@ -25,6 +25,16 @@ object MaxClient {
 
     const val HOST = "api2.oneme.ru"
 
+    /**
+     * Версия официального приложения MAX, которой мы представляемся в рукопожатии.
+     * Сервер проверяет её и старые сборки отшивает: «Приложение устарело, пожалуйста,
+     * обновитесь». В ядре по умолчанию стоит 26.20.2 (6758) — она уже не проходит.
+     * Актуальные значения смотреть в дампах RuStore: github.com/KometTeam/max-dumper,
+     * в заголовке релиза есть и versionName, и build.
+     */
+    private const val APP_VERSION = "26.38.2"
+    private const val BUILD_NUMBER = 6911L
+
     private const val OP_AUTH_REQUEST = 17
     private const val OP_AUTH = 18
     private const val OP_LOGIN = 19
@@ -127,6 +137,8 @@ object MaxClient {
                 live = Session.open(
                     Config(
                         host = HOST,
+                        appVersion = APP_VERSION,
+                        buildNumber = BUILD_NUMBER,
                         deviceId = MaxStore.deviceId,
                         instanceId = MaxStore.deviceId,
                         deviceName = android.os.Build.MODEL ?: "Android",
