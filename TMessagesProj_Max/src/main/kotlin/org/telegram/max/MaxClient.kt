@@ -23,7 +23,11 @@ import java.io.File
  */
 object MaxClient {
 
-    const val HOST = "api2.oneme.ru"
+    /**
+     * Основной хост протокола — тот, с которым работают все примеры ядра. `api2` оставлен
+     * запасным: он живой, но отдаёт сертификат Минцифры и ведёт себя не во всём так же.
+     */
+    private val HOSTS = listOf("api.oneme.ru", "api2.oneme.ru")
 
     /**
      * Версия официального приложения MAX, которой мы представляемся в рукопожатии.
@@ -132,30 +136,64 @@ object MaxClient {
     private fun connectIfNeeded() {
         synchronized(connectLock) {
             configureCore()
-            var live = session
-            if (live == null) {
-                live = Session.open(
-                    Config(
-                        host = HOST,
-                        appVersion = APP_VERSION,
-                        buildNumber = BUILD_NUMBER,
-                        deviceId = MaxStore.deviceId,
-                        instanceId = MaxStore.deviceId,
-                        deviceName = android.os.Build.MODEL ?: "Android",
-                        osVersion = "Android " + android.os.Build.VERSION.RELEASE,
-                        arch = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a",
-                    )
-                )
-                session = live
+            val live = session
+            if (live != null && live.state == SessionState.ONLINE) return
+            if (live != null) {
+                handshake(live)
+                return
             }
-            if (live.state != SessionState.ONLINE) {
-                val handshake = JSONObject(live.blocking.connect())
-                callsSeed = handshake.optLong("callsSeed", 0L)
-                MaxLog.i("рукопожатие выполнено, callsSeed=" + callsSeed)
-                forEachListener { it.onStateChanged() }
-                startPushLoop()
+            // Хосты пробуем по очереди: первый отвечает не всегда, а раздел без
+            // соединения бесполезен.
+            var last: Throwable? = null
+            for (host in HOSTS) {
+                val candidate = openSession(host)
+                // Ставим сессию до рукопожатия: цикл пушей стартует внутри него и
+                // берёт её отсюда.
+                session = candidate
+                try {
+                    handshake(candidate)
+                    return
+                } catch (e: Throwable) {
+                    last = e
+                    session = null
+                    MaxLog.e("хост $host не ответил", e)
+                    try {
+                        candidate.close()
+                    } catch (ignored: Throwable) {
+                    }
+                }
             }
+            throw last ?: IllegalStateException("не удалось подключиться")
         }
+    }
+
+    private fun openSession(host: String): Session = Session.open(
+        Config(
+            host = host,
+            appVersion = APP_VERSION,
+            buildNumber = BUILD_NUMBER,
+            deviceId = MaxStore.deviceId,
+            instanceId = MaxStore.deviceId,
+            deviceName = android.os.Build.MODEL ?: "Android",
+            osVersion = "Android " + android.os.Build.VERSION.RELEASE,
+            arch = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a",
+        )
+    )
+
+    /**
+     * Рукопожатие. `callsSeed` из ответа обязателен: без него не посчитать отпечаток
+     * клиента, а запрос кода без отпечатка сервер принимает молча и кода не присылает.
+     */
+    private fun handshake(live: Session) {
+        val answer = live.blocking.connect()
+        MaxLog.i("рукопожатие: $answer")
+        val handshake = JSONObject(answer)
+        callsSeed = handshake.optLong("callsSeed", 0L)
+        if (callsSeed == 0L) {
+            throw IllegalStateException("сервер не прислал callsSeed, вход невозможен")
+        }
+        forEachListener { it.onStateChanged() }
+        startPushLoop()
     }
 
     private var coreConfigured = false
@@ -201,12 +239,18 @@ object MaxClient {
     fun requestCode(phone: String, onResult: (String?, Throwable?) -> Unit) {
         ensureScope().launch {
             try {
+                connectIfNeeded()
+                // Отпечаток обязателен: без него сервер отвечает успехом, но кода не шлёт.
+                val mode = fingerprint()
+                    ?: throw IllegalStateException("не удалось подтвердить клиент")
                 val payload = JSONObject()
                     .put("phone", normalizePhone(phone))
                     .put("type", "START_AUTH")
                     .put("language", "ru")
-                fingerprint()?.let { payload.put("mode", it) }
-                val answer = JSONObject(request(OP_AUTH_REQUEST, payload))
+                    .put("mode", mode)
+                val raw = request(OP_AUTH_REQUEST, payload)
+                MaxLog.i("ответ на запрос кода: $raw")
+                val answer = JSONObject(raw)
                 val token = answer.optString("token", "")
                 if (token.isEmpty()) {
                     onResult(null, IllegalStateException("сервер не вернул токен"))

@@ -16,8 +16,8 @@ import org.telegram.ui.ActionBar.Theme
 import org.telegram.ui.Components.LayoutHelper
 
 /**
- * Вход в MAX: номер телефона, затем код из сообщения. Регистрации нет — номер должен
- * быть уже зарегистрирован в MAX.
+ * Вход в MAX: номер телефона, затем код из сообщения. Если аккаунта на номере ещё нет,
+ * сервер вместо входа отдаёт токен регистрации, и экран просит имя — это третий шаг.
  */
 class MaxLoginFragment : BaseFragment() {
 
@@ -53,7 +53,7 @@ class MaxLoginFragment : BaseFragment() {
         hint = TextView(context)
         hint.textSize = 15f
         hint.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
-        hint.text = "Введите номер телефона, на который зарегистрирован MAX"
+        hint.text = PHONE_HINT
         column.addView(hint, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
 
         input = EditText(context)
@@ -112,7 +112,7 @@ class MaxLoginFragment : BaseFragment() {
             AndroidUtilities.runOnUIThread {
                 button.isEnabled = true
                 if (step == STEP_PHONE) {
-                    hint.text = "Введите номер телефона, на который зарегистрирован MAX"
+                    hint.text = PHONE_HINT
                 }
                 if (error != null) {
                     status.text = "Не удалось подключиться: " + MaxLog.describe(error)
@@ -139,7 +139,8 @@ class MaxLoginFragment : BaseFragment() {
                     }
                     tempToken = token
                     step = STEP_CODE
-                    hint.text = "Код отправлен. Введите его, чтобы войти"
+                    hint.text = "Код отправлен. Он приходит сообщением, а если MAX уже\n" +
+                        "стоит на этом номере — внутрь него"
                     input.setText("")
                     input.inputType = InputType.TYPE_CLASS_NUMBER
                     input.hint = "Код из сообщения"
@@ -200,6 +201,10 @@ class MaxLoginFragment : BaseFragment() {
     }
 
     companion object {
+        private const val PHONE_HINT =
+            "Введите номер телефона. Если аккаунта MAX на нём нет, после кода " +
+                "предложим зарегистрироваться"
+
         private const val STEP_PHONE = 0
         private const val STEP_CODE = 1
         private const val STEP_NAME = 2
