@@ -878,6 +878,11 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     }
 
     override fun onRequestPermissionsResultFragment(requestCode: Int, permissions: Array<String>?, grantResults: IntArray?) {
+        if (requestCode == REQ_LOCATION) {
+            if (grantResults?.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) sendMyLocation()
+            else toast("Без доступа к геолокации отправить её нельзя")
+            return
+        }
         if (requestCode != REQ_MIC) return
         if (grantResults != null && grantResults.isNotEmpty() && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
             startVoice()
@@ -1154,7 +1159,100 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             .add(org.telegram.messenger.R.drawable.msg_photos, "Фото или видео") { pick(REQ_PHOTO) }
             .add(org.telegram.messenger.R.drawable.msg_video, "Видео") { pick(REQ_VIDEO) }
             .add(org.telegram.messenger.R.drawable.msg_view_file, "Файл") { pick(REQ_FILE) }
+            .add(org.telegram.messenger.R.drawable.filled_poll_add_24, "Опрос") { askPoll() }
+            .add(org.telegram.messenger.R.drawable.msg_location, "Геопозиция") { sendMyLocation() }
+            .add(org.telegram.messenger.R.drawable.msg_contact, "Контакт") { pickContactToSend() }
             .show()
+    }
+
+    /** Новый опрос — как «Опрос» в скрепке Telegram: вопрос, варианты, флажки. */
+    private fun askPoll() {
+        val context = parentActivity ?: return
+        fun field(hint: String) = EditText(context).apply {
+            this.hint = hint
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 17f)
+            setTextColor(Theme.getColor(Theme.key_dialogTextBlack))
+            setHintTextColor(Theme.getColor(Theme.key_dialogTextHint))
+        }
+        val box = LinearLayout(context)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(AndroidUtilities.dp(24f), 0, AndroidUtilities.dp(24f), 0)
+        val question = field("Вопрос")
+        box.addView(question)
+        val options = (1..4).map { field("Вариант $it").also { box.addView(it) } }
+        val multiple = android.widget.CheckBox(context).apply { text = "Несколько ответов"; setTextColor(Theme.getColor(Theme.key_dialogTextBlack)) }
+        val anonymous = android.widget.CheckBox(context).apply { text = "Анонимное голосование"; isChecked = true; setTextColor(Theme.getColor(Theme.key_dialogTextBlack)) }
+        box.addView(multiple)
+        box.addView(anonymous)
+        val scroll = android.widget.ScrollView(context)
+        scroll.addView(box)
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle("Новый опрос")
+                .setView(scroll)
+                .setPositiveButton("Создать") { _, _ ->
+                    val title = question.text.toString().trim()
+                    val answers = options.map { it.text.toString().trim() }.filter { it.isNotEmpty() }
+                    if (title.isEmpty() || answers.size < 2) {
+                        toast("Нужен вопрос и хотя бы два варианта")
+                        return@setPositiveButton
+                    }
+                    MaxClient.sendPoll(chatId, title, answers, multiple.isChecked, anonymous.isChecked) { _, e ->
+                        if (e != null) toast("Опрос не отправлен: " + MaxLog.describe(e))
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+    }
+
+    /** Своё местоположение: последнее известное системе, при необходимости — разовый запрос. */
+    private fun sendMyLocation() {
+        val activity = parentActivity ?: return
+        if (android.os.Build.VERSION.SDK_INT >= 23 &&
+            activity.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            activity.requestPermissions(arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION), REQ_LOCATION)
+            return
+        }
+        val lm = activity.getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+        val known = try {
+            listOf(android.location.LocationManager.GPS_PROVIDER, android.location.LocationManager.NETWORK_PROVIDER)
+                .mapNotNull { if (lm.isProviderEnabled(it)) lm.getLastKnownLocation(it) else null }
+                .maxByOrNull { it.time }
+        } catch (e: SecurityException) {
+            null
+        }
+        val send: (android.location.Location) -> Unit = { loc ->
+            MaxClient.sendLocation(chatId, loc.latitude, loc.longitude) { _, e -> if (e != null) toast("Не отправлено: " + MaxLog.describe(e)) }
+        }
+        if (known != null && System.currentTimeMillis() - known.time < 5 * 60_000L) {
+            send(known)
+            return
+        }
+        toast("Определяем местоположение…")
+        try {
+            val provider = if (lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)) android.location.LocationManager.GPS_PROVIDER else android.location.LocationManager.NETWORK_PROVIDER
+            @Suppress("DEPRECATION")
+            lm.requestSingleUpdate(provider, object : android.location.LocationListener {
+                override fun onLocationChanged(location: android.location.Location) = send(location)
+                @Deprecated("") override fun onStatusChanged(provider: String?, status: Int, extras: android.os.Bundle?) {}
+                override fun onProviderEnabled(provider: String) {}
+                override fun onProviderDisabled(provider: String) {}
+            }, android.os.Looper.getMainLooper())
+        } catch (e: Throwable) {
+            if (known != null) send(known) else toast("Местоположение недоступно — включите геолокацию")
+        }
+    }
+
+    private fun pickContactToSend() {
+        presentFragment(MaxContactPickerFragment("Отправить контакт", emptySet()) { ids ->
+            ids.forEach { id -> MaxClient.sendContact(chatId, id) { _, e -> if (e != null) toast("Не отправлено: " + MaxLog.describe(e)) } }
+        })
+    }
+
+    override fun onPollChanged(chatId: Long, messageId: Long) {
+        if (chatId == this.chatId) AndroidUtilities.runOnUIThread { refreshMessage(messageId) }
     }
 
     private fun pick(request: Int) {
@@ -1398,6 +1496,10 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         }
     }
 
+    private fun vote(message: MaxMessage, poll: MaxPoll, answerIds: List<Int>) {
+        MaxClient.vote(chatId, message.id, poll, answerIds) { e -> if (e != null) toast("Голос не принят: " + MaxLog.describe(e)) }
+    }
+
     private fun refreshMessage(messageId: Long) {
         val index = rows.indexOfFirst { it is MaxMessage && it.id == messageId }
         if (index >= 0) adapter.notifyItemChanged(index)
@@ -1544,6 +1646,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private val body = TextView(context)
         private val meta = MaxBubbles.Meta(context)
         private val reactionsRow = LinearLayout(context)
+        private val pollBox = LinearLayout(context)
         private val inBubble = MaxBubbles.Bubble(false, false)
         private val outBubble = MaxBubbles.Bubble(true, false)
         private val inMediaBubble = MaxBubbles.Bubble(false, true)
@@ -1607,6 +1710,9 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             textBox.addView(body, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat()))
             textBox.addView(meta, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.BOTTOM or Gravity.END, 0f, 0f, 0f, 0f))
             bubble.addView(textBox, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
+
+            pollBox.orientation = LinearLayout.VERTICAL
+            bubble.addView(pollBox, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 4f))
 
             reactionsRow.orientation = LinearLayout.HORIZONTAL
             bubble.addView(reactionsRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 4f, 0f, 2f))
@@ -1709,7 +1815,8 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                     fileSize.setTextColor(secondary)
                 }
                 attach != null && bodyText.isEmpty() -> bodyText = message.attachLabel ?: ""
-                attach != null && attach.type in setOf("LOCATION", "CONTACT", "POLL", "CALL", "SHARE") ->
+                attach != null && attach.type == "POLL" -> bodyText = message.text
+                attach != null && attach.type in setOf("LOCATION", "CONTACT", "CALL", "SHARE") ->
                     bodyText = (message.attachLabel ?: "") + "\n" + bodyText
             }
             if (attach == null && message.pending && message.attachLabel != null) {
@@ -1755,6 +1862,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 bubble.background = drawable
                 MaxBubbles.applyPadding(bubble, out, mediaOnly)
             }
+            bindPoll(message, out, maxWidth)
             bindReactions(message, out)
             setBackgroundColor(if (message.id != 0L && message.id == highlightId) Theme.getColor(Theme.key_chat_selectedBackground) else 0)
 
@@ -1765,6 +1873,95 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             params.topMargin = AndroidUtilities.dp(if (topNear) 1f else 4f)
             params.bottomMargin = AndroidUtilities.dp(if (bottomNear) 1f else 4f)
             bubble.layoutParams = params
+        }
+
+        /**
+         * Опрос как в Telegram: вопрос, «Анонимный опрос», варианты с кружками; после
+         * голоса — проценты и полоски, свой ответ с галочкой; внизу число голосов.
+         */
+        private fun bindPoll(message: MaxMessage, out: Boolean, maxWidth: Int) {
+            pollBox.removeAllViews()
+            val attach = message.attaches.firstOrNull()
+            if (attach?.type != "POLL") {
+                pollBox.visibility = GONE
+                return
+            }
+            pollBox.visibility = VISIBLE
+            val poll = MaxClient.polls[message.id] ?: MaxPoll.parse(attach.raw)?.also {
+                if (message.id != 0L) MaxClient.loadPoll(chatId, message.id, it.pollId)
+            } ?: return
+            val textColor = Theme.getColor(if (out) Theme.key_chat_messageTextOut else Theme.key_chat_messageTextIn)
+            val accent = Theme.getColor(if (out) Theme.key_chat_outAudioSeekbarFill else Theme.key_chat_inAudioSeekbarFill)
+            val secondary = Theme.getColor(if (out) Theme.key_chat_outTimeText else Theme.key_chat_inTimeText)
+            val width = (maxWidth * 0.85f).toInt()
+            fun text(value: String, size: Float, color: Int, bold: Boolean = false) = TextView(context).apply {
+                this.text = MaxBubbles.emojify(value, this)
+                setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, size)
+                setTextColor(color)
+                if (bold) typeface = AndroidUtilities.bold()
+            }
+            pollBox.addView(text(poll.title, 16f, textColor, true), LayoutHelper.createLinear(width, LayoutHelper.WRAP_CONTENT))
+            pollBox.addView(text(if (poll.isAnonymous) "Анонимный опрос" else "Опрос", 13f, secondary), LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 6f))
+            val showResults = poll.voted || message.isOutgoing && poll.total > 0
+            val chosen = HashSet<Int>()
+            var voteButton: TextView? = null
+            for (answer in poll.answers) {
+                val row = LinearLayout(context)
+                row.orientation = LinearLayout.VERTICAL
+                row.setPadding(0, AndroidUtilities.dp(6f), 0, AndroidUtilities.dp(6f))
+                val line = LinearLayout(context)
+                line.orientation = LinearLayout.HORIZONTAL
+                line.gravity = Gravity.CENTER_VERTICAL
+                if (showResults) {
+                    val percent = if (poll.total > 0) Math.round(answer.votes * 100f / poll.total) else 0
+                    line.addView(text("$percent%", 14f, textColor, true), LayoutHelper.createLinear(44, LayoutHelper.WRAP_CONTENT))
+                    line.addView(text(answer.text + if (answer.mine) "  ✓" else "", 15f, textColor), LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f))
+                    row.addView(line, LayoutHelper.createLinear(width, LayoutHelper.WRAP_CONTENT))
+                    val bar = View(context)
+                    bar.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(2f), accent)
+                    val barWidth = maxOf(AndroidUtilities.dp(4f), ((width - AndroidUtilities.dp(44f)) * (percent / 100f)).toInt())
+                    row.addView(bar, LayoutHelper.createLinear(0, 4, 0f, 4f, 0f, 0f).also {
+                        it.width = barWidth
+                        it.leftMargin = AndroidUtilities.dp(44f)
+                    })
+                } else {
+                    val circle = View(context)
+                    circle.background = android.graphics.drawable.GradientDrawable().apply {
+                        shape = android.graphics.drawable.GradientDrawable.OVAL
+                        setStroke(AndroidUtilities.dp(1.5f), secondary)
+                    }
+                    line.addView(circle, LayoutHelper.createLinear(20, 20, Gravity.CENTER_VERTICAL, 0, 0, 12, 0))
+                    line.addView(text(answer.text, 15f, textColor), LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f))
+                    row.addView(line, LayoutHelper.createLinear(width, LayoutHelper.WRAP_CONTENT))
+                    row.background = Theme.createSelectorDrawable(Theme.getColor(Theme.key_listSelector), 2)
+                    row.setOnClickListener {
+                        if (!poll.isMultiple) {
+                            vote(message, poll, listOf(answer.id))
+                            return@setOnClickListener
+                        }
+                        if (!chosen.add(answer.id)) chosen.remove(answer.id)
+                        (circle.background as android.graphics.drawable.GradientDrawable).setColor(if (answer.id in chosen) accent else 0)
+                        voteButton?.visibility = if (chosen.isEmpty()) GONE else VISIBLE
+                    }
+                }
+                pollBox.addView(row, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
+            }
+            if (!showResults && poll.isMultiple) {
+                val button = text("Голосовать", 15f, accent, true)
+                button.gravity = Gravity.CENTER
+                button.setPadding(0, AndroidUtilities.dp(8f), 0, AndroidUtilities.dp(4f))
+                button.visibility = GONE
+                button.setOnClickListener { vote(message, poll, chosen.toList()) }
+                pollBox.addView(button, LayoutHelper.createLinear(width, LayoutHelper.WRAP_CONTENT))
+                voteButton = button
+            }
+            val votes = poll.total
+            val word = when {
+                votes % 10 == 1 && votes % 100 != 11 -> "голос"
+                votes % 10 in 2..4 && votes % 100 !in 12..14 -> "голоса"
+                else -> "голосов"
+            }
+            pollBox.addView(text(if (votes == 0) "Пока нет голосов" else "$votes $word", 13f, secondary), LayoutHelper.createLinear(width, LayoutHelper.WRAP_CONTENT, 0f, 4f, 0f, 0f))
         }
 
         /** Реакции под текстом — «пилюли» с эмодзи и числом, моя закрашена, как в Telegram. */
@@ -1818,6 +2015,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private const val REQ_FILE = 7102
         private const val REQ_MIC = 7103
         private const val REQ_VIDEO = 7104
+        private const val REQ_LOCATION = 7105
         private const val MAX_VIDEO = 200L * 1024 * 1024
         private const val MENU_SEARCH = 1
         private const val MENU_MORE = 2

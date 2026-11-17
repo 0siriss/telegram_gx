@@ -93,6 +93,8 @@ object MaxClient {
     private const val OP_MSG_REACTION = 178
     private const val OP_STORIES_LIST = 208
     private const val OP_FOLDERS_GET = 272
+    private const val OP_SEND_VOTE = 304
+    private const val OP_POLL_UPDATES = 306
     private const val OP_STORIES_GET_BY_OWNER = 210
     private const val OP_STORIES_MARK = 214
     private const val OP_STORIES_SEND = 215
@@ -176,6 +178,7 @@ object MaxClient {
         fun onReadMarkChanged(chatId: Long) {}
         fun onReactionsChanged(chatId: Long, messageId: Long, reactions: MaxReactions?) {}
         fun onStoriesChanged() {}
+        fun onPollChanged(chatId: Long, messageId: Long) {}
         fun onStateChanged() {}
     }
 
@@ -1296,6 +1299,82 @@ object MaxClient {
             } catch (e: Throwable) {
                 MaxLog.e("запрос не выполнен", e)
                 onResult(e)
+            }
+        }
+    }
+
+    // ---- опросы, геопозиция, контакт (сверено с Komet) ----
+
+    /** Свежие результаты опросов: id сообщения -> опрос. */
+    val polls = java.util.concurrent.ConcurrentHashMap<Long, MaxPoll>()
+    private val pollsLoading = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Long, Boolean>())
+
+    /** Результаты опроса: опкод 306 `{chatId, polls: [{messageId, pollId}]}` → `polls`. */
+    fun loadPoll(chatId: Long, messageId: Long, pollId: Long) {
+        if (messageId == 0L || pollId == 0L || !pollsLoading.add(messageId)) return
+        io {
+            try {
+                val item = JSONObject().put("messageId", messageId).put("pollId", pollId)
+                val answer = JSONObject(request(OP_POLL_UPDATES, JSONObject().put("chatId", chatId).put("polls", JSONArray().put(item))))
+                answer.optJSONArray("polls")?.optJSONObject(0)?.let { MaxPoll.parse(it) }?.let { polls[messageId] = it }
+                forEachListener { it.onPollChanged(chatId, messageId) }
+            } catch (e: Throwable) {
+                MaxLog.e("loadPoll failed", e)
+            } finally {
+                pollsLoading.remove(messageId)
+            }
+        }
+    }
+
+    /** Голос: опкод 304 `{messageId, chatId, pollId, answersIds}` → `state`. */
+    fun vote(chatId: Long, messageId: Long, poll: MaxPoll, answerIds: List<Int>, onResult: (Throwable?) -> Unit) = call(onResult) {
+        val payload = JSONObject().put("messageId", messageId).put("chatId", chatId).put("pollId", poll.pollId).put("answersIds", JSONArray(answerIds))
+        val answer = JSONObject(request(OP_SEND_VOTE, payload))
+        val state = answer.optJSONObject("state")
+        if (state != null) polls[messageId] = poll.withState(state)
+        forEachListener { it.onPollChanged(chatId, messageId) }
+        if (state == null) loadPoll(chatId, messageId, poll.pollId)
+    }
+
+    /** Новый опрос: вложение `{_type: POLL, title, settings, answers: [{text}]}` (Komet sendPollMessage). */
+    fun sendPoll(chatId: Long, title: String, answers: List<String>, multiple: Boolean, anonymous: Boolean, onResult: (MaxMessage?, Throwable?) -> Unit) {
+        io {
+            try {
+                val attach = JSONObject()
+                    .put("_type", "POLL")
+                    .put("title", title)
+                    .put("settings", (if (anonymous) 4 else 0) or (if (multiple) 1 else 0))
+                    .put("answers", JSONArray(answers.map { JSONObject().put("text", it) }))
+                onResult(send(chatId, JSONObject().put("cid", -System.currentTimeMillis()).put("attaches", JSONArray().put(attach))), null)
+            } catch (e: Throwable) {
+                MaxLog.e("sendPoll failed", e)
+                onResult(null, e)
+            }
+        }
+    }
+
+    /** Геопозиция: вложение `{_type: LOCATION, latitude, longitude, zoom: 15}`. */
+    fun sendLocation(chatId: Long, lat: Double, lon: Double, onResult: (MaxMessage?, Throwable?) -> Unit) {
+        io {
+            try {
+                val attach = JSONObject().put("_type", "LOCATION").put("latitude", lat).put("longitude", lon).put("zoom", 15)
+                onResult(send(chatId, JSONObject().put("cid", -System.currentTimeMillis()).put("attaches", JSONArray().put(attach))), null)
+            } catch (e: Throwable) {
+                MaxLog.e("sendLocation failed", e)
+                onResult(null, e)
+            }
+        }
+    }
+
+    /** Контакт: вложение `{_type: CONTACT, contactId}`. */
+    fun sendContact(chatId: Long, contactId: Long, onResult: (MaxMessage?, Throwable?) -> Unit) {
+        io {
+            try {
+                val attach = JSONObject().put("_type", "CONTACT").put("contactId", contactId)
+                onResult(send(chatId, JSONObject().put("cid", -System.currentTimeMillis()).put("attaches", JSONArray().put(attach))), null)
+            } catch (e: Throwable) {
+                MaxLog.e("sendContact failed", e)
+                onResult(null, e)
             }
         }
     }
