@@ -52,6 +52,41 @@ object MaxImages {
         }
     }
 
+    /**
+     * Картинка вложения (фото, превью видео, стикер) в [view]. Пока грузится — заливка
+     * цветом [placeholder]. Тег защищает от переиспользованной ячейки.
+     */
+    fun bindImage(view: BackupImageView, url: String?, maxPx: Int, placeholder: Int) {
+        view.setTag(url)
+        val key = url?.let { "$it#$maxPx" }
+        val cached = key?.let { synchronized(cache) { cache.get(it) } }
+        if (cached != null) {
+            view.setImageBitmap(cached)
+            return
+        }
+        view.setImageDrawable(android.graphics.drawable.ColorDrawable(placeholder))
+        if (url == null || key == null || synchronized(failed) { failed.contains(url) }) return
+        pool.execute {
+            val bitmap = download(url, maxPx)
+            if (bitmap == null) {
+                synchronized(failed) { failed.add(url) }
+                return@execute
+            }
+            synchronized(cache) { cache.put(key, bitmap) }
+            AndroidUtilities.runOnUIThread {
+                if (view.tag == url) view.setImageBitmap(bitmap)
+            }
+        }
+    }
+
+    /** Картинка целиком для просмотра на весь экран; колбэк на главном потоке. */
+    fun loadFull(url: String, maxPx: Int, onDone: (Bitmap?) -> Unit) {
+        pool.execute {
+            val bitmap = download(url, maxPx)
+            AndroidUtilities.runOnUIThread { onDone(bitmap) }
+        }
+    }
+
     private fun download(url: String, sizePx: Int): Bitmap? = try {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.connectTimeout = 10000

@@ -90,7 +90,62 @@ object MaxContacts {
     fun clear() = known.clear()
 }
 
-/** Сообщение MAX: текст или подпись к вложению, служебные события — отдельным флагом. */
+/**
+ * Вложение сообщения. Поля сверены с Komet (lib/models/attachment.dart): у фото ссылка
+ * в baseUrl или url, у файла — fileId (ссылку на скачивание выдаёт опкод 88), у видео —
+ * videoId и token (ссылку выдаёт опкод 83), у голосового — прямая ссылка в url.
+ */
+class MaxAttach(
+    val type: String,
+    val url: String?,
+    val width: Int,
+    val height: Int,
+    val fileId: Long,
+    val name: String?,
+    val size: Long,
+    val duration: Long,
+    val videoId: Long,
+    val token: String?,
+    val raw: JSONObject,
+) {
+    val isPhoto get() = type == "PHOTO"
+    val isVideo get() = type == "VIDEO"
+    val isAudio get() = type == "AUDIO"
+    val isFile get() = type == "FILE"
+    val isSticker get() = type == "STICKER"
+
+    companion object {
+        fun parse(a: JSONObject): MaxAttach {
+            val type = a.optString("_type", "").uppercase()
+            val url = when (type) {
+                "PHOTO" -> a.optString("baseUrl", "").ifEmpty { a.optString("url", "") }
+                "AUDIO" -> a.optString("url", "").ifEmpty { a.optString("baseUrl", "") }
+                "STICKER" -> a.optString("url", "").ifEmpty { a.optString("baseUrl", "") }
+                "VIDEO" -> a.optString("thumbnail", "").ifEmpty { a.optString("baseUrl", "") }
+                "FILE" -> a.optJSONObject("preview")?.optString("baseUrl", "") ?: ""
+                else -> a.optString("baseUrl", "")
+            }.ifEmpty { null }
+            return MaxAttach(
+                type = type,
+                url = url,
+                width = a.optInt("width", 0),
+                height = a.optInt("height", 0),
+                fileId = a.optLong("fileId", 0L),
+                name = a.optString("name", "").ifEmpty { null },
+                size = a.optLong("size", 0L),
+                duration = a.optLong("duration", 0L),
+                videoId = a.optLong("videoId", 0L),
+                token = a.optString("token", "").ifEmpty { a.optString("videoToken", "") }.ifEmpty { null },
+                raw = a,
+            )
+        }
+    }
+}
+
+/** Цитата ответа: на какое сообщение отвечают и что в нём было. */
+class MaxReply(val messageId: Long, val senderId: Long, val text: String)
+
+/** Сообщение MAX: текст, вложения, ответ или пересылка, служебные события. */
 class MaxMessage(
     val id: Long,
     val cid: Long,
@@ -101,6 +156,12 @@ class MaxMessage(
     val attachLabel: String?,
     /** Служебное событие чата («создан чат», «вышел из чата»…). */
     val isService: Boolean,
+    val attaches: List<MaxAttach> = emptyList(),
+    val reply: MaxReply? = null,
+    /** Переслано: имя исходного автора или канала. */
+    val forwardFrom: String? = null,
+    val forwardSenderId: Long = 0L,
+    val edited: Boolean = false,
 ) {
     /** Локальное, ещё не подтверждённое сервером. */
     @Volatile
@@ -112,7 +173,7 @@ class MaxMessage(
     val isOutgoing: Boolean
         get() = senderId != 0L && senderId == MaxStore.accountId
 
-    /** Что показать в пузыре или в превью чата. */
+    /** Что показать в превью чата или в цитате. */
     val displayText: String
         get() = when {
             text.isNotEmpty() && attachLabel != null && !isService -> "$attachLabel · $text"
@@ -125,21 +186,54 @@ class MaxMessage(
     fun sameAs(other: MaxMessage): Boolean =
         (id != 0L && id == other.id) || (cid != 0L && cid == other.cid)
 
+    /** Копия с новым текстом — для локальной правки. */
+    fun withText(newText: String): MaxMessage =
+        MaxMessage(id, cid, senderId, newText, time, attachLabel, isService, attaches, reply, forwardFrom, forwardSenderId, true)
+
     companion object {
         fun parse(json: JSONObject?): MaxMessage? {
             if (json == null) return null
             // id приходит то числом, то строкой.
             val id = json.optString("id", "").toLongOrNull() ?: json.optLong("id", 0L)
-            val attach = firstAttach(json.optJSONArray("attaches"))
-            val type = attach?.optString("_type", "")?.uppercase() ?: ""
+            val link = json.optJSONObject("link")
+            val linkType = link?.optString("type", "")?.uppercase() ?: ""
+            // У пересланного содержимое лежит в link.message, а не в самом сообщении.
+            val content = if (linkType == "FORWARD") link?.optJSONObject("message") ?: json else json
+            val attachArray = content.optJSONArray("attaches")
+            val attaches = ArrayList<MaxAttach>()
+            if (attachArray != null) {
+                for (i in 0 until attachArray.length()) {
+                    val a = attachArray.optJSONObject(i) ?: continue
+                    if (a.optString("_type", "").uppercase() == "INLINE_KEYBOARD") continue
+                    attaches.add(MaxAttach.parse(a))
+                }
+            }
+            val first = attaches.firstOrNull()
+            var reply: MaxReply? = null
+            if (linkType == "REPLY") {
+                val m = link?.optJSONObject("message")
+                val mid = m?.optString("id", "")?.toLongOrNull() ?: link?.optLong("messageId", 0L) ?: 0L
+                reply = MaxReply(mid, m?.optLong("sender", 0L) ?: 0L, m?.let { parse(it)?.displayText } ?: "Сообщение")
+            }
+            var forwardFrom: String? = null
+            var forwardSender = 0L
+            if (linkType == "FORWARD") {
+                forwardSender = content.optLong("sender", 0L)
+                forwardFrom = link?.optString("chatName", "")?.ifEmpty { null }
+            }
             return MaxMessage(
                 id = id,
                 cid = json.optLong("cid", 0L),
                 senderId = json.optLong("sender", 0L),
-                text = json.optString("text", ""),
+                text = content.optString("text", ""),
                 time = json.optLong("time", 0L),
-                attachLabel = if (attach != null) attachLabel(type, attach) else null,
-                isService = type == "CONTROL",
+                attachLabel = if (first != null) attachLabel(first.type, first.raw) else null,
+                isService = first?.type == "CONTROL",
+                attaches = attaches,
+                reply = reply,
+                forwardFrom = forwardFrom,
+                forwardSenderId = forwardSender,
+                edited = json.optString("status", "").uppercase() == "EDITED",
             )
         }
 
@@ -149,17 +243,6 @@ class MaxMessage(
             for (i in 0 until array.length()) parse(array.optJSONObject(i))?.let { out.add(it) }
             out.sortWith(compareBy({ it.time }, { it.id }))
             return out
-        }
-
-        /** Первое содержательное вложение; клавиатуру ботов пропускаем — у неё есть текст. */
-        private fun firstAttach(attaches: JSONArray?): JSONObject? {
-            if (attaches == null) return null
-            for (i in 0 until attaches.length()) {
-                val a = attaches.optJSONObject(i) ?: continue
-                if (a.optString("_type", "").uppercase() == "INLINE_KEYBOARD") continue
-                return a
-            }
-            return null
         }
 
         private fun attachLabel(type: String, attach: JSONObject): String = when (type) {
@@ -191,6 +274,31 @@ class MaxMessage(
     }
 }
 
+/**
+ * Присутствие людей: в сети ли и когда были. status 1 — в сети, seen — секунды эпохи.
+ * Сверено с Komet (chat_parsing.dart, info_cache.dart).
+ */
+object MaxPresence {
+    class Entry(val online: Boolean, val seen: Long)
+
+    private val known = ConcurrentHashMap<Long, Entry>()
+
+    fun get(id: Long): Entry? = known[id]
+
+    fun put(id: Long, json: JSONObject?) {
+        if (json == null || id == 0L) return
+        known[id] = Entry(json.optInt("status", 0) == 1, json.optLong("seen", 0L))
+    }
+
+    /** Словарь «id -> присутствие» из ответа на вход или на опкод 35. */
+    fun putAll(map: JSONObject?) {
+        if (map == null) return
+        map.keys().forEach { k -> k.toLongOrNull()?.let { put(it, map.optJSONObject(k)) } }
+    }
+
+    fun clear() = known.clear()
+}
+
 /** Чат MAX: личный диалог (DIALOG), группа (CHAT) или канал (CHANNEL). */
 class MaxChat(
     val id: Long,
@@ -201,6 +309,8 @@ class MaxChat(
     @Volatile var lastMessage: MaxMessage?,
     @Volatile var unread: Int,
     private val lastEventTime: Long,
+    /** Отметки прочтения участников: id -> время последнего прочитанного. */
+    val readMarks: MutableMap<Long, Long> = ConcurrentHashMap(),
 ) {
     val isDialog: Boolean
         get() = type == "DIALOG"
@@ -233,6 +343,12 @@ class MaxChat(
     val avatarUrl: String?
         get() = if (isDialog) MaxContacts.get(peerId)?.avatarUrl else iconUrl
 
+    /** Прочитал ли собеседник (или кто-то в группе) сообщение с этим временем. */
+    fun isReadByOthers(time: Long): Boolean {
+        val me = MaxStore.accountId
+        return readMarks.any { (id, mark) -> id != me && mark >= time }
+    }
+
     /** Для аватарки-заглушки: стабильный цвет по id. */
     val avatarKey: Long
         get() = if (isDialog) peerId else id
@@ -251,6 +367,7 @@ class MaxChat(
                 lastMessage = MaxMessage.parse(json.optJSONObject("lastMessage")),
                 unread = json.optInt("newMessages", 0),
                 lastEventTime = json.optLong("lastEventTime", json.optLong("modified", 0L)),
+                readMarks = readMarks(json.opt("participants")),
             )
         }
 
@@ -266,6 +383,12 @@ class MaxChat(
         fun dialogWith(contactId: Long): MaxChat {
             val me = MaxStore.accountId
             return MaxChat(me xor contactId, "DIALOG", null, null, listOf(me, contactId), null, 0, 0L)
+        }
+
+        private fun readMarks(raw: Any?): MutableMap<Long, Long> {
+            val out = ConcurrentHashMap<Long, Long>()
+            if (raw is JSONObject) raw.keys().forEach { k -> k.toLongOrNull()?.let { out[it] = raw.optLong(k, 0L) } }
+            return out
         }
 
         /** Участники приходят словарём «id -> отметка прочтения», иногда списком. */

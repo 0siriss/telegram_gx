@@ -185,6 +185,7 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
 
     override fun onFragmentDestroy() {
         MaxClient.removeListener(this)
+        AndroidUtilities.cancelRunOnUIThread(typingTicker)
         super.onFragmentDestroy()
     }
 
@@ -214,6 +215,21 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
     }
 
     override fun onContactsChanged() {
+        AndroidUtilities.runOnUIThread { updateUi() }
+    }
+
+    /** «Печатает…» в превью гаснет само: через 6 секунд перерисовываем список. */
+    private val typingTicker = Runnable { updateUi() }
+
+    override fun onTyping(chatId: Long, userId: Long) {
+        AndroidUtilities.runOnUIThread {
+            updateUi()
+            AndroidUtilities.cancelRunOnUIThread(typingTicker)
+            AndroidUtilities.runOnUIThread(typingTicker, 6_500L)
+        }
+    }
+
+    override fun onReadMarkChanged(chatId: Long) {
         AndroidUtilities.runOnUIThread { updateUi() }
     }
 

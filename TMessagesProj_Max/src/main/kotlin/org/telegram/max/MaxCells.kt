@@ -69,8 +69,13 @@ class MaxChatCell(context: Context) : FrameLayout(context) {
         title.text = name
         MaxImages.bindAvatar(avatar, chat.avatarKey, name, chat.avatarUrl, 54)
         val last = chat.lastMessage
-        time.text = if (chat.sortTime > 0) LocaleController.stringForMessageListDate(chat.sortTime / 1000) else ""
-        preview.text = when {
+        val ticks = if (last != null && last.isOutgoing && !chat.isSaved) (if (chat.isReadByOthers(last.time)) "✓✓ " else "✓ ") else ""
+        time.text = ticks + if (chat.sortTime > 0) LocaleController.stringForMessageListDate(chat.sortTime / 1000) else ""
+        val typingUser = MaxClient.typingIn(chat.id)
+        preview.setTextColor(Theme.getColor(if (typingUser != null) Theme.key_chats_actionMessage else Theme.key_chats_message))
+        if (typingUser != null) {
+            preview.text = MaxText.chatSubtitle(chat)
+        } else preview.text = when {
             last == null -> if (chat.isSaved) "Сохраняйте сюда заметки" else "Нет сообщений"
             last.isService -> last.displayText
             last.isOutgoing && !chat.isSaved -> "Вы: " + last.displayText
