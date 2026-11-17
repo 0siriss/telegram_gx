@@ -288,6 +288,9 @@ write("org.telegram.ui.Components","FilterTabsView",
     public void addTab(int id, int stableId, CharSequence text, boolean noanimate, boolean isDefault, boolean isLocked) { }
     public void finishAddingTabs(boolean animated) { }
     public void selectFirstTab() { }
+    public void scrollToTab(Tab tab, int position) { }
+    public int getTabsCount() { return 0; }
+    public Tab getTab(int i) { return null; }
     public boolean selectTabWithStableId(int stableId) { return false; }
     public int getCurrentTabId() { return 0; }
     public void setBlurredBackground(org.telegram.ui.Components.blur3.drawable.BlurredBackgroundDrawable drawable) { }

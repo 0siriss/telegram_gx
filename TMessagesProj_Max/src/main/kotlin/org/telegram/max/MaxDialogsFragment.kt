@@ -129,8 +129,9 @@ class MaxDialogsFragment(
         })
         filterTabs.addTab(TAB_CHATS, TAB_CHATS, "Чаты", true, true, false)
         filterTabs.addTab(TAB_CONTACTS, TAB_CONTACTS, "Контакты", true, false, false)
+        // Первая вкладка выбирается сама при добавлении. selectFirstTab() здесь звать нельзя:
+        // он сразу дёргает делегат, а списков ещё нет — так падала v2.4.14.
         filterTabs.finishAddingTabs(false)
-        filterTabs.selectFirstTab()
         if (pick != null) filterTabs.visibility = View.GONE
         root.addView(filterTabs, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 50, 4f, 0f, 4f, 0f))
 
@@ -326,8 +327,14 @@ class MaxDialogsFragment(
     }
 
     private fun selectTab(which: Int) {
+        if (!::chatsList.isInitialized || !::contactsList.isInitialized) return
         tab = which
-        if (::filterTabs.isInitialized && filterTabs.getCurrentTabId() != which) filterTabs.selectTabWithStableId(which)
+        // Переключение из кода (карандаш → «Контакты»): двигаем и полоску переключателя.
+        // scrollToTab сам вызовет делегат, тот вернётся сюда уже с совпавшей вкладкой.
+        if (::filterTabs.isInitialized && filterTabs.getCurrentTabId() != which && which < filterTabs.getTabsCount()) {
+            filterTabs.scrollToTab(filterTabs.getTab(which), which)
+            return
+        }
         storiesBar.visibility = if (which == TAB_CHATS && pick == null) View.VISIBLE else View.GONE
         chatsList.visibility = if (which == TAB_CHATS) View.VISIBLE else View.GONE
         contactsList.visibility = if (which == TAB_CONTACTS) View.VISIBLE else View.GONE
