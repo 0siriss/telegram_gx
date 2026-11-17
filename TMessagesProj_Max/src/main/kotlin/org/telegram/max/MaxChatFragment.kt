@@ -25,10 +25,12 @@ import org.telegram.messenger.AndroidUtilities
 import org.telegram.messenger.LocaleController
 import org.telegram.messenger.SharedConfig
 import org.telegram.ui.ActionBar.ActionBar
+import org.telegram.ui.ActionBar.ActionBarMenuItem
 import org.telegram.ui.ActionBar.AlertDialog
 import org.telegram.ui.ActionBar.BaseFragment
 import org.telegram.ui.ActionBar.Theme
 import org.telegram.ui.Components.BackupImageView
+import org.telegram.ui.Components.ItemOptions
 import org.telegram.ui.Components.LayoutHelper
 import org.telegram.ui.Components.RecyclerListView
 import org.telegram.ui.Components.SizeNotifierFrameLayout
@@ -64,7 +66,22 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     private lateinit var replyText: TextView
     private lateinit var recordBar: LinearLayout
     private lateinit var recordTime: TextView
+    private lateinit var attachButton: ImageView
+    private lateinit var header: View
+    private lateinit var pinBar: FrameLayout
+    private lateinit var pinText: TextView
+    private lateinit var inputPanel: View
+    private lateinit var searchBar: LinearLayout
+    private lateinit var searchCounter: TextView
+    private lateinit var goDown: FrameLayout
     private val adapter = Adapter()
+
+    /** Найденные сообщения (от новых к старым) и текущее из них. */
+    private var searchResults: List<MaxMessage> = emptyList()
+    private var searchIndex = 0
+
+    /** Подсвеченное после перехода сообщение — как вспышка в Telegram. */
+    private var highlightId = 0L
 
     private var loading = false
     private var reachedStart = false
@@ -83,16 +100,44 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         actionBar.setBackButtonImage(org.telegram.messenger.R.drawable.ic_ab_back)
         actionBar.setActionBarMenuOnItemClick(object : ActionBar.ActionBarMenuOnItemClick() {
             override fun onItemClick(id: Int) {
-                if (id == -1) finishFragment()
+                when (id) {
+                    -1 -> finishFragment()
+                    MENU_INFO -> openProfile()
+                    MENU_LEAVE -> confirmLeave()
+                }
             }
         })
+        val menu = actionBar.createMenu()
+        val search = menu.addItem(MENU_SEARCH, org.telegram.messenger.R.drawable.outline_header_search)
+        search.setIsSearchField(true)
+            .setActionBarMenuItemSearchListener(object : ActionBarMenuItem.ActionBarMenuItemSearchListener() {
+                override fun onSearchExpand() {
+                    header.visibility = View.GONE
+                }
+
+                override fun onSearchCollapse() {
+                    header.visibility = View.VISIBLE
+                    closeSearch()
+                }
+
+                override fun onSearchPressed(editText: EditText) {
+                    runSearch(editText.text.toString().trim())
+                }
+            })
+        search.setSearchFieldHint("Поиск")
+        if (!chat.isSaved) {
+            val more = menu.addItem(MENU_MORE, org.telegram.messenger.R.drawable.ic_ab_other)
+            more.addSubItem(MENU_INFO, org.telegram.messenger.R.drawable.msg_info, if (chat.isDialog) "Профиль" else "Информация")
+            if (!chat.isDialog) more.addSubItem(MENU_LEAVE, org.telegram.messenger.R.drawable.msg_leave, if (chat.isChannel) "Покинуть канал" else "Покинуть группу")
+        }
         // Шапка ставится в зону самой панели, ниже строки состояния: иначе имя рисуется
         // под часами и значками и кажется пропавшим.
         val headerParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ActionBar.getCurrentActionBarHeight(), Gravity.TOP or Gravity.START)
         headerParams.topMargin = if (actionBar.occupyStatusBar) AndroidUtilities.statusBarHeight else 0
         headerParams.leftMargin = AndroidUtilities.dp(56f)
-        headerParams.rightMargin = AndroidUtilities.dp(12f)
-        actionBar.addView(createHeader(context), headerParams)
+        headerParams.rightMargin = AndroidUtilities.dp(if (chat.isSaved) 56f else 104f)
+        header = createHeader(context)
+        actionBar.addView(header, headerParams)
 
         val root = ChatBackground(context)
         root.setBackgroundImage(Theme.getCachedWallpaper(), Theme.isWallpaperMotion())
@@ -100,6 +145,8 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         val column = LinearLayout(context)
         column.orientation = LinearLayout.VERTICAL
         root.addView(column, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
+
+        column.addView(createPinBar(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48))
 
         val listHolder = FrameLayout(context)
         column.addView(listHolder, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 0, 1f))
@@ -114,15 +161,16 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         listView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                 if (layoutManager.findFirstVisibleItemPosition() <= 5) loadOlder()
+                updateGoDown()
             }
         })
         listView.setOnItemClickListener(RecyclerListView.OnItemClickListener { _, position ->
             val message = rows.getOrNull(position) as? MaxMessage ?: return@OnItemClickListener
             openAttach(message)
         })
-        listView.setOnItemLongClickListener(RecyclerListView.OnItemLongClickListener { _, position ->
+        listView.setOnItemLongClickListener(RecyclerListView.OnItemLongClickListener { view, position ->
             val message = rows.getOrNull(position) as? MaxMessage ?: return@OnItemLongClickListener false
-            showActions(message)
+            showActions(message, view)
             true
         })
         listHolder.addView(listView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
@@ -135,9 +183,12 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         emptyView.gravity = Gravity.CENTER
         emptyView.text = "Загружаем сообщения…"
         listHolder.addView(emptyView, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.CENTER, 24f, 0f, 24f, 0f))
+        listHolder.addView(createGoDown(context), LayoutHelper.createFrame(46, 46f, Gravity.BOTTOM or Gravity.END, 0f, 0f, 8f, 8f))
 
         column.addView(createReplyBar(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
-        column.addView(createInput(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
+        inputPanel = createInput(context)
+        column.addView(inputPanel, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
+        column.addView(createSearchBar(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48))
 
         fragmentView = root
         updateHeader()
@@ -205,6 +256,232 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         subtitleView.setTextColor(Theme.getColor(if (typingNow || subtitle == "в сети") Theme.key_actionBarDefaultSubtitle else Theme.key_actionBarDefaultSubtitle))
         AndroidUtilities.cancelRunOnUIThread(headerTicker)
         if (typingNow) AndroidUtilities.runOnUIThread(headerTicker, 6_000L)
+        updatePinBar()
+    }
+
+    // ---- закреплённое сообщение: плашка под шапкой, как в Telegram ----
+
+    private fun createPinBar(context: Context): View {
+        pinBar = FrameLayout(context)
+        pinBar.setBackgroundColor(Theme.getColor(Theme.key_chat_topPanelBackground))
+        pinBar.visibility = View.GONE
+        val line = View(context)
+        line.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(1f), Theme.getColor(Theme.key_chat_topPanelLine))
+        pinBar.addView(line, LayoutHelper.createFrame(2, 32f, Gravity.START or Gravity.CENTER_VERTICAL, 12f, 0f, 0f, 0f))
+        val texts = LinearLayout(context)
+        texts.orientation = LinearLayout.VERTICAL
+        val title = TextView(context)
+        title.text = "Закреплённое сообщение"
+        title.textSize = 14f
+        title.typeface = AndroidUtilities.bold()
+        title.setTextColor(Theme.getColor(Theme.key_chat_topPanelTitle))
+        title.isSingleLine = true
+        texts.addView(title, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
+        pinText = TextView(context)
+        pinText.textSize = 14f
+        pinText.setTextColor(Theme.getColor(Theme.key_chat_topPanelMessage))
+        pinText.isSingleLine = true
+        pinText.ellipsize = TextUtils.TruncateAt.END
+        texts.addView(pinText, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
+        pinBar.addView(texts, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.CENTER_VERTICAL, 22f, 0f, 48f, 0f))
+        val close = ImageView(context)
+        close.setImageResource(org.telegram.messenger.R.drawable.miniplayer_close)
+        close.scaleType = ImageView.ScaleType.CENTER
+        close.colorFilter = android.graphics.PorterDuffColorFilter(Theme.getColor(Theme.key_chat_topPanelClose), android.graphics.PorterDuff.Mode.SRC_IN)
+        close.background = Theme.createSelectorDrawable(Theme.getColor(Theme.key_listSelector), 1)
+        close.setOnClickListener { confirmUnpin() }
+        pinBar.addView(close, LayoutHelper.createFrame(48, 48f, Gravity.END or Gravity.CENTER_VERTICAL, 0f, 0f, 0f, 0f))
+        pinBar.background = Theme.createSelectorDrawable(Theme.getColor(Theme.key_listSelector), 2)
+        pinBar.setBackgroundColor(Theme.getColor(Theme.key_chat_topPanelBackground))
+        pinBar.setOnClickListener { chat.pinned?.let { jumpTo(it.id, it.time) } }
+        val shadow = View(context)
+        shadow.setBackgroundColor(Theme.getColor(Theme.key_divider))
+        pinBar.addView(shadow, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 1f, Gravity.BOTTOM, 0f, 0f, 0f, 0f))
+        return pinBar
+    }
+
+    private fun updatePinBar() {
+        if (!::pinBar.isInitialized) return
+        val pinned = chat.pinned
+        if (pinned == null || pinned.id == 0L) {
+            pinBar.visibility = View.GONE
+            return
+        }
+        pinBar.visibility = View.VISIBLE
+        pinText.text = MaxBubbles.emojify(pinned.displayText.replace('\n', ' '), pinText)
+    }
+
+    private fun confirmUnpin() {
+        val context = parentActivity ?: return
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle("Открепить сообщение")
+                .setMessage("Открепить сообщение для всех участников чата?")
+                .setPositiveButton("Открепить") { _, _ ->
+                    MaxClient.pinMessage(chatId, 0L, false) { error ->
+                        if (error != null) toast("Не удалось открепить: " + MaxLog.describe(error))
+                        else AndroidUtilities.runOnUIThread { updatePinBar() }
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+    }
+
+    private fun pin(message: MaxMessage) {
+        MaxClient.pinMessage(chatId, message.id, true) { error ->
+            if (error != null) toast("Не удалось закрепить: " + MaxLog.describe(error))
+            else AndroidUtilities.runOnUIThread {
+                if (chat.pinned?.id != message.id) chat.pinned = message
+                updatePinBar()
+            }
+        }
+    }
+
+    private fun confirmLeave() {
+        val context = parentActivity ?: return
+        val what = if (chat.isChannel) "канал" else "группу"
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle("Покинуть $what")
+                .setMessage("Вы уверены, что хотите покинуть «${chat.title}»?")
+                .setPositiveButton("Покинуть") { _, _ ->
+                    MaxClient.leaveChat(chatId) { error ->
+                        AndroidUtilities.runOnUIThread {
+                            if (error != null) toast("Не удалось выйти: " + MaxLog.describe(error)) else finishFragment()
+                        }
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+    }
+
+    // ---- кнопка «вниз», как в Telegram ----
+
+    private fun createGoDown(context: Context): View {
+        goDown = FrameLayout(context)
+        goDown.background = Theme.createCircleDrawable(AndroidUtilities.dp(42f), Theme.getColor(Theme.key_chat_goDownButton))
+        val icon = ImageView(context)
+        icon.setImageResource(org.telegram.messenger.R.drawable.pagedown)
+        icon.scaleType = ImageView.ScaleType.CENTER
+        icon.colorFilter = android.graphics.PorterDuffColorFilter(Theme.getColor(Theme.key_chat_messagePanelIcons), android.graphics.PorterDuff.Mode.SRC_IN)
+        goDown.addView(icon, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
+        goDown.visibility = View.GONE
+        goDown.setOnClickListener {
+            if (rows.isNotEmpty()) listView.smoothScrollToPosition(rows.size - 1)
+        }
+        return goDown
+    }
+
+    private fun updateGoDown() {
+        if (!::goDown.isInitialized) return
+        val far = rows.isNotEmpty() && layoutManager.findLastVisibleItemPosition() < rows.size - 4
+        goDown.visibility = if (far) View.VISIBLE else View.GONE
+    }
+
+    // ---- поиск по чату: поле в шапке, внизу «N из M» со стрелками, как в Telegram ----
+
+    private fun createSearchBar(context: Context): View {
+        searchBar = LinearLayout(context)
+        searchBar.orientation = LinearLayout.HORIZONTAL
+        searchBar.gravity = Gravity.CENTER_VERTICAL
+        searchBar.setBackgroundColor(Theme.getColor(Theme.key_chat_messagePanelBackground))
+        searchBar.visibility = View.GONE
+        searchCounter = TextView(context)
+        searchCounter.textSize = 15f
+        searchCounter.typeface = AndroidUtilities.bold()
+        searchCounter.setTextColor(Theme.getColor(Theme.key_chat_searchPanelText))
+        searchBar.addView(searchCounter, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.CENTER_VERTICAL, 16, 0, 0, 0))
+        fun arrow(res: Int, step: Int): ImageView {
+            val view = ImageView(context)
+            view.setImageResource(res)
+            view.scaleType = ImageView.ScaleType.CENTER
+            view.colorFilter = android.graphics.PorterDuffColorFilter(Theme.getColor(Theme.key_chat_searchPanelIcons), android.graphics.PorterDuff.Mode.SRC_IN)
+            view.background = Theme.createSelectorDrawable(Theme.getColor(Theme.key_listSelector), 1)
+            view.setOnClickListener { stepSearch(step) }
+            return view
+        }
+        searchBar.addView(arrow(org.telegram.messenger.R.drawable.msg_go_up, 1), LayoutHelper.createLinear(48, 48))
+        searchBar.addView(arrow(org.telegram.messenger.R.drawable.msg_go_down, -1), LayoutHelper.createLinear(48, 48))
+        return searchBar
+    }
+
+    private fun runSearch(query: String) {
+        if (query.isEmpty()) return
+        AndroidUtilities.hideKeyboard(fragmentView)
+        searchBar.visibility = View.VISIBLE
+        inputPanel.visibility = View.GONE
+        replyBar.visibility = View.GONE
+        searchCounter.text = "Ищем…"
+        MaxClient.searchMessages(chatId, query) { list, error ->
+            AndroidUtilities.runOnUIThread {
+                if (searchBar.visibility != View.VISIBLE) return@runOnUIThread
+                if (error != null || list == null) {
+                    searchCounter.text = "Не удалось найти"
+                    return@runOnUIThread
+                }
+                searchResults = list
+                searchIndex = 0
+                if (list.isEmpty()) searchCounter.text = "Ничего не найдено" else showSearchResult()
+            }
+        }
+    }
+
+    private fun stepSearch(step: Int) {
+        if (searchResults.isEmpty()) return
+        searchIndex = (searchIndex + step).coerceIn(0, searchResults.size - 1)
+        showSearchResult()
+    }
+
+    private fun showSearchResult() {
+        val found = searchResults.getOrNull(searchIndex) ?: return
+        searchCounter.text = "${searchIndex + 1} из ${searchResults.size}"
+        jumpTo(found.id, found.time)
+    }
+
+    private fun closeSearch() {
+        if (!::searchBar.isInitialized) return
+        searchResults = emptyList()
+        searchBar.visibility = View.GONE
+        inputPanel.visibility = View.VISIBLE
+        if (replyTo != null || editing != null) replyBar.visibility = View.VISIBLE
+    }
+
+    /**
+     * Переход к сообщению: если оно уже в списке — прокрутка и вспышка, иначе догружаем
+     * историю вверх, пока не дойдём до его времени (не больше 20 страниц).
+     */
+    private fun jumpTo(messageId: Long, time: Long, attempts: Int = 20) {
+        val index = rows.indexOfFirst { it is MaxMessage && it.id == messageId }
+        if (index >= 0) {
+            highlightId = messageId
+            layoutManager.scrollToPositionWithOffset(index, listView.height / 3)
+            adapter.notifyItemChanged(index)
+            AndroidUtilities.runOnUIThread({
+                highlightId = 0L
+                val now = rows.indexOfFirst { it is MaxMessage && it.id == messageId }
+                if (now >= 0) adapter.notifyItemChanged(now)
+            }, 1_500L)
+            return
+        }
+        if (reachedStart || attempts <= 0 || messages.isEmpty() || loading) {
+            if (loading && attempts > 0) AndroidUtilities.runOnUIThread({ jumpTo(messageId, time, attempts - 1) }, 300L)
+            else toast("Сообщение не найдено в истории")
+            return
+        }
+        loading = true
+        MaxClient.loadHistory(chatId, messages.first().time, PAGE) { list, _ ->
+            AndroidUtilities.runOnUIThread {
+                loading = false
+                if (list == null) return@runOnUIThread
+                val before = messages.size
+                merge(list)
+                if (messages.size == before) reachedStart = true
+                rebuild(scrollToEnd = false)
+                jumpTo(messageId, time, attempts - 1)
+            }
+        }
     }
 
     // ---- поле ввода ----
@@ -252,6 +529,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         panel.setPadding(AndroidUtilities.dp(2f), AndroidUtilities.dp(2f), AndroidUtilities.dp(2f), AndroidUtilities.dp(2f))
 
         val attach = ImageView(context)
+        attachButton = attach
         attach.setImageResource(org.telegram.messenger.R.drawable.input_attach)
         attach.scaleType = ImageView.ScaleType.CENTER
         attach.colorFilter = android.graphics.PorterDuffColorFilter(Theme.getColor(Theme.key_chat_messagePanelIcons), android.graphics.PorterDuff.Mode.SRC_IN)
@@ -452,6 +730,10 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
     override fun onResume() {
         super.onResume()
+        if (chatId in MaxClient.leftChats) {
+            finishFragment()
+            return
+        }
         MaxClient.openChatId = chatId
         MaxNotifier.clear(chatId)
         markRead()
@@ -660,31 +942,41 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
     // ---- вложения: отправка ----
 
+    /** Меню скрепки — всплывающее, как меню в Telegram. */
     private fun showAttachMenu() {
-        val context = parentActivity ?: return
-        showDialog(
-            AlertDialog.Builder(context)
-                .setTitle("Отправить")
-                .setItems(arrayOf<CharSequence>("Фото из галереи", "Файл")) { _, which ->
-                    val intent = Intent(Intent.ACTION_GET_CONTENT)
-                    intent.addCategory(Intent.CATEGORY_OPENABLE)
-                    intent.type = if (which == 0) "image/*" else "*/*"
-                    try {
-                        startActivityForResult(Intent.createChooser(intent, null), if (which == 0) REQ_PHOTO else REQ_FILE)
-                    } catch (e: Throwable) {
-                        toast("Нет приложения для выбора файла")
-                    }
-                }
-                .create()
-        )
+        ItemOptions.makeOptions(this, attachButton)
+            .add(org.telegram.messenger.R.drawable.msg_photos, "Фото или видео") { pick(REQ_PHOTO) }
+            .add(org.telegram.messenger.R.drawable.msg_video, "Видео") { pick(REQ_VIDEO) }
+            .add(org.telegram.messenger.R.drawable.msg_view_file, "Файл") { pick(REQ_FILE) }
+            .show()
+    }
+
+    private fun pick(request: Int) {
+        val intent = Intent(Intent.ACTION_GET_CONTENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        when (request) {
+            REQ_PHOTO -> {
+                intent.type = "image/*"
+                intent.putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
+            }
+            REQ_VIDEO -> intent.type = "video/*"
+            else -> intent.type = "*/*"
+        }
+        try {
+            startActivityForResult(Intent.createChooser(intent, null), request)
+        } catch (e: Throwable) {
+            toast("Нет приложения для выбора файла")
+        }
     }
 
     override fun onActivityResultFragment(requestCode: Int, resultCode: Int, data: Intent?) {
         if (resultCode != Activity.RESULT_OK) return
         val uri = data?.data ?: return
-        when (requestCode) {
-            REQ_PHOTO -> sendPickedPhoto(uri)
-            REQ_FILE -> sendPickedFile(uri)
+        val mime = try { parentActivity?.contentResolver?.getType(uri) } catch (e: Throwable) { null } ?: ""
+        when {
+            requestCode == REQ_VIDEO || (requestCode == REQ_PHOTO && mime.startsWith("video/")) -> sendPickedVideo(uri)
+            requestCode == REQ_PHOTO -> sendPickedPhoto(uri)
+            requestCode == REQ_FILE -> sendPickedFile(uri)
         }
     }
 
@@ -702,6 +994,35 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 return@Thread
             }
             MaxClient.sendPhoto(chatId, bytes, "") { sent, error -> replaceLocal(local, sent, error) }
+        }.start()
+    }
+
+    private fun sendPickedVideo(uri: Uri) {
+        val context = parentActivity ?: return
+        var size = 0L
+        try {
+            context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val s = c.getColumnIndex(OpenableColumns.SIZE)
+                if (c.moveToFirst() && s >= 0) size = c.getLong(s)
+            }
+        } catch (ignored: Throwable) {
+        }
+        if (size > MAX_VIDEO) {
+            toast("Видео больше 200 МБ пока не отправить")
+            return
+        }
+        val local = MaxMessage(0L, -System.currentTimeMillis(), MaxStore.accountId, "", System.currentTimeMillis(), "Видео", false)
+        local.pending = true
+        merge(listOf(local))
+        rebuild(scrollToEnd = true)
+        Thread {
+            val bytes = try {
+                context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw IllegalStateException("видео не открылось")
+            } catch (e: Throwable) {
+                replaceLocal(local, null, e)
+                return@Thread
+            }
+            MaxClient.sendVideo(chatId, bytes, "") { sent, error -> replaceLocal(local, sent, error) }
         }.start()
     }
 
@@ -799,36 +1120,97 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
     // ---- меню действий ----
 
-    private fun showActions(message: MaxMessage) {
+    /**
+     * Меню по долгому нажатию — всплывающее меню Telegram с иконками, сверху строка
+     * быстрых реакций.
+     */
+    private fun showActions(message: MaxMessage, anchor: View) {
         val context = parentActivity ?: return
         if (message.isService || message.pending) return
-        val labels = ArrayList<CharSequence>()
-        val actions = ArrayList<() -> Unit>()
-        fun add(label: String, action: () -> Unit) {
-            labels.add(label)
-            actions.add(action)
+        val sent = message.id != 0L
+        val canEdit = message.isOutgoing && message.text.isNotEmpty() && message.forwardFrom == null && message.forwardSenderId == 0L
+        val options = ItemOptions.makeOptions(this, anchor)
+        if (sent) {
+            val row = LinearLayout(context)
+            row.orientation = LinearLayout.HORIZONTAL
+            row.setPadding(AndroidUtilities.dp(6f), AndroidUtilities.dp(4f), AndroidUtilities.dp(6f), AndroidUtilities.dp(4f))
+            for (emoji in MaxReactions.QUICK) {
+                val chip = TextView(context)
+                chip.textSize = 22f
+                chip.gravity = Gravity.CENTER
+                chip.text = MaxBubbles.emojify(emoji, chip)
+                val mine = message.reactions?.mine == emoji
+                chip.background = if (mine) {
+                    Theme.createRoundRectDrawable(AndroidUtilities.dp(18f), Theme.getColor(Theme.key_listSelector))
+                } else {
+                    Theme.createSelectorDrawable(Theme.getColor(Theme.key_listSelector), 1)
+                }
+                chip.setOnClickListener {
+                    options.dismiss()
+                    toggleReaction(message, emoji)
+                }
+                row.addView(chip, LayoutHelper.createLinear(38, 38))
+            }
+            val scroll = android.widget.HorizontalScrollView(context)
+            scroll.isHorizontalScrollBarEnabled = false
+            scroll.addView(row)
+            options.addView(scroll)
+            options.addGap()
         }
-        if (message.id != 0L) add("Ответить") { startReply(message) }
-        if (message.text.isNotEmpty()) add("Копировать") {
-            AndroidUtilities.addToClipboard(message.text)
-            toast("Текст скопирован")
+        options
+            .addIf(sent, org.telegram.messenger.R.drawable.menu_reply, "Ответить") { startReply(message) }
+            .addIf(message.text.isNotEmpty(), org.telegram.messenger.R.drawable.msg_copy, "Копировать") {
+                AndroidUtilities.addToClipboard(message.text)
+                toast("Текст скопирован")
+            }
+            .addIf(sent, org.telegram.messenger.R.drawable.msg_forward, "Переслать") { chooseForwardTarget(message) }
+            .addIf(sent && !chat.isSaved && chat.pinned?.id != message.id, org.telegram.messenger.R.drawable.msg_pin, "Закрепить") { pin(message) }
+            .addIf(sent && chat.pinned?.id == message.id, org.telegram.messenger.R.drawable.msg_unpin, "Открепить") { confirmUnpin() }
+            .addIf(sent && canEdit, org.telegram.messenger.R.drawable.msg_edit, "Изменить") { startEdit(message) }
+            .addIf(message.failed, org.telegram.messenger.R.drawable.msg_retry, "Повторить") {
+                messages.remove(message)
+                input.setText(message.text)
+                onSend()
+            }
+            .addIf(sent, org.telegram.messenger.R.drawable.msg_delete, "Удалить", true) { confirmDelete(message) }
+            .setGravity(if (message.isOutgoing) Gravity.RIGHT else Gravity.LEFT)
+            .show()
+    }
+
+    /** Моя реакция: та же — снять, другая — поставить. Показываем сразу, сервер подтверждает. */
+    private fun toggleReaction(message: MaxMessage, emoji: String) {
+        val current = message.reactions
+        val next = if (current?.mine == emoji) null else emoji
+        message.reactions = current?.withMine(next) ?: next?.let { MaxReactions(listOf(it to 1), it) }
+        refreshMessage(message.id)
+        MaxClient.setReaction(chatId, message.id, next) { _, error ->
+            if (error != null) {
+                message.reactions = current
+                AndroidUtilities.runOnUIThread { refreshMessage(message.id) }
+                toast("Реакция не поставлена: " + MaxLog.describe(error))
+            }
         }
-        if (message.id != 0L) add("Переслать") { chooseForwardTarget(message) }
-        if (message.isOutgoing && message.text.isNotEmpty() && message.forwardFrom == null && message.forwardSenderId == 0L) {
-            add("Изменить") { startEdit(message) }
+    }
+
+    private fun refreshMessage(messageId: Long) {
+        val index = rows.indexOfFirst { it is MaxMessage && it.id == messageId }
+        if (index >= 0) adapter.notifyItemChanged(index)
+    }
+
+    override fun onReactionsChanged(chatId: Long, messageId: Long, reactions: MaxReactions?) {
+        if (chatId != this.chatId) return
+        AndroidUtilities.runOnUIThread {
+            val message = messages.firstOrNull { it.id == messageId } ?: return@runOnUIThread
+            // Пуш не знает, какая реакция моя: сохраняем свою, если её счётчик ещё жив.
+            val oldMine = message.reactions?.mine
+            message.reactions = when {
+                reactions == null -> null
+                reactions.mine == null && oldMine != null && reactions.counters.any { it.first == oldMine && it.second > 0 } ->
+                    MaxReactions(reactions.counters, oldMine)
+                else -> reactions
+            }
+            refreshMessage(messageId)
         }
-        if (message.failed) add("Повторить") {
-            messages.remove(message)
-            input.setText(message.text)
-            onSend()
-        }
-        if (message.id != 0L) add("Удалить") { confirmDelete(message) }
-        if (labels.isEmpty()) return
-        showDialog(
-            AlertDialog.Builder(context)
-                .setItems(labels.toTypedArray()) { _, which -> actions.getOrNull(which)?.invoke() }
-                .create()
-        )
     }
 
     private fun confirmDelete(message: MaxMessage) {
@@ -852,21 +1234,13 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         }
     }
 
+    /** Пересылка — выбор чата отдельным экраном, как «Переслать…» в Telegram. */
     private fun chooseForwardTarget(message: MaxMessage) {
-        val context = parentActivity ?: return
-        val targets = MaxClient.chats.take(60)
-        if (targets.isEmpty()) return
-        showDialog(
-            AlertDialog.Builder(context)
-                .setTitle("Переслать в…")
-                .setItems(targets.map { it.title as CharSequence }.toTypedArray()) { _, which ->
-                    val target = targets.getOrNull(which) ?: return@setItems
-                    MaxClient.forwardMessage(target.id, chatId, message.id) { error ->
-                        toast(if (error == null) "Переслано: ${target.title}" else "Не переслано: " + MaxLog.describe(error))
-                    }
-                }
-                .create()
-        )
+        presentFragment(MaxDialogsFragment(pick = { target ->
+            MaxClient.forwardMessage(target.id, chatId, message.id) { error ->
+                toast(if (error == null) "Переслано: ${target.title}" else "Не переслано: " + MaxLog.describe(error))
+            }
+        }))
     }
 
     // ---- список ----
@@ -963,6 +1337,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private val textBox = FrameLayout(context)
         private val body = TextView(context)
         private val meta = MaxBubbles.Meta(context)
+        private val reactionsRow = LinearLayout(context)
         private val inBubble = MaxBubbles.Bubble(false, false)
         private val outBubble = MaxBubbles.Bubble(true, false)
         private val inMediaBubble = MaxBubbles.Bubble(false, true)
@@ -1026,6 +1401,9 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             textBox.addView(body, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat()))
             textBox.addView(meta, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.BOTTOM or Gravity.END, 0f, 0f, 0f, 0f))
             bubble.addView(textBox, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
+
+            reactionsRow.orientation = LinearLayout.HORIZONTAL
+            bubble.addView(reactionsRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 4f, 0f, 2f))
 
             addView(bubble, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.START, 0f, 0f, 0f, 0f))
         }
@@ -1171,6 +1549,9 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 bubble.background = drawable
                 MaxBubbles.applyPadding(bubble, out, mediaOnly)
             }
+            bindReactions(message, out)
+            setBackgroundColor(if (message.id != 0L && message.id == highlightId) Theme.getColor(Theme.key_chat_selectedBackground) else 0)
+
             val params = bubble.layoutParams as LayoutParams
             params.gravity = if (out) Gravity.END else Gravity.START
             params.leftMargin = AndroidUtilities.dp(if (out) 48f else 4f)
@@ -1178,6 +1559,34 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             params.topMargin = AndroidUtilities.dp(if (topNear) 1f else 4f)
             params.bottomMargin = AndroidUtilities.dp(if (bottomNear) 1f else 4f)
             bubble.layoutParams = params
+        }
+
+        /** Реакции под текстом — «пилюли» с эмодзи и числом, моя закрашена, как в Telegram. */
+        private fun bindReactions(message: MaxMessage, out: Boolean) {
+            val r = message.reactions
+            reactionsRow.removeAllViews()
+            if (r == null || r.isEmpty || message.id == 0L) {
+                reactionsRow.visibility = GONE
+                return
+            }
+            reactionsRow.visibility = VISIBLE
+            val base = Theme.getColor(if (out) Theme.key_chat_outReactionButtonBackground else Theme.key_chat_inReactionButtonBackground)
+            for ((emoji, count) in r.counters.take(6)) {
+                val mine = r.mine == emoji
+                val chip = TextView(context)
+                chip.textSize = 14f
+                chip.typeface = AndroidUtilities.bold()
+                chip.gravity = Gravity.CENTER_VERTICAL
+                chip.setPadding(AndroidUtilities.dp(8f), AndroidUtilities.dp(3f), AndroidUtilities.dp(10f), AndroidUtilities.dp(3f))
+                chip.text = MaxBubbles.emojify("$emoji ${if (count > 0) count else 1}", chip)
+                chip.setTextColor(Theme.getColor(
+                    if (mine) (if (out) Theme.key_chat_outReactionButtonTextSelected else Theme.key_chat_inReactionButtonTextSelected)
+                    else (if (out) Theme.key_chat_outReactionButtonText else Theme.key_chat_inReactionButtonText)
+                ))
+                chip.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(14f), if (mine) base else (base and 0x00ffffff) or 0x26000000)
+                chip.setOnClickListener { toggleReaction(message, emoji) }
+                reactionsRow.addView(chip, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, 28, 0f, 0f, 6f, 0f))
+            }
         }
 
         /** Размер превью по пропорциям вложения: не шире пузыря, не выше 320dp. */
@@ -1202,6 +1611,12 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private const val REQ_PHOTO = 7101
         private const val REQ_FILE = 7102
         private const val REQ_MIC = 7103
+        private const val REQ_VIDEO = 7104
+        private const val MAX_VIDEO = 200L * 1024 * 1024
+        private const val MENU_SEARCH = 1
+        private const val MENU_MORE = 2
+        private const val MENU_INFO = 3
+        private const val MENU_LEAVE = 4
         private const val MAX_FILE = 100L * 1024 * 1024
 
         private val NAME_COLORS = intArrayOf(

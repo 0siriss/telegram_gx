@@ -12,7 +12,7 @@
 ## Главное про архитектуру форка
 
 `patches/fork-changes.patch` — единый источник истины для всех доработок форка
-(42 файла). Рабочее дерево `master` — это свежий upstream с уже наложенным
+(49 файлов). Рабочее дерево `master` — это свежий upstream с уже наложенным
 этим патчем. Файлы `.github/workflows`, `patches/` и `CLAUDE.md` в патч
 НЕ входят: авто-апдейт восстанавливает их отдельно из предыдущего коммита, и
 дублирование в патче давало конфликт при повторном наложении.
@@ -198,10 +198,55 @@ Komet, не дообрабатывает. Кнопка: пустое поле �
 - незнакомый чат из пуша — опкод 48 `{chatIds: [...]}`; участники группы — опкод 59
   `{type: MEMBER, marker, chatId, count}`.
 
-Что ещё НЕ сделано: вкладка MAX на главном экране Telegram (вход только из настроек
-GramBas), отправка видео, звонки, стикеры-панель и реакции, бейдж на иконке, поиск по
-сообщениям, закрепы, управление группами, переход из уведомления сразу в чат (нужна
-правка `LaunchActivity`, то есть патча форка).
+Встраивание в Telegram (v2.4.13, правки в патче форка). Пользователь просил, чтобы MAX
+был встроен «практически бесшовно»:
+
+- вкладка MAX в нижней панели `MainTabsActivity` между «Звонками/Настройками» и
+  профилем. С ней `POSITION_PROFILE` = 4 вместо 3 (поля стали нестатическими,
+  `indexToPosition` — тоже), массив вкладок на 6, ширина панели 410dp. Наличие вкладки
+  решается один раз при создании экрана: `MaxSection.isTabEnabled()` = раздел собран
+  под эту архитектуру и не выключен переключателем в настройках GramBas (`grambas_max_tab`,
+  по умолчанию включён, применяется после перезапуска). Иконка — статическая
+  `drawable/grambas_tab_max.xml`, enum `GlassTabView.TabAnimation.MAX`;
+- во вкладке `MaxDialogsFragment(inTab = true)`: шапку раскладывает сам
+  (`actionBar.setAddToContainer(false)`, ViewPager её не сдвигает), снизу отступ
+  `DialogsActivity.MAIN_TABS_HEIGHT_WITH_MARGINS` + панель навигации. Без входа — экран
+  «Войти в MAX», вход открывается с `MaxLoginFragment(fromTab = true)` и просто
+  закрывается обратно;
+- счётчик непрочитанных на вкладке и на иконке приложения: модуль MAX зовёт
+  `MaxSection.notifyUnreadChanged()` (из `MaxClient.chatsChanged`), слушатели — вкладка и
+  `NotificationsController.updateBadge`; `setBadge` прибавляет `MaxSection.getUnreadCount()`;
+- уведомление MAX — явный интент на `org.telegram.ui.LaunchActivity` с действием
+  `org.telegram.max.OPEN_CHAT` и extra `MaxSection.EXTRA_CHAT_ID`; `handleIntent` после
+  сборки главного экрана открывает `MaxSection.createChatFragment(chatId)`.
+
+Возможности v2.4.13: меню сообщения — `ItemOptions` Telegram с иконками и строкой быстрых
+реакций; реакции «пилюлями» под текстом (цвета `key_chat_*ReactionButton*`); закреп —
+плашка под шапкой (`key_chat_topPanel*`), закрепить/открепить из меню; поиск по чату —
+поле в шапке и «N из M» со стрелками внизу, переход догружает историю; кнопка «вниз»;
+скрепка — меню «Фото или видео / Видео / Файл», видео до 200 МБ; пересылка — выбор чата
+экраном `MaxDialogsFragment(pick = …)`; карандаш — «Новая группа / Найти по номеру /
+Контакты», `MaxContactPickerFragment` с отметками; в профиле группы — добавить
+участников, удалить (долгое нажатие), переименовать, покинуть.
+
+Протокол к этим функциям, сверено с Komet:
+
+- реакция — опкод 178 `{chatId, messageId, reaction {reactionType: EMOJI, id}}`, снятие —
+  179 `{chatId, messageId}`, в ответе `reactionInfo {counters [{reaction, count}],
+  yourReaction, totalCount}`; пуш 155 `{chatId, messageId, counters, totalCount}` — без
+  `yourReaction`, свою храним сами;
+- закреп — опкод 55 `{chatId, notifyPin, pinMessageId}` (0 — открепить), у чата поле
+  `pinnedMessage`; переименование — тот же 55 с `theme`;
+- поиск — опкод 73 `{chatId, query, count}` → `result [{message, highlights}]`;
+- видео — опкод 82 `{uploaderType: 0, type: 0, count: 1}` → `info[0] {url, videoId, token}`,
+  `uploadVideo` ядра (части по 2 МБ, 4 потока), вложение `{videoType: 0, _type: VIDEO, token}`;
+- новая группа — опкод 64 БЕЗ chatId, вложение `{_type: CONTROL, event: new, chatType:
+  CHAT, title, userIds}`, в ответе `chat`; участники — опкод 77 `{chatId, userIds,
+  operation: add|remove, showHistory}`; выход — опкод 58 `{chatId}`.
+
+Что ещё НЕ сделано: звонки (это WebRTC-стек MAX, отдельный большой проект), панель
+стикеров, каналы (создание и управление), отправка с камеры. Голосовые пользователь на
+устройстве ещё не проверял.
 
 Проверка компиляции без Android SDK: `TMessagesProj_Max/compile-check/check.sh`.
 Kotlin-код модуля и обёртка ядра компилируются против настоящих классов Android
@@ -209,10 +254,13 @@ Kotlin-код модуля и обёртка ядра компилируются
 генерирует из исходников `TMessagesProj` с точными сигнатурами (все перегрузки
 `LayoutHelper`, все ключи `Theme`). Минута вместо часа CI. Новый вызов Telegram API —
 добавить имя метода в `gen/make.py` или `gen/make2.py`; объявления, написанные там
-вручную (слушатели `RecyclerListView`, `AlertDialog.Builder`), сверять с исходником.
+вручную (слушатели `RecyclerListView`, `AlertDialog.Builder`, `ItemOptions`,
+`FragmentFloatingButton`, `Theme.ResourcesProvider`/`AdaptiveRipple`), сверять с исходником.
+Java-правки самого Telegram (патч) этой проверкой не покрыты — только CI.
 Заглушки не проверяют поведение, только типы и перегрузки.
 
-Тестовые сборки раздела: `v2.4.1` … `v2.4.12`. На v2.4.11 пользователь подтвердил, что
+Тестовые сборки раздела: `v2.4.1` … `v2.4.13`. v2.4.13 — вкладка на главном экране,
+бейдж, переход из уведомления, реакции, закрепы, поиск, видео, группы. На v2.4.11 пользователь подтвердил, что
 стало лучше, но «Обновить» ронял приложение; v2.4.12 — исправление, оформление из
 деталей Telegram, голосовые, кеш. На v2.4.9 вход подтверждён на
 устройстве (с облачным паролем), видны чаты. На v2.4.10 пользователь нашёл: переписка не

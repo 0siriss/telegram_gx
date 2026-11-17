@@ -46,6 +46,8 @@ write("org.telegram.messenger","LocaleController","public class LocaleController
 fd = keep(methods("org/telegram/messenger/time/FastDateFormat.java", ["format"]))
 write("org.telegram.messenger.time","FastDateFormat","public class FastDateFormat {\n"+"\n".join(fd)+"\n}", ANDROID)
 write("org.telegram.messenger","MessagesController","public class MessagesController {\n    public static android.content.SharedPreferences getGlobalMainSettings() { return null; }\n}")
+write("org.telegram.messenger","NotificationsController","public class NotificationsController {\n    public static NotificationsController getInstance(int num) { return null; }\n    public void updateBadge() { }\n}")
+write("org.telegram.messenger","UserConfig","public class UserConfig {\n    public static int selectedAccount;\n}")
 write("org.telegram.messenger","MaxSection", open(SRC+"org/telegram/messenger/MaxSection.java").read().split("package org.telegram.messenger;",1)[1].replace("import org.telegram.ui.ActionBar.BaseFragment;",""), ["org.telegram.ui.ActionBar.BaseFragment"])
 
 # R.drawable из реального использования в модуле
@@ -60,7 +62,7 @@ if missing: print("НЕТ ТАКИХ РЕСУРСОВ:", missing)
 write("org.telegram.messenger","R","public final class R {\n    public static final class drawable {\n"+fields+"\n    }\n}")
 
 # --- Theme ---
-th = keep(methods("org/telegram/ui/ActionBar/Theme.java", ["getColor","createRoundRectDrawable","createSelectorDrawable","createSimpleSelectorRoundRectDrawable","createCircleDrawableWithIcon","getCachedWallpaper","isWallpaperMotion"]))
+th = keep(methods("org/telegram/ui/ActionBar/Theme.java", ["getColor","createRoundRectDrawable","createSelectorDrawable","createSimpleSelectorRoundRectDrawable","createCircleDrawableWithIcon","createCircleDrawable","getCachedWallpaper","isWallpaperMotion"]))
 keys = int_fields("org/telegram/ui/ActionBar/Theme.java", r'key_\w+')
 # Вложенные вручную: сверено с Theme.java (ResourcesProvider — интерфейс, AdaptiveRipple.filledRectByKey(int, float...)).
 theme_nested = "    public interface ResourcesProvider {}\n    public static class AdaptiveRipple {\n        public static Drawable filledRectByKey(int backgroundColorKey, float... radii) { return null; }\n    }\n"

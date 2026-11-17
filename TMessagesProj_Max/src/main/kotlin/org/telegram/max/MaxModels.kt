@@ -170,6 +170,10 @@ class MaxMessage(
     @Volatile
     var failed: Boolean = false
 
+    /** Реакции: счётчики и моя. Меняются пушем 155 и ответом на свою реакцию. */
+    @Volatile
+    var reactions: MaxReactions? = null
+
     val isOutgoing: Boolean
         get() = senderId != 0L && senderId == MaxStore.accountId
 
@@ -189,6 +193,7 @@ class MaxMessage(
     /** Копия с новым текстом — для локальной правки. */
     fun withText(newText: String): MaxMessage =
         MaxMessage(id, cid, senderId, newText, time, attachLabel, isService, attaches, reply, forwardFrom, forwardSenderId, true)
+            .also { it.reactions = reactions }
 
     companion object {
         fun parse(json: JSONObject?): MaxMessage? {
@@ -221,7 +226,7 @@ class MaxMessage(
                 forwardSender = content.optLong("sender", 0L)
                 forwardFrom = link?.optString("chatName", "")?.ifEmpty { null }
             }
-            return MaxMessage(
+            val parsed = MaxMessage(
                 id = id,
                 cid = json.optLong("cid", 0L),
                 senderId = json.optLong("sender", 0L),
@@ -235,6 +240,8 @@ class MaxMessage(
                 forwardSenderId = forwardSender,
                 edited = json.optString("status", "").uppercase() == "EDITED",
             )
+            parsed.reactions = MaxReactions.parse(json.optJSONObject("reactionInfo"))
+            return parsed
         }
 
         fun parseList(array: JSONArray?): List<MaxMessage> {
@@ -270,6 +277,43 @@ class MaxMessage(
             "changeTitle" -> "Название чата изменено"
             "changeIcon" -> "Фото чата изменено"
             else -> "Служебное сообщение"
+        }
+    }
+}
+
+/**
+ * Реакции на сообщение, как у Komet (reaction_info.dart): `counters [{reaction, count}]`,
+ * `yourReaction`, `totalCount`.
+ */
+class MaxReactions(val counters: List<Pair<String, Int>>, val mine: String?) {
+    val isEmpty: Boolean
+        get() = counters.isEmpty()
+
+    /** Копия после моей реакции [emoji] (null — снять), пока сервер не прислал свою. */
+    fun withMine(emoji: String?): MaxReactions? {
+        val map = LinkedHashMap<String, Int>()
+        counters.forEach { (r, c) -> map[r] = c }
+        if (mine != null) map[mine] = (map[mine] ?: 1) - 1
+        if (emoji != null) map[emoji] = (map[emoji] ?: 0) + 1
+        val list = map.filter { it.value > 0 }.map { it.key to it.value }
+        return if (list.isEmpty()) null else MaxReactions(list, emoji)
+    }
+
+    companion object {
+        val QUICK = listOf("👍", "❤️", "🔥", "🤣", "😭", "😍", "👎", "🙏")
+
+        fun parse(json: JSONObject?, keepMine: String? = null): MaxReactions? {
+            if (json == null) return null
+            val raw = json.optJSONArray("counters") ?: return null
+            val list = ArrayList<Pair<String, Int>>()
+            for (i in 0 until raw.length()) {
+                val c = raw.optJSONObject(i) ?: continue
+                val r = c.optString("reaction", "")
+                if (r.isNotEmpty()) list.add(r to c.optInt("count", 0))
+            }
+            if (list.isEmpty()) return null
+            val mine = json.optString("yourReaction", "").ifEmpty { keepMine }
+            return MaxReactions(list, mine)
         }
     }
 }
@@ -311,7 +355,14 @@ class MaxChat(
     private val lastEventTime: Long,
     /** Отметки прочтения участников: id -> время последнего прочитанного. */
     val readMarks: MutableMap<Long, Long> = ConcurrentHashMap(),
+    /** Закреплённое сообщение (`pinnedMessage`), как у Komet. */
+    @Volatile var pinned: MaxMessage? = null,
+    val ownerId: Long = 0L,
+    val participantsCount: Int = 0,
 ) {
+    val isGroup: Boolean
+        get() = type == "CHAT" || type == "GROUP"
+
     val isDialog: Boolean
         get() = type == "DIALOG"
 
@@ -368,6 +419,9 @@ class MaxChat(
                 unread = json.optInt("newMessages", 0),
                 lastEventTime = json.optLong("lastEventTime", json.optLong("modified", 0L)),
                 readMarks = readMarks(json.opt("participants")),
+                pinned = MaxMessage.parse(json.optJSONObject("pinnedMessage")),
+                ownerId = json.optLong("owner", 0L),
+                participantsCount = json.optInt("participantsCount", 0),
             )
         }
 

@@ -209,3 +209,18 @@ write("org.telegram.ui.Components","FragmentFloatingButton",
     public void setButtonVisible(boolean visible, boolean animated) { }
     public static FrameLayout.LayoutParams createDefaultLayoutParams() { return null; }
 }""", UI + ["org.telegram.ui.ActionBar.Theme"])
+
+# Вручную, сверено с ItemOptions.java (makeOptions с @NonNull фильтр не пропускает).
+write("org.telegram.ui.Components","ItemOptions",
+"""public class ItemOptions {
+    public static ItemOptions makeOptions(org.telegram.ui.ActionBar.BaseFragment fragment, View scrimView) { return null; }
+    public ItemOptions add(int iconResId, CharSequence text, Runnable onClickListener) { return this; }
+    public ItemOptions add(int iconResId, CharSequence text, boolean isRed, Runnable onClickListener) { return this; }
+    public ItemOptions addIf(boolean condition, int iconResId, CharSequence text, Runnable onClickListener) { return this; }
+    public ItemOptions addIf(boolean condition, int iconResId, CharSequence text, boolean isRed, Runnable onClickListener) { return this; }
+    public ItemOptions addView(View view) { return this; }
+    public ItemOptions addGap() { return this; }
+    public ItemOptions setGravity(int gravity) { return this; }
+    public ItemOptions show() { return this; }
+    public void dismiss() { }
+}""", UI)

@@ -75,12 +75,19 @@ object MaxClient {
     private const val OP_FILE_UPLOAD = 87
     private const val OP_FILE_DOWNLOAD = 88
     private const val OP_AUTH_CHECK_PASSWORD = 115
+    private const val OP_CHAT_UPDATE = 55
+    private const val OP_CHAT_LEAVE = 58
+    private const val OP_MSG_SEARCH = 73
+    private const val OP_CHAT_MEMBERS_UPDATE = 77
+    private const val OP_MSG_REACTION = 178
+    private const val OP_MSG_CANCEL_REACTION = 179
 
     private const val PUSH_MESSAGE = 128
     private const val PUSH_TYPING = 129
     private const val PUSH_MARK = 130
     private const val PUSH_PRESENCE = 132
     private const val PUSH_MSG_DELETE = 142
+    private const val PUSH_REACTIONS = 155
 
     @Volatile
     private var session: Session? = null
@@ -107,6 +114,9 @@ object MaxClient {
     /** Открытый сейчас чат: входящие в него не увеличивают счётчик и не дают уведомлений. */
     @Volatile
     var openChatId: Long? = null
+
+    /** Группы, из которых вышли в этом запуске: их открытая переписка закрывается сама. */
+    val leftChats: MutableSet<Long> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     /** Кто и когда печатал: chatId -> (userId, время в мс). */
     private val typing = java.util.concurrent.ConcurrentHashMap<Long, Pair<Long, Long>>()
@@ -147,6 +157,7 @@ object MaxClient {
         fun onTyping(chatId: Long, userId: Long) {}
         fun onPresenceChanged(userId: Long) {}
         fun onReadMarkChanged(chatId: Long) {}
+        fun onReactionsChanged(chatId: Long, messageId: Long, reactions: MaxReactions?) {}
         fun onStateChanged() {}
     }
 
@@ -989,7 +1000,193 @@ object MaxClient {
         io { request(OP_MSG_TYPING, JSONObject().put("chatId", chatId).put("type", "TEXT")) }
     }
 
+    // ---- реакции, закрепы, поиск ----
+
+    /**
+     * Реакция на сообщение (опкод 178 `{chatId, messageId, reaction {reactionType: EMOJI, id}}`),
+     * снятие — опкод 179. В ответе `reactionInfo`; сверено с Komet (messages.dart).
+     */
+    fun setReaction(chatId: Long, messageId: Long, emoji: String?, onResult: (MaxReactions?, Throwable?) -> Unit) {
+        io {
+            try {
+                val payload = JSONObject().put("chatId", chatId).put("messageId", messageId)
+                val answer = if (emoji == null) {
+                    JSONObject(request(OP_MSG_CANCEL_REACTION, payload))
+                } else {
+                    payload.put("reaction", JSONObject().put("reactionType", "EMOJI").put("id", emoji))
+                    JSONObject(request(OP_MSG_REACTION, payload))
+                }
+                val info = MaxReactions.parse(answer.optJSONObject("reactionInfo"), emoji)
+                forEachListener { it.onReactionsChanged(chatId, messageId, info) }
+                onResult(info, null)
+            } catch (e: Throwable) {
+                MaxLog.e("setReaction failed", e)
+                onResult(null, e)
+            }
+        }
+    }
+
+    /** Закрепить (или открепить при [messageId] = 0) — опкод 55 с `pinMessageId`, как у Komet. */
+    fun pinMessage(chatId: Long, messageId: Long, notify: Boolean, onResult: (Throwable?) -> Unit) {
+        io {
+            try {
+                val payload = JSONObject().put("chatId", chatId).put("notifyPin", notify).put("pinMessageId", messageId)
+                val answer = JSONObject(request(OP_CHAT_UPDATE, payload))
+                if (!applyChat(answer.optJSONObject("chat"))) {
+                    chatById(chatId)?.let { chat ->
+                        chat.pinned = if (messageId == 0L) null else chat.pinned
+                        chatsChanged()
+                    }
+                }
+                onResult(null)
+            } catch (e: Throwable) {
+                MaxLog.e("pinMessage failed", e)
+                onResult(e)
+            }
+        }
+    }
+
+    /** Поиск по сообщениям чата — опкод 73 `{chatId, query, count}`, ответ `result [{message}]`. */
+    fun searchMessages(chatId: Long, query: String, onResult: (List<MaxMessage>?, Throwable?) -> Unit) {
+        io {
+            try {
+                val answer = JSONObject(request(OP_MSG_SEARCH, JSONObject().put("chatId", chatId).put("query", query).put("count", 50)))
+                val raw = answer.optJSONArray("result")
+                val out = ArrayList<MaxMessage>()
+                if (raw != null) for (i in 0 until raw.length()) {
+                    MaxMessage.parse(raw.optJSONObject(i)?.optJSONObject("message"))?.let { out.add(it) }
+                }
+                out.sortByDescending { it.time }
+                resolveMissing(out.map { it.senderId })
+                onResult(out, null)
+            } catch (e: Throwable) {
+                MaxLog.e("searchMessages failed", e)
+                onResult(null, e)
+            }
+        }
+    }
+
+    // ---- группы ----
+
+    /** Свежий объект чата из ответа сервера заменяет наш. */
+    private fun applyChat(json: JSONObject?): Boolean {
+        val fresh = MaxChat.parse(json) ?: return false
+        val old = chatById(fresh.id)
+        if (fresh.lastMessage == null) fresh.lastMessage = old?.lastMessage
+        if (old != null) fresh.unread = old.unread
+        chats = (listOf(fresh) + chats.filter { it.id != fresh.id }).sortedByDescending { it.sortTime }
+        chatsChanged()
+        return true
+    }
+
+    /**
+     * Новая группа: опкод 64 без chatId, вложение CONTROL `{event: new, chatType: CHAT,
+     * title, userIds}`; в ответе `chat`. Как у Komet (_createChat).
+     */
+    fun createGroup(title: String, userIds: List<Long>, onResult: (MaxChat?, Throwable?) -> Unit) {
+        io {
+            try {
+                val control = JSONObject()
+                    .put("_type", "CONTROL")
+                    .put("event", "new")
+                    .put("chatType", "CHAT")
+                    .put("title", title)
+                    .put("userIds", JSONArray(userIds))
+                val payload = JSONObject()
+                    .put("message", JSONObject().put("cid", System.currentTimeMillis()).put("attaches", JSONArray().put(control)))
+                    .put("notify", true)
+                val answer = JSONObject(request(OP_MSG_SEND, payload))
+                val json = answer.optJSONObject("chat") ?: throw IllegalStateException("сервер не вернул чат")
+                applyChat(json)
+                onResult(chatById(json.optLong("id", 0L)), null)
+            } catch (e: Throwable) {
+                MaxLog.e("createGroup failed", e)
+                onResult(null, e)
+            }
+        }
+    }
+
+    /** Название группы — опкод 55 с полем `theme`, как у Komet (setChatTitle). */
+    fun renameChat(chatId: Long, title: String, onResult: (Throwable?) -> Unit) {
+        io {
+            try {
+                val answer = JSONObject(request(OP_CHAT_UPDATE, JSONObject().put("chatId", chatId).put("theme", title)))
+                if (!applyChat(answer.optJSONObject("chat"))) fetchChat(chatId)
+                onResult(null)
+            } catch (e: Throwable) {
+                MaxLog.e("renameChat failed", e)
+                onResult(e)
+            }
+        }
+    }
+
+    /** Добавить или удалить участников — опкод 77 `{chatId, userIds, showHistory, operation}`. */
+    fun updateMembers(chatId: Long, userIds: List<Long>, add: Boolean, onResult: (Throwable?) -> Unit) {
+        io {
+            try {
+                val payload = JSONObject()
+                    .put("chatId", chatId)
+                    .put("userIds", JSONArray(userIds))
+                    .put("operation", if (add) "add" else "remove")
+                if (add) payload.put("showHistory", true) else payload.put("cleanMsgPeriod", 0)
+                val answer = JSONObject(request(OP_CHAT_MEMBERS_UPDATE, payload))
+                if (!applyChat(answer.optJSONObject("chat"))) fetchChat(chatId)
+                onResult(null)
+            } catch (e: Throwable) {
+                MaxLog.e("updateMembers failed", e)
+                onResult(e)
+            }
+        }
+    }
+
+    /** Выйти из группы — опкод 58 `{chatId}`; чат убираем из списка. */
+    fun leaveChat(chatId: Long, onResult: (Throwable?) -> Unit) {
+        io {
+            try {
+                request(OP_CHAT_LEAVE, JSONObject().put("chatId", chatId))
+                leftChats.add(chatId)
+                chats = chats.filter { it.id != chatId }
+                chatsChanged()
+                onResult(null)
+            } catch (e: Throwable) {
+                MaxLog.e("leaveChat failed", e)
+                onResult(e)
+            }
+        }
+    }
+
     // ---- медиа ----
+
+    /**
+     * Видео: опкод 82 `{uploaderType: 0, type: 0, count: 1}` -> `info[0] {url, videoId, token}`,
+     * загрузка частями через ядро, затем вложение `{videoType: 0, _type: VIDEO, token}`.
+     * Сверено с Komet (requestVideoUploadUrl, uploadVideoFile, sendVideoMessage).
+     */
+    fun sendVideo(chatId: Long, data: ByteArray, caption: String, onResult: (MaxMessage?, Throwable?) -> Unit) {
+        io {
+            try {
+                val answer = JSONObject(request(OP_VIDEO_UPLOAD, JSONObject().put("uploaderType", 0).put("type", 0).put("count", 1)))
+                val info = answer.optJSONArray("info")?.optJSONObject(0)
+                    ?: throw IllegalStateException("сервер не выдал адрес загрузки")
+                val url = info.optString("url", "")
+                val token = info.optString("token", "")
+                if (url.isEmpty() || token.isEmpty()) throw IllegalStateException("сервер не выдал адрес загрузки")
+                val live = session ?: throw IllegalStateException("нет соединения с MAX")
+                if (!live.blocking.uploadVideo(url, data, 2 * 1024 * 1024, 4)) throw IllegalStateException("видео не загрузилось")
+                val message = JSONObject()
+                    .put("isLive", false)
+                    .put("detectShare", false)
+                    .put("elements", JSONArray())
+                    .put("cid", -System.currentTimeMillis())
+                    .put("attaches", JSONArray().put(JSONObject().put("videoType", 0).put("_type", "VIDEO").put("token", token)))
+                if (caption.isNotEmpty()) message.put("text", caption)
+                onResult(send(chatId, message), null)
+            } catch (e: Throwable) {
+                MaxLog.e("sendVideo failed", e)
+                onResult(null, e)
+            }
+        }
+    }
 
     /**
      * Фото: адрес загрузки (опкод 80), загрузка через ядро, токен из ответа CDN, затем
@@ -1152,6 +1349,11 @@ object MaxClient {
             chats = (listOf(existing) + chats.filter { it.id != chatId })
             chatsChanged()
         }
+        // Закреп, название, состав: служебное сообщение — повод перечитать чат целиком.
+        if (message.isService && existing != null) {
+            val event = message.attaches.firstOrNull()?.raw?.optString("event", "") ?: ""
+            if (event in setOf("pin", "changeTitle", "changeIcon", "add", "remove", "leave")) io { fetchChat(chatId) }
+        }
         typing.remove(chatId)
         resolveMissing(listOf(message.senderId, message.forwardSenderId))
         forEachListener { it.onNewMessage(chatId, message) }
@@ -1197,6 +1399,11 @@ object MaxClient {
                     val userId = body.optLong("userId", 0L)
                     MaxPresence.put(userId, body.optJSONObject("presence"))
                     forEachListener { it.onPresenceChanged(userId) }
+                }
+                PUSH_REACTIONS -> {
+                    val messageId = body.optString("messageId", "").toLongOrNull() ?: return
+                    val info = if ((body.optJSONArray("counters")?.length() ?: 0) == 0) null else MaxReactions.parse(body)
+                    forEachListener { it.onReactionsChanged(chatId, messageId, info) }
                 }
                 PUSH_MSG_DELETE -> {
                     val id = if (chatId != 0L) chatId else body.optJSONObject("chat")?.optLong("id", 0L) ?: 0L

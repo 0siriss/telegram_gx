@@ -1,6 +1,9 @@
 package org.telegram.max
 
 import android.content.Context
+import org.telegram.ui.ActionBar.AlertDialog
+import android.widget.FrameLayout
+import android.widget.EditText
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
@@ -47,6 +50,13 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
         listView.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite))
         listView.layoutManager = LinearLayoutManager(context)
         listView.adapter = adapter
+        listView.setOnItemLongClickListener(RecyclerListView.OnItemLongClickListener { _, position ->
+            val row = rows.getOrNull(position) as? Row.Member ?: return@OnItemLongClickListener false
+            val current = chat
+            if (current == null || !current.isGroup || row.contact.id == MaxStore.accountId) return@OnItemLongClickListener false
+            removeMember(row.contact)
+            true
+        })
         listView.setOnItemClickListener(RecyclerListView.OnItemClickListener { _, position ->
             when (val row = rows.getOrNull(position)) {
                 is Row.Info -> row.onClick?.invoke()
@@ -59,6 +69,11 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
         fragmentView = listView
         rebuild()
         if (userId != 0L) MaxClient.refreshPresence(listOf(userId))
+        reloadMembers()
+        return listView
+    }
+
+    private fun reloadMembers() {
         val current = chat
         if (current != null && !current.isDialog) {
             MaxClient.loadMembers(current.id) { list, _ ->
@@ -70,7 +85,90 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
                 }
             }
         }
-        return listView
+    }
+
+    // ---- управление группой ----
+
+    private fun addMembers() {
+        presentFragment(MaxContactPickerFragment("Добавить участников", members.map { it.id }.toSet()) { ids ->
+            MaxClient.updateMembers(chatId, ids, add = true) { error ->
+                AndroidUtilities.runOnUIThread {
+                    if (error != null) toast("Не удалось добавить: " + MaxLog.describe(error)) else reloadMembers()
+                }
+            }
+        })
+    }
+
+    private fun removeMember(contact: MaxContact) {
+        val context = parentActivity ?: return
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle("Удалить из группы")
+                .setMessage("Удалить ${contact.name} из группы?")
+                .setPositiveButton("Удалить") { _, _ ->
+                    MaxClient.updateMembers(chatId, listOf(contact.id), add = false) { error ->
+                        AndroidUtilities.runOnUIThread {
+                            if (error != null) toast("Не удалось удалить: " + MaxLog.describe(error)) else reloadMembers()
+                        }
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+    }
+
+    private fun rename() {
+        val context = parentActivity ?: return
+        val input = EditText(context)
+        input.setText(chat?.title ?: "")
+        input.textSize = 18f
+        input.setTextColor(Theme.getColor(Theme.key_dialogTextBlack))
+        val wrap = FrameLayout(context)
+        wrap.setPadding(AndroidUtilities.dp(24f), 0, AndroidUtilities.dp(24f), 0)
+        wrap.addView(input)
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle("Название группы")
+                .setView(wrap)
+                .setPositiveButton("Сохранить") { _, _ ->
+                    val title = input.text.toString().trim()
+                    if (title.isEmpty()) return@setPositiveButton
+                    MaxClient.renameChat(chatId, title) { error ->
+                        AndroidUtilities.runOnUIThread {
+                            if (error != null) toast("Не удалось переименовать: " + MaxLog.describe(error)) else rebuild()
+                        }
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+    }
+
+    private fun leave() {
+        val context = parentActivity ?: return
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle("Покинуть группу")
+                .setMessage("Вы уверены, что хотите покинуть «${chat?.title ?: "группу"}»?")
+                .setPositiveButton("Покинуть") { _, _ ->
+                    MaxClient.leaveChat(chatId) { error ->
+                        AndroidUtilities.runOnUIThread {
+                            if (error != null) toast("Не удалось выйти: " + MaxLog.describe(error))
+                            else {
+                                // Переписка покинутой группы закроется сама при возврате к ней.
+                                finishFragment()
+                            }
+                        }
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+    }
+
+    private fun toast(text: String) {
+        val context = parentActivity ?: return
+        Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
     }
 
     override fun onFragmentCreate(): Boolean {
@@ -121,6 +219,11 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
             val title = current?.title ?: "Чат"
             val subtitle = current?.let { if (members.isNotEmpty()) MaxText.members(members.size) else MaxText.chatSubtitle(it) } ?: ""
             rows.add(Row.Header(current?.avatarKey ?: chatId, title, current?.avatarUrl, subtitle))
+            if (current != null && current.isGroup) {
+                rows.add(Row.Info("Добавить участников", null, accent = true) { addMembers() })
+                rows.add(Row.Info("Изменить название", null, accent = true) { rename() })
+                rows.add(Row.Info("Покинуть группу", null, red = true) { leave() })
+            }
             if (members.isNotEmpty()) {
                 rows.add(Row.Section("Участники"))
                 members.forEach { rows.add(Row.Member(it)) }
@@ -131,7 +234,7 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
 
     private sealed class Row {
         class Header(val key: Long, val name: String, val avatar: String?, val status: String) : Row()
-        class Info(val value: String, val label: String?, val accent: Boolean = false, val onClick: (() -> Unit)? = null) : Row()
+        class Info(val value: String, val label: String?, val accent: Boolean = false, val red: Boolean = false, val onClick: (() -> Unit)? = null) : Row()
         class Section(val title: String) : Row()
         class Member(val contact: MaxContact) : Row()
     }
@@ -163,7 +266,7 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
         override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
             when (val row = rows[position]) {
                 is Row.Header -> (holder.itemView as HeaderCell).bind(row)
-                is Row.Info -> (holder.itemView as TextRowCell).bind(row.value, row.label, row.accent)
+                is Row.Info -> (holder.itemView as TextRowCell).bind(row.value, row.label, row.accent, row.red)
                 is Row.Section -> (holder.itemView as TextRowCell).bindSection(row.title)
                 is Row.Member -> {
                     val cell = holder.itemView as MaxContactCell
@@ -223,10 +326,14 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
             addView(label, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 0f))
         }
 
-        fun bind(text: String, hint: String?, accent: Boolean) {
+        fun bind(text: String, hint: String?, accent: Boolean, red: Boolean) {
             value.text = text
             value.typeface = null
-            value.setTextColor(Theme.getColor(if (accent) Theme.key_windowBackgroundWhiteBlueText2 else Theme.key_windowBackgroundWhiteBlackText))
+            value.setTextColor(Theme.getColor(when {
+                red -> Theme.key_text_RedRegular
+                accent -> Theme.key_windowBackgroundWhiteBlueText2
+                else -> Theme.key_windowBackgroundWhiteBlackText
+            }))
             label.text = hint ?: ""
             label.visibility = if (hint == null) GONE else VISIBLE
         }

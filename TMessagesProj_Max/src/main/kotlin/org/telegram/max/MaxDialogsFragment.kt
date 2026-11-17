@@ -18,6 +18,7 @@ import org.telegram.ui.ActionBar.AlertDialog
 import org.telegram.ui.ActionBar.BaseFragment
 import org.telegram.ui.ActionBar.Theme
 import org.telegram.ui.Components.FragmentFloatingButton
+import org.telegram.ui.Components.ItemOptions
 import org.telegram.ui.Components.LayoutHelper
 import org.telegram.ui.DialogsActivity
 import org.telegram.ui.Components.RecyclerListView
@@ -26,7 +27,11 @@ import org.telegram.ui.Components.RecyclerListView
  * Главный экран MAX: вкладки «Чаты» и «Контакты», поиск по обеим. Свои модели и свои
  * списки — телеграмных диалогов не касается.
  */
-class MaxDialogsFragment(private val inTab: Boolean = false) : BaseFragment(), MaxClient.Listener {
+class MaxDialogsFragment(
+    private val inTab: Boolean = false,
+    /** Режим выбора чата (пересылка): нажатие отдаёт чат и закрывает экран. */
+    private val pick: ((MaxChat) -> Unit)? = null,
+) : BaseFragment(), MaxClient.Listener {
 
     private var root: FrameLayout? = null
     private var mainContent: View? = null
@@ -53,7 +58,7 @@ class MaxDialogsFragment(private val inTab: Boolean = false) : BaseFragment(), M
     override fun createView(context: Context): View {
         if (!inTab) actionBar.setBackButtonImage(org.telegram.messenger.R.drawable.ic_ab_back)
         actionBar.setAllowOverlayTitle(true)
-        actionBar.setTitle("MAX")
+        actionBar.setTitle(if (pick != null) "Переслать…" else "MAX")
         actionBar.setActionBarMenuOnItemClick(object : ActionBar.ActionBarMenuOnItemClick() {
             override fun onItemClick(id: Int) {
                 when (id) {
@@ -90,7 +95,9 @@ class MaxDialogsFragment(private val inTab: Boolean = false) : BaseFragment(), M
         column.orientation = LinearLayout.VERTICAL
         val root = column
 
-        root.addView(createTabs(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 44))
+        val tabsBar = createTabs(context)
+        if (pick != null) tabsBar.visibility = View.GONE
+        root.addView(tabsBar, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 44))
 
         val content = FrameLayout(context)
         root.addView(content, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 0, 1f))
@@ -100,6 +107,11 @@ class MaxDialogsFragment(private val inTab: Boolean = false) : BaseFragment(), M
         chatsList.adapter = chatsAdapter
         chatsList.setOnItemClickListener(RecyclerListView.OnItemClickListener { _, position ->
             val chat = chatsAdapter.items.getOrNull(position) ?: return@OnItemClickListener
+            if (pick != null) {
+                finishFragment()
+                pick.invoke(chat)
+                return@OnItemClickListener
+            }
             presentFragment(MaxChatFragment(chat.id))
         })
         content.addView(chatsList, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
@@ -212,9 +224,9 @@ class MaxDialogsFragment(private val inTab: Boolean = false) : BaseFragment(), M
     private fun checkLoginState() {
         val loggedIn = MaxClient.isLoggedIn
         loginStub?.visibility = if (loggedIn) View.GONE else View.VISIBLE
-        fab?.visibility = if (loggedIn) View.VISIBLE else View.GONE
+        fab?.visibility = if (loggedIn && pick == null) View.VISIBLE else View.GONE
         searchItem?.visibility = if (loggedIn) View.VISIBLE else View.GONE
-        moreItem?.visibility = if (loggedIn) View.VISIBLE else View.GONE
+        moreItem?.visibility = if (loggedIn && pick == null) View.VISIBLE else View.GONE
         if (loggedIn && !started) {
             started = true
             chatsLoaded = false
@@ -224,9 +236,59 @@ class MaxDialogsFragment(private val inTab: Boolean = false) : BaseFragment(), M
         }
     }
 
-    /** Как карандаш в Telegram: открывает контакты, откуда пишут новому человеку. */
+    /** Карандаш, как в Telegram: новая группа, поиск по номеру или контакты. */
     private fun newMessage() {
-        selectTab(TAB_CONTACTS)
+        val anchor = fab ?: return
+        ItemOptions.makeOptions(this, anchor)
+            .add(org.telegram.messenger.R.drawable.msg_groups_create, "Новая группа") { newGroup() }
+            .add(org.telegram.messenger.R.drawable.msg_user_search, "Найти по номеру") { askPhone() }
+            .add(org.telegram.messenger.R.drawable.msg_contacts, "Контакты") { selectTab(TAB_CONTACTS) }
+            .show()
+    }
+
+    private fun newGroup() {
+        presentFragment(MaxContactPickerFragment("Новая группа", emptySet()) { ids ->
+            askGroupTitle { title ->
+                MaxClient.createGroup(title, ids) { chat, error ->
+                    AndroidUtilities.runOnUIThread {
+                        when {
+                            chat != null -> presentFragment(MaxChatFragment(chat.id))
+                            else -> showDialog(
+                                AlertDialog.Builder(parentActivity ?: return@runOnUIThread)
+                                    .setTitle("MAX")
+                                    .setMessage("Группа не создана: " + MaxLog.describe(error))
+                                    .setPositiveButton("ОК", null)
+                                    .create()
+                            )
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    private fun askGroupTitle(onTitle: (String) -> Unit) {
+        val context = parentActivity ?: return
+        val input = EditText(context)
+        input.hint = "Название группы"
+        input.textSize = 18f
+        input.setTextColor(Theme.getColor(Theme.key_dialogTextBlack))
+        input.setHintTextColor(Theme.getColor(Theme.key_dialogTextHint))
+        val wrap = FrameLayout(context)
+        wrap.setPadding(AndroidUtilities.dp(24f), 0, AndroidUtilities.dp(24f), 0)
+        wrap.addView(input)
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle("Новая группа")
+                .setView(wrap)
+                .setPositiveButton("Создать") { _, _ ->
+                    val title = input.text.toString().trim()
+                    if (title.isNotEmpty()) onTitle(title)
+                }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+        AndroidUtilities.runOnUIThread({ input.requestFocus(); AndroidUtilities.showKeyboard(input) }, 200)
     }
 
     private fun createTabs(context: Context): View {

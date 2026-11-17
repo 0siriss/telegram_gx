@@ -1864,6 +1864,8 @@ public class NotificationsController extends BaseController implements Notificat
     }
 
     private void setBadge(int count) {
+        // GramBas: на иконке — непрочитанные Telegram вместе с MAX.
+        count += MaxSection.getUnreadCount();
         if (lastBadgeCount == count) {
             return;
         }

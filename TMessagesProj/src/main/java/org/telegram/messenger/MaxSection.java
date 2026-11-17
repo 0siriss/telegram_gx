@@ -99,6 +99,7 @@ public class MaxSection {
             for (Runnable listener : new ArrayList<>(unreadListeners)) {
                 listener.run();
             }
+            NotificationsController.getInstance(UserConfig.selectedAccount).updateBadge();
         });
     }
 }

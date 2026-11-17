@@ -1003,10 +1003,10 @@ index 45fa3c1a..2fa33c8c 100644
      }
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MaxSection.java b/TMessagesProj/src/main/java/org/telegram/messenger/MaxSection.java
 new file mode 100644
-index 00000000..619c3198
+index 00000000..6e25880c
 --- /dev/null
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/MaxSection.java
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,105 @@
 +/*
 + * This is the source code of Telegram for Android v. 5.x.x.
 + * It is licensed under GNU GPL v. 2 or later.
@@ -1015,7 +1015,11 @@ index 00000000..619c3198
 +
 +package org.telegram.messenger;
 +
++import android.content.Intent;
++
 +import org.telegram.ui.ActionBar.BaseFragment;
++
++import java.util.ArrayList;
 +
 +/**
 + * GramBas: точка входа в раздел MAX. Код MAX живёт в отдельном модуле, который этот
@@ -1025,6 +1029,11 @@ index 00000000..619c3198
 + */
 +public class MaxSection {
 +
++    /** Extra в интенте уведомления: id чата MAX, который открыть. */
++    public static final String EXTRA_CHAT_ID = "grambas_max_chat_id";
++
++    private static final String PREF_TAB = "grambas_max_tab";
++
 +    public interface Provider {
 +        /** Готов ли раздел работать: собрана ли нативная часть под эту архитектуру. */
 +        boolean isAvailable();
@@ -1032,11 +1041,18 @@ index 00000000..619c3198
 +        /** Экран раздела: список чатов, если вход уже выполнен, иначе экран входа. */
 +        BaseFragment createFragment();
 +
++        /** Экран для вкладки главного экрана: без кнопки «назад», с отступом под панель вкладок. */
++        BaseFragment createTabFragment();
++
++        /** Переписка с чатом MAX, например из уведомления. Null, если вход не выполнен. */
++        BaseFragment createChatFragment(long chatId);
++
 +        /** Непрочитанные для счётчика. Ноль, если вход не выполнен. */
 +        int getUnreadCount();
 +    }
 +
 +    private static Provider provider;
++    private static final ArrayList<Runnable> unreadListeners = new ArrayList<>();
 +
 +    public static void setProvider(Provider value) {
 +        provider = value;
@@ -1046,12 +1062,54 @@ index 00000000..619c3198
 +        return provider != null && provider.isAvailable();
 +    }
 +
++    /** Показывать ли MAX вкладкой на главном экране. По умолчанию да. */
++    public static boolean isTabEnabled() {
++        return isAvailable() && MessagesController.getGlobalMainSettings().getBoolean(PREF_TAB, true);
++    }
++
++    public static void setTabEnabled(boolean enabled) {
++        MessagesController.getGlobalMainSettings().edit().putBoolean(PREF_TAB, enabled).apply();
++    }
++
 +    public static BaseFragment createFragment() {
 +        return provider == null ? null : provider.createFragment();
 +    }
 +
++    public static BaseFragment createTabFragment() {
++        return provider == null ? null : provider.createTabFragment();
++    }
++
++    public static BaseFragment createChatFragment(long chatId) {
++        return provider == null ? null : provider.createChatFragment(chatId);
++    }
++
 +    public static int getUnreadCount() {
 +        return provider == null ? 0 : provider.getUnreadCount();
++    }
++
++    /** Чат MAX из интента уведомления, или 0. */
++    public static long chatIdFromIntent(Intent intent) {
++        return intent == null ? 0 : intent.getLongExtra(EXTRA_CHAT_ID, 0);
++    }
++
++    public static void addUnreadListener(Runnable listener) {
++        if (!unreadListeners.contains(listener)) {
++            unreadListeners.add(listener);
++        }
++    }
++
++    public static void removeUnreadListener(Runnable listener) {
++        unreadListeners.remove(listener);
++    }
++
++    /** Раздел MAX сообщает, что число непрочитанных могло измениться. Вызывать можно из любого потока. */
++    public static void notifyUnreadChanged() {
++        AndroidUtilities.runOnUIThread(() -> {
++            for (Runnable listener : new ArrayList<>(unreadListeners)) {
++                listener.run();
++            }
++            NotificationsController.getInstance(UserConfig.selectedAccount).updateBadge();
++        });
 +    }
 +}
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
@@ -1634,7 +1692,7 @@ index 544a8e6a..03cd245a 100644
      public static final int messagesRead = totalEvents++;
      public static final int threadMessagesRead = totalEvents++;
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
-index ac2f0cb7..7a86fee9 100644
+index ac2f0cb7..6163e78c 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
 @@ -1111,6 +1111,26 @@ public class NotificationsController extends BaseController implements Notificat
@@ -1664,6 +1722,15 @@ index ac2f0cb7..7a86fee9 100644
          ArrayList<MessageObject> popupArrayAdd = new ArrayList<>(0);
          notificationsQueue.postRunnable(() -> {
              boolean added = false;
+@@ -1844,6 +1864,8 @@ public class NotificationsController extends BaseController implements Notificat
+     }
+ 
+     private void setBadge(int count) {
++        // GramBas: на иконке — непрочитанные Telegram вместе с MAX.
++        count += MaxSection.getUnreadCount();
+         if (lastBadgeCount == count) {
+             return;
+         }
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java b/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java
 index a402447d..b65220eb 100644
 --- a/TMessagesProj/src/main/java/org/telegram/messenger/video/VideoAds.java
@@ -1956,6 +2023,19 @@ index b31069f2..371967fb 100644
              getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
              AndroidUtilities.logFlagSecure();
          } else {
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Components/glass/GlassTabView.java b/TMessagesProj/src/main/java/org/telegram/ui/Components/glass/GlassTabView.java
+index 44295250..3dc69acd 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Components/glass/GlassTabView.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Components/glass/GlassTabView.java
+@@ -565,6 +565,8 @@ public class GlassTabView extends FrameLayout implements MainTabsLayout.Tab, Fac
+         LINK(TabAnimationType.STATIC, R.drawable.tabs_link_24),
+         ARTICLE(R.raw.tab_article, R.raw.tab_article_reverse),
+         GRAM(R.raw.gram, R.raw.gram_reverse),
++        // GramBas: вкладка MAX на главном экране.
++        MAX(TabAnimationType.STATIC, R.drawable.grambas_tab_max),
+ 
+         BOOSTS(R.raw.boosts, 25, 49),
+         MONETIZATION(R.raw.monetize, 19, 45);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java
 index 910de86e..b66687c3 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/DataSettingsActivity.java
@@ -1980,10 +2060,10 @@ index 910de86e..b66687c3 100644
  import org.telegram.messenger.LocaleController;
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java
 new file mode 100644
-index 00000000..70fab972
+index 00000000..12f6d855
 --- /dev/null
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/GramBasSettingsActivity.java
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,174 @@
 +package org.telegram.ui;
 +
 +import static org.telegram.messenger.LocaleController.getString;
@@ -2005,6 +2085,7 @@ index 00000000..70fab972
 +import org.telegram.ui.ActionBar.BaseFragment;
 +import org.telegram.ui.ActionBar.Theme;
 +import org.telegram.ui.Cells.TextCheckCell;
++import org.telegram.ui.Components.BulletinFactory;
 +import org.telegram.ui.Components.LayoutHelper;
 +import org.telegram.ui.Components.UItem;
 +import org.telegram.ui.Components.UniversalAdapter;
@@ -2029,6 +2110,7 @@ index 00000000..70fab972
 +    private static final int ID_VOICE_PRELOAD = 6;
 +    private static final int ID_HIDE_SPONSORED = 7;
 +    private static final int ID_MAX_SECTION = 8;
++    private static final int ID_MAX_TAB = 9;
 +
 +    @Override
 +    public View createView(Context context) {
@@ -2074,7 +2156,8 @@ index 00000000..70fab972
 +        if (MaxSection.isAvailable()) {
 +            items.add(UItem.asHeader("MAX"));
 +            items.add(UItem.asButton(ID_MAX_SECTION, "Открыть MAX"));
-+            items.add(UItem.asShadow("Отдельный аккаунт мессенджера MAX. Работает сам по себе: свой вход, свои чаты, своё соединение. Неофициальный доступ, аккаунт может быть заблокирован."));
++            items.add(UItem.asCheck(ID_MAX_TAB, "Вкладка MAX на главном экране").setChecked(MessagesController.getGlobalMainSettings().getBoolean("grambas_max_tab", true)));
++            items.add(UItem.asShadow("Отдельный аккаунт мессенджера MAX рядом с Telegram. Работает сам по себе: свой вход, свои чаты, своё соединение. Неофициальный доступ, аккаунт может быть заблокирован."));
 +        }
 +
 +        items.add(UItem.asHeader("Соединение"));
@@ -2088,6 +2171,13 @@ index 00000000..70fab972
 +            if (fragment != null) {
 +                presentFragment(fragment);
 +            }
++        } else if (item.id == ID_MAX_TAB) {
++            boolean enabled = !MessagesController.getGlobalMainSettings().getBoolean("grambas_max_tab", true);
++            MaxSection.setTabEnabled(enabled);
++            if (view instanceof TextCheckCell) {
++                ((TextCheckCell) view).setChecked(enabled);
++            }
++            BulletinFactory.of(this).createSimpleBulletin(R.raw.info, "Вкладка появится или скроется после перезапуска приложения").show();
 +        } else if (item.id == ID_ANTI_RECALL) {
 +            boolean enabled = !MessagesController.isAntiRecallEnabledGlobally();
 +            MessagesController.setAntiRecallEnabledGlobally(enabled);
@@ -2148,6 +2238,37 @@ index 00000000..70fab972
 +        }
 +    }
 +}
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
+index f22821a5..5121e553 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
+@@ -119,6 +119,7 @@ import org.telegram.messenger.GiftAuctionController;
+ import org.telegram.messenger.LiteMode;
+ import org.telegram.messenger.LocaleController;
+ import org.telegram.messenger.LocationController;
++import org.telegram.messenger.MaxSection;
+ import org.telegram.messenger.MediaController;
+ import org.telegram.messenger.MediaDataController;
+ import org.telegram.messenger.MessageObject;
+@@ -3333,6 +3334,18 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
+                 }
+             }
+         }
++        // GramBas: уведомление MAX открывает сразу переписку, поверх уже собранного главного экрана.
++        final long maxChatId = MaxSection.chatIdFromIntent(intent);
++        if (maxChatId != 0) {
++            intent.removeExtra(MaxSection.EXTRA_CHAT_ID);
++            AndroidUtilities.runOnUIThread(() -> {
++                final BaseFragment maxChat = MaxSection.createChatFragment(maxChatId);
++                if (maxChat != null) {
++                    presentFragment(maxChat, false, true);
++                }
++            });
++            pushOpened = true;
++        }
+         if (isVoipAnswerIntent) {
+             if (intent != null && intent.hasExtra("group_call_invite_msg_id")) {
+                 VoIPGroupNotification.answer(this, intentAccount[0], intent.getIntExtra("group_call_invite_msg_id", 0));
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
 index fd968804..a04a62e0 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
@@ -2161,6 +2282,129 @@ index fd968804..a04a62e0 100644
      }
  
      private void showProxyButton(boolean show, boolean animated) {
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/MainTabsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/MainTabsActivity.java
+index 8f1a10be..327b9822 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/MainTabsActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/MainTabsActivity.java
+@@ -39,6 +39,7 @@ import androidx.core.view.WindowInsetsCompat;
+ import org.telegram.messenger.AndroidUtilities;
+ import org.telegram.messenger.ApplicationLoader;
+ import org.telegram.messenger.BuildConfig;
++import org.telegram.messenger.MaxSection;
+ import org.telegram.messenger.ContactsController;
+ import org.telegram.messenger.DialogObject;
+ import org.telegram.messenger.Emoji;
+@@ -94,15 +95,21 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
+     private static final int POSITION_CHATS = 0;
+     private static final int POSITION_CONTACTS = 1;
+     private static final int POSITION_CALLS_OR_SETTINGS = 2;
+-    private static final int POSITION_PROFILE = 3;
++    // GramBas: с вкладкой MAX профиль сдвигается на одну позицию вправо.
++    private final boolean hasMaxTab = MaxSection.isTabEnabled();
++    private final int POSITION_MAX = 3;
++    private final int POSITION_PROFILE = hasMaxTab ? 4 : 3;
+ 
+     private static final int INDEX_CHATS = 0;
+     private static final int INDEX_CONTACTS = 1;
+     private static final int INDEX_SETTINGS = 2;
+     private static final int INDEX_CALLS = 3;
+     private static final int INDEX_PROFILE = 4;
++    private static final int INDEX_MAX = 5;
+ 
+-    private static int indexToPosition(int index) {
++    private int indexToPosition(int index) {
++        if (index == INDEX_MAX) return POSITION_MAX;
++        if (index == INDEX_PROFILE) return POSITION_PROFILE;
+         return index > 2 ? index - 1 : index;
+     }
+ 
+@@ -309,14 +316,18 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
+         tabsView = new MainTabsLayout(context, resourceProvider);
+         tabsView.setClipChildren(false);
+         tabsView.setPadding(dp(DialogsActivity.MAIN_TABS_MARGIN + 4), dp(DialogsActivity.MAIN_TABS_MARGIN + 4), dp(DialogsActivity.MAIN_TABS_MARGIN + 4), dp(DialogsActivity.MAIN_TABS_MARGIN + 4));
+-        tabsView.setMaxWidth(dp(328 + DialogsActivity.MAIN_TABS_MARGIN * 2));
++        tabsView.setMaxWidth(dp((hasMaxTab ? 410 : 328) + DialogsActivity.MAIN_TABS_MARGIN * 2));
+ 
+-        tabs = new GlassTabView[5];
++        tabs = new GlassTabView[hasMaxTab ? 6 : 5];
+         tabs[INDEX_CHATS] = GlassTabView.createMainTab(context, resourceProvider, GlassTabView.TabAnimation.CHATS, R.string.MainTabsChats);
+         tabs[INDEX_CONTACTS] = GlassTabView.createMainTab(context, resourceProvider, GlassTabView.TabAnimation.CONTACTS, R.string.MainTabsContacts);
+         tabs[INDEX_SETTINGS] = GlassTabView.createMainTab(context, resourceProvider, GlassTabView.TabAnimation.SETTINGS, R.string.Settings);
+         tabs[INDEX_CALLS] = GlassTabView.createMainTab(context, resourceProvider, GlassTabView.TabAnimation.CALLS, R.string.MainTabsCalls);
+         tabs[INDEX_PROFILE] = GlassTabView.createAvatar(context, resourceProvider, currentAccount, R.string.MainTabsProfile);
++        if (hasMaxTab) {
++            tabs[INDEX_MAX] = GlassTabView.createMainTab(context, resourceProvider, GlassTabView.TabAnimation.MAX, R.string.GramBasMaxTab);
++            tabsView.addTabToIgnoreClick(tabs[INDEX_MAX]);
++        }
+         tabs[INDEX_CHATS].setOnLongClickListener(this::openFoldersSelector);
+         tabs[INDEX_CONTACTS].setOnLongClickListener(this::openContactsSelector);
+         tabs[INDEX_CALLS].setOnLongClickListener(this::openCallsSelector);
+@@ -327,7 +338,10 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
+         tabsView.addTabToIgnoreClick(tabs[INDEX_PROFILE]);
+         tabsView.addTabToIgnoreClick(tabs[INDEX_CALLS]);
+ 
+-        for (int index = 0; index < tabs.length; index++) {
++        final int[] tabsOrder = hasMaxTab
++            ? new int[] {INDEX_CHATS, INDEX_CONTACTS, INDEX_SETTINGS, INDEX_CALLS, INDEX_MAX, INDEX_PROFILE}
++            : new int[] {INDEX_CHATS, INDEX_CONTACTS, INDEX_SETTINGS, INDEX_CALLS, INDEX_PROFILE};
++        for (int index : tabsOrder) {
+             final GlassTabView view = tabs[index];
+ 
+             final int position = indexToPosition(index);
+@@ -409,6 +423,17 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
+         } else {
+             tabs[INDEX_CHATS].setCounter(null, false, animated);
+         }
++        checkMaxUnreadCount(animated);
++    }
++
++    private final Runnable maxUnreadListener = () -> checkMaxUnreadCount(true);
++
++    private void checkMaxUnreadCount(boolean animated) {
++        if (!hasMaxTab || tabs == null || tabs[INDEX_MAX] == null) {
++            return;
++        }
++        final int count = MaxSection.getUnreadCount();
++        tabs[INDEX_MAX].setCounter(count > 0 ? LocaleController.formatNumber(count, ',') : null, false, animated);
+     }
+ 
+     public boolean openContactsSelector(View anchor) {
+@@ -768,7 +793,7 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
+ 
+     @Override
+     protected int getFragmentsCount() {
+-        return TABS_COUNT;
++        return hasMaxTab ? TABS_COUNT + 1 : TABS_COUNT;
+     }
+ 
+     @Override
+@@ -829,6 +854,8 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
+             dialogsActivity = new DialogsActivity(args);
+             dialogsActivity.setMainTabsActivityController(new MainTabsActivityControllerImpl());
+             return dialogsActivity;
++        } else if (hasMaxTab && position == POSITION_MAX) {
++            return MaxSection.createTabFragment();
+         } else if (position == POSITION_PROFILE) {
+             Bundle args = new Bundle();
+             args.putLong("user_id", UserConfig.getInstance(currentAccount).getClientUserId());
+@@ -1027,6 +1054,9 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
+             .addGlobal(NotificationCenter.appUpdateAvailable)
+             .addGlobal(NotificationCenter.appUpdateLoading)
+             .addGlobal(NotificationCenter.needSetDayNightTheme);
++        if (hasMaxTab) {
++            MaxSection.addUnreadListener(maxUnreadListener);
++        }
+ 
+         return super.onFragmentCreate();
+     }
+@@ -1035,6 +1065,7 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
+     public void onFragmentDestroy() {
+         Bulletin.removeDelegate(this);
+         Bulletin.removeDelegate(contentView);
++        MaxSection.removeUnreadListener(maxUnreadListener);
+ 
+         if (observersGroup != null) {
+             observersGroup.removeAllObservers();
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java b/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java
 index 80e6e907..e9257def 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java
@@ -2876,15 +3120,28 @@ index 8ce1270e..c386849a 100644
          if (this.allowScreenshots != allowScreenshots) {
              this.allowScreenshots = allowScreenshots;
  
+diff --git a/TMessagesProj/src/main/res/drawable/grambas_tab_max.xml b/TMessagesProj/src/main/res/drawable/grambas_tab_max.xml
+new file mode 100644
+index 00000000..bbe8ffb2
+--- /dev/null
++++ b/TMessagesProj/src/main/res/drawable/grambas_tab_max.xml
+@@ -0,0 +1,6 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:height="24dp" android:viewportHeight="72" android:viewportWidth="72" android:width="24dp">
++    <path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="5" android:strokeLineJoin="round" android:strokeLineCap="round"
++        android:pathData="M36,10A24,24 0,1 1,22.6 53.9L12,58L15.2,46A24,24 0,0 1,36 10Z"/>
++    <path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="5" android:strokeLineJoin="round" android:strokeLineCap="round"
++        android:pathData="M25,42L25,27L36,37L47,27L47,42"/>
++</vector>
 diff --git a/TMessagesProj/src/main/res/values/strings.xml b/TMessagesProj/src/main/res/values/strings.xml
-index 169ab902..c89688e2 100644
+index 169ab902..62fc749e 100644
 --- a/TMessagesProj/src/main/res/values/strings.xml
 +++ b/TMessagesProj/src/main/res/values/strings.xml
-@@ -2630,6 +2630,7 @@
+@@ -2630,6 +2630,8 @@
      <string name="Emoji">Emoji</string>
      <string name="LargeEmoji">Large Emoji</string>
      <string name="TelegramVersion">Telegram for Android %1$s</string>
 +    <string name="GramBasVersion">GramBas %1$s</string>
++    <string name="GramBasMaxTab">MAX</string>
      <string name="DebugMenu">Debug Menu</string>
      <string name="DebugMenuLongPress">Long press again for debug menu</string>
      <string name="DebugSendLogs">Send Logs</string>
