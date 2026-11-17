@@ -30,6 +30,8 @@ class MaxChatCell(context: Context) : FrameLayout(context) {
     private val time = TextView(context)
     private val preview = TextView(context)
     private val counter = TextView(context)
+    private val check = android.widget.ImageView(context)
+    private val half = android.widget.ImageView(context)
     var needDivider = true
 
     init {
@@ -47,6 +49,12 @@ class MaxChatCell(context: Context) : FrameLayout(context) {
         time.textSize = 13f
         time.setTextColor(Theme.getColor(Theme.key_chats_date))
         addView(time, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.END, 0f, 13f, 14f, 0f))
+
+        // Галочки списка диалогов Telegram: list_check и list_halfcheck в цветах темы.
+        check.setImageResource(org.telegram.messenger.R.drawable.list_check)
+        half.setImageResource(org.telegram.messenger.R.drawable.list_halfcheck)
+        addView(check, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.END, 0f, 14f, 0f, 0f))
+        addView(half, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.END, 0f, 14f, 0f, 0f))
 
         preview.textSize = 15f
         preview.setTextColor(Theme.getColor(Theme.key_chats_message))
@@ -69,13 +77,26 @@ class MaxChatCell(context: Context) : FrameLayout(context) {
         title.text = name
         MaxImages.bindAvatar(avatar, chat.avatarKey, name, chat.avatarUrl, 54)
         val last = chat.lastMessage
-        val ticks = if (last != null && last.isOutgoing && !chat.isSaved) (if (chat.isReadByOthers(last.time)) "✓✓ " else "✓ ") else ""
-        time.text = ticks + if (chat.sortTime > 0) LocaleController.stringForMessageListDate(chat.sortTime / 1000) else ""
+        time.text = if (chat.sortTime > 0) LocaleController.stringForMessageListDate(chat.sortTime / 1000) else ""
+        val mine = last != null && last.isOutgoing && !chat.isSaved
+        val read = mine && chat.isReadByOthers(last!!.time)
+        check.visibility = if (mine) VISIBLE else GONE
+        half.visibility = if (read) VISIBLE else GONE
+        val checkColor = Theme.getColor(if (read) Theme.key_chats_sentReadCheck else Theme.key_chats_sentCheck)
+        check.colorFilter = android.graphics.PorterDuffColorFilter(checkColor, android.graphics.PorterDuff.Mode.SRC_IN)
+        half.colorFilter = android.graphics.PorterDuffColorFilter(checkColor, android.graphics.PorterDuff.Mode.SRC_IN)
+        // Галочки стоят слева от времени: сдвигаем их на ширину подписи.
+        time.measure(MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED), MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED))
+        val timeRight = AndroidUtilities.dp(14f) + time.measuredWidth + AndroidUtilities.dp(3f)
+        (check.layoutParams as LayoutParams).rightMargin = timeRight + AndroidUtilities.dp(if (read) 4f else 0f)
+        (half.layoutParams as LayoutParams).rightMargin = timeRight
+        check.requestLayout()
+        half.requestLayout()
         val typingUser = MaxClient.typingIn(chat.id)
         preview.setTextColor(Theme.getColor(if (typingUser != null) Theme.key_chats_actionMessage else Theme.key_chats_message))
         if (typingUser != null) {
             preview.text = MaxText.chatSubtitle(chat)
-        } else preview.text = when {
+        } else preview.text = MaxBubbles.emojify(when {
             last == null -> if (chat.isSaved) "Сохраняйте сюда заметки" else "Нет сообщений"
             last.isService -> last.displayText
             last.isOutgoing && !chat.isSaved -> "Вы: " + last.displayText
@@ -84,7 +105,8 @@ class MaxChatCell(context: Context) : FrameLayout(context) {
                 if (author != null) "$author: ${last.displayText}" else last.displayText
             }
             else -> last.displayText
-        }
+        }, preview)
+        title.text = MaxBubbles.emojify(name, title)
         if (chat.unread > 0) {
             counter.visibility = VISIBLE
             counter.text = if (chat.unread > 999) "999+" else chat.unread.toString()

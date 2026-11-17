@@ -8,7 +8,7 @@ ViewGroup Drawable Bitmap Canvas Paint Typeface Point EditText TextView FrameLay
 ShapeDrawable CombinedDrawable Integer Long Boolean Float LayoutParams ActionBarMenu ActionBarMenuItem ActionBarMenuSubItem
 ActionBarMenuOnItemClick ActionBarMenuItemSearchListener BaseFragment ActionBar Builder OnButtonClickListener AlertDialog
 OnItemClickListener OnItemLongClickListener OnItemClickListenerExtended OnItemLongClickListenerExtended FastDateFormat
-LocaleController Theme RecyclerView Adapter ViewHolder Throwable Exception Intent""".split())
+LocaleController Theme RecyclerView Adapter ViewHolder Throwable Exception Intent MediaController""".split())
 
 def ok(line):
     sig = line.split("{")[0]

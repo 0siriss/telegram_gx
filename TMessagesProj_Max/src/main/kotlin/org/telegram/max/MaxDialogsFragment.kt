@@ -196,9 +196,12 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
 
     /** Загрузку начинаем из createView: ответ может прийти раньше, чем готова вёрстка. */
     private fun loadChats() {
+        MaxClient.restoreFromCache()
         if (MaxClient.chats.isNotEmpty()) {
+            // Список из кеша уже на экране; соединение и свежий вход — в фоне.
             chatsLoaded = true
             updateUi()
+            MaxClient.start { }
             return
         }
         MaxClient.start { error ->

@@ -23,6 +23,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import org.telegram.messenger.AndroidUtilities
 import org.telegram.messenger.LocaleController
+import org.telegram.messenger.SharedConfig
 import org.telegram.ui.ActionBar.ActionBar
 import org.telegram.ui.ActionBar.AlertDialog
 import org.telegram.ui.ActionBar.BaseFragment
@@ -61,6 +62,8 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     private lateinit var replyBar: LinearLayout
     private lateinit var replyTitle: TextView
     private lateinit var replyText: TextView
+    private lateinit var recordBar: LinearLayout
+    private lateinit var recordTime: TextView
     private val adapter = Adapter()
 
     private var loading = false
@@ -193,7 +196,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         if (!::titleView.isInitialized) return
         val current = chat
         val name = current.title
-        titleView.text = name
+        titleView.text = MaxBubbles.emojify(name, titleView)
         MaxImages.bindAvatar(avatarView, current.avatarKey, name, current.avatarUrl, 42)
         val subtitle = MaxText.chatSubtitle(current)
         subtitleView.text = subtitle
@@ -275,6 +278,25 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         })
         panel.addView(input, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.CENTER_VERTICAL))
 
+        // Полоса записи голосового: занимает место поля ввода, пока идёт запись.
+        recordBar = LinearLayout(context)
+        recordBar.orientation = LinearLayout.HORIZONTAL
+        recordBar.gravity = Gravity.CENTER_VERTICAL
+        recordBar.visibility = View.GONE
+        recordTime = TextView(context)
+        recordTime.textSize = 16f
+        recordTime.setTextColor(Theme.getColor(Theme.key_chat_messagePanelText))
+        recordBar.addView(recordTime, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.CENTER_VERTICAL, 4, 0, 0, 0))
+        val cancel = TextView(context)
+        cancel.text = "Отмена"
+        cancel.textSize = 15f
+        cancel.typeface = AndroidUtilities.bold()
+        cancel.setTextColor(Theme.getColor(Theme.key_text_RedRegular))
+        cancel.setPadding(AndroidUtilities.dp(12f), AndroidUtilities.dp(12f), AndroidUtilities.dp(12f), AndroidUtilities.dp(12f))
+        cancel.setOnClickListener { stopVoice(send = false) }
+        recordBar.addView(cancel, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL))
+        panel.addView(recordBar, LayoutHelper.createLinear(0, 48, 1f, Gravity.CENTER_VERTICAL))
+
         sendButton = ImageView(context)
         sendButton.setImageResource(org.telegram.messenger.R.drawable.attach_send)
         sendButton.scaleType = ImageView.ScaleType.CENTER
@@ -282,17 +304,102 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             Theme.getColor(Theme.key_chat_messagePanelSend), android.graphics.PorterDuff.Mode.SRC_IN
         )
         sendButton.background = Theme.createSelectorDrawable(Theme.getColor(Theme.key_listSelector), 1)
-        sendButton.setOnClickListener { onSend() }
+        sendButton.setOnClickListener { onSendButton() }
         panel.addView(sendButton, LayoutHelper.createLinear(48, 48, Gravity.BOTTOM))
         updateSendButton()
         return panel
     }
 
+    /** Пустое поле — кнопка микрофона, как в Telegram; с текстом или во время записи — «отправить». */
     private fun updateSendButton() {
         if (!::sendButton.isInitialized) return
         val has = input.text.toString().isNotBlank()
-        sendButton.alpha = if (has) 1f else 0.4f
-        sendButton.isEnabled = has
+        val voice = !has && editing == null && !MaxRecorder.isRecording
+        sendButton.setImageResource(if (voice) org.telegram.messenger.R.drawable.input_mic else org.telegram.messenger.R.drawable.attach_send)
+        sendButton.colorFilter = android.graphics.PorterDuffColorFilter(
+            Theme.getColor(if (voice) Theme.key_chat_messagePanelIcons else Theme.key_chat_messagePanelSend),
+            android.graphics.PorterDuff.Mode.SRC_IN
+        )
+        sendButton.alpha = 1f
+        sendButton.isEnabled = true
+    }
+
+    private val recordTicker = object : Runnable {
+        override fun run() {
+            if (!MaxRecorder.isRecording) return
+            recordTime.text = "● Запись  " + MaxMedia.durationText(MaxRecorder.elapsedMs)
+            AndroidUtilities.runOnUIThread(this, 250L)
+        }
+    }
+
+    private fun onSendButton() {
+        when {
+            MaxRecorder.isRecording -> stopVoice(send = true)
+            input.text.toString().isNotBlank() || editing != null -> onSend()
+            else -> startVoice()
+        }
+    }
+
+    private fun startVoice() {
+        val activity = parentActivity ?: return
+        if (android.os.Build.VERSION.SDK_INT >= 23 &&
+            activity.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            activity.requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQ_MIC)
+            return
+        }
+        if (!MaxRecorder.start(activity)) {
+            toast("Не удалось начать запись")
+            return
+        }
+        input.visibility = View.GONE
+        recordBar.visibility = View.VISIBLE
+        updateSendButton()
+        AndroidUtilities.runOnUIThread(recordTicker)
+    }
+
+    private fun stopVoice(send: Boolean) {
+        AndroidUtilities.cancelRunOnUIThread(recordTicker)
+        if (::recordBar.isInitialized) {
+            recordBar.visibility = View.GONE
+            input.visibility = View.VISIBLE
+        }
+        MaxRecorder.stop(send) { result ->
+            AndroidUtilities.runOnUIThread { updateSendButton() }
+            if (result == null) {
+                if (send) toast("Слишком короткое голосовое")
+                return@stop
+            }
+            AndroidUtilities.runOnUIThread { sendRecordedVoice(result) }
+        }
+        updateSendButton()
+    }
+
+    private fun sendRecordedVoice(result: MaxRecorder.Result) {
+        val local = MaxMessage(0L, -System.currentTimeMillis(), MaxStore.accountId, "", System.currentTimeMillis(), "Голосовое сообщение", false)
+        local.pending = true
+        merge(listOf(local))
+        rebuild(scrollToEnd = true)
+        Thread {
+            val bytes = try {
+                result.file.readBytes()
+            } catch (e: Throwable) {
+                replaceLocal(local, null, e)
+                return@Thread
+            } finally {
+                result.file.delete()
+            }
+            MaxClient.sendVoice(chatId, bytes, result.durationMs, result.wave) { sent, error -> replaceLocal(local, sent, error) }
+        }.start()
+    }
+
+    override fun onRequestPermissionsResultFragment(requestCode: Int, permissions: Array<String>?, grantResults: IntArray?) {
+        if (requestCode != REQ_MIC) return
+        if (grantResults != null && grantResults.isNotEmpty() && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            startVoice()
+        } else {
+            toast("Без доступа к микрофону голосовые не записать")
+        }
     }
 
     private fun startReply(message: MaxMessage) {
@@ -338,6 +445,8 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         AndroidUtilities.cancelRunOnUIThread(headerTicker)
         MaxAudio.stop()
         MaxAudio.onChanged = null
+        AndroidUtilities.cancelRunOnUIThread(recordTicker)
+        if (MaxRecorder.isRecording) MaxRecorder.stop(false) {}
         super.onFragmentDestroy()
     }
 
@@ -358,6 +467,12 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
     /** Первая порция истории. Грузим из createView: ответ может прийти раньше вёрстки. */
     private fun loadHistory() {
+        // Сначала кеш — переписка видна сразу, потом приходит свежая с сервера.
+        val cached = MaxClient.cachedHistory(chatId)
+        if (cached.isNotEmpty()) {
+            merge(cached)
+            rebuild(scrollToEnd = true)
+        }
         loading = true
         MaxClient.loadHistory(chatId, null, PAGE) { list, error ->
             AndroidUtilities.runOnUIThread {
@@ -780,9 +895,18 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 is MaxMessage -> if (row.isService) {
                     (holder.itemView as ServiceCell).bind(serviceText(row))
                 } else {
+                    // Подряд идущие сообщения одного автора склеиваются, как в Telegram:
+                    // имя — только у первого, хвостик — только у последнего.
                     val prev = rows.getOrNull(position - 1) as? MaxMessage
-                    val sameAuthor = prev != null && !prev.isService && prev.senderId == row.senderId
-                    (holder.itemView as MessageCell).bind(row, showName = !chat.isDialog && !chat.isChannel && !row.isOutgoing && !sameAuthor)
+                    val next = rows.getOrNull(position + 1) as? MaxMessage
+                    val samePrev = prev != null && !prev.isService && prev.senderId == row.senderId
+                    val sameNext = next != null && !next.isService && next.senderId == row.senderId
+                    (holder.itemView as MessageCell).bind(
+                        row,
+                        showName = !chat.isDialog && !chat.isChannel && !row.isOutgoing && !samePrev,
+                        topNear = samePrev,
+                        bottomNear = sameNext,
+                    )
                 }
             }
         }
@@ -815,8 +939,10 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     }
 
     /**
-     * Пузырь: пересылка, автор, цитата ответа, медиа или файл, текст, время и отметки.
-     * Входящие слева, исходящие справа.
+     * Сообщение в оформлении Telegram: пузырь `MessageDrawable` с хвостиком у последнего
+     * в серии, пересылка, автор, цитата ответа, медиа или файл, текст с временем в конце
+     * последней строки, галочки и часики. Сообщение только из 1–3 эмодзи — крупно и без
+     * пузыря, как в Telegram. Входящие слева, исходящие справа.
      */
     private inner class MessageCell(context: Context) : FrameLayout(context) {
 
@@ -829,16 +955,21 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private val media = FrameLayout(context)
         private val image = BackupImageView(context)
         private val mediaBadge = TextView(context)
+        private val mediaMeta = MaxBubbles.Meta(context)
         private val fileRow = LinearLayout(context)
         private val fileIcon = TextView(context)
         private val fileName = TextView(context)
         private val fileSize = TextView(context)
+        private val textBox = FrameLayout(context)
         private val body = TextView(context)
-        private val meta = TextView(context)
+        private val meta = MaxBubbles.Meta(context)
+        private val inBubble = MaxBubbles.Bubble(false, false)
+        private val outBubble = MaxBubbles.Bubble(true, false)
+        private val inMediaBubble = MaxBubbles.Bubble(false, true)
+        private val outMediaBubble = MaxBubbles.Bubble(true, true)
 
         init {
             bubble.orientation = LinearLayout.VERTICAL
-            bubble.setPadding(AndroidUtilities.dp(10f), AndroidUtilities.dp(6f), AndroidUtilities.dp(10f), AndroidUtilities.dp(5f))
 
             forward.textSize = 13f
             forward.isSingleLine = true
@@ -849,10 +980,10 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             author.typeface = AndroidUtilities.bold()
             author.isSingleLine = true
             author.ellipsize = TextUtils.TruncateAt.END
-            bubble.addView(author, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
+            bubble.addView(author, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 0f, 0f, 1f))
 
             quote.orientation = LinearLayout.VERTICAL
-            quote.setPadding(AndroidUtilities.dp(8f), AndroidUtilities.dp(2f), AndroidUtilities.dp(6f), AndroidUtilities.dp(2f))
+            quote.setPadding(AndroidUtilities.dp(8f), AndroidUtilities.dp(3f), AndroidUtilities.dp(8f), AndroidUtilities.dp(3f))
             quoteName.textSize = 13f
             quoteName.typeface = AndroidUtilities.bold()
             quoteName.isSingleLine = true
@@ -870,7 +1001,8 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             mediaBadge.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(10f), 0x88000000.toInt())
             mediaBadge.setPadding(AndroidUtilities.dp(8f), AndroidUtilities.dp(3f), AndroidUtilities.dp(8f), AndroidUtilities.dp(3f))
             media.addView(mediaBadge, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.CENTER, 0f, 0f, 0f, 0f))
-            bubble.addView(media, LayoutHelper.createLinear(200, 150, 0f, 2f, 0f, 2f))
+            media.addView(mediaMeta, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.BOTTOM or Gravity.END, 0f, 0f, 6f, 6f))
+            bubble.addView(media, LayoutHelper.createLinear(200, 150, 0f, 0f, 0f, 0f))
 
             fileRow.orientation = LinearLayout.HORIZONTAL
             fileRow.gravity = Gravity.CENTER_VERTICAL
@@ -890,21 +1022,36 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             fileRow.addView(fileTexts, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 10f, 0f, 4f, 0f))
             bubble.addView(fileRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 2f))
 
-            body.textSize = 16f
-            bubble.addView(body, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
+            body.setLineSpacing(0f, 1.05f)
+            textBox.addView(body, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat()))
+            textBox.addView(meta, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.BOTTOM or Gravity.END, 0f, 0f, 0f, 0f))
+            bubble.addView(textBox, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
 
-            meta.textSize = 12f
-            bubble.addView(meta, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.END, 0, 1, 0, 0))
-
-            addView(bubble, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.START, 8f, 2f, 8f, 2f))
+            addView(bubble, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.START, 0f, 0f, 0f, 0f))
         }
 
-        fun bind(message: MaxMessage, showName: Boolean) {
+        fun bind(message: MaxMessage, showName: Boolean, topNear: Boolean, bottomNear: Boolean) {
             val out = message.isOutgoing
             val textColor = Theme.getColor(if (out) Theme.key_chat_messageTextOut else Theme.key_chat_messageTextIn)
             val accent = Theme.getColor(if (out) Theme.key_chat_outReplyNameText else Theme.key_chat_inReplyNameText)
             val secondary = Theme.getColor(if (out) Theme.key_chat_outTimeText else Theme.key_chat_inTimeText)
-            val maxWidth = (AndroidUtilities.displaySize.x * 0.78f).toInt()
+            val maxWidth = minOf(AndroidUtilities.displaySize.x, AndroidUtilities.displaySize.y) * 78 / 100
+            val status = when {
+                !out -> MaxBubbles.Status.NONE
+                message.failed -> MaxBubbles.Status.FAILED
+                message.pending -> MaxBubbles.Status.CLOCK
+                chat.isReadByOthers(message.time) -> MaxBubbles.Status.READ
+                else -> MaxBubbles.Status.SENT
+            }
+            val attach = message.attaches.firstOrNull()
+            val visual = attach != null && (attach.isPhoto || attach.isVideo || attach.isSticker)
+            val bigEmoji = if (attach == null && message.reply == null && message.forwardFrom == null && message.forwardSenderId == 0L) {
+                MaxBubbles.bigEmojiCount(message.text)
+            } else 0
+            // Фото/видео без подписи и без шапки — пузырь по краю картинки, время поверх неё.
+            val mediaOnly = visual && message.text.isEmpty() && !showName && message.reply == null &&
+                message.forwardFrom == null && message.forwardSenderId == 0L
+            val sticker = attach?.isSticker == true && message.text.isEmpty()
 
             // Пересылка
             val fwdName = message.forwardFrom ?: message.forwardSenderId.takeIf { it != 0L }?.let { MaxContacts.get(it)?.name }
@@ -929,36 +1076,41 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             val reply = message.reply
             if (reply != null) {
                 quote.visibility = VISIBLE
-                quote.background = quoteBackground(accent)
+                quote.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(6f), (accent and 0x00ffffff) or 0x22000000)
                 quoteName.text = MaxContacts.get(reply.senderId)?.name ?: "Сообщение"
                 quoteName.setTextColor(accent)
-                quoteText.text = reply.text
+                quoteText.text = MaxBubbles.emojify(reply.text, quoteText)
                 quoteText.setTextColor(textColor)
-                quoteText.maxWidth = maxWidth - AndroidUtilities.dp(40f)
+                quoteText.maxWidth = maxWidth - AndroidUtilities.dp(48f)
             } else {
                 quote.visibility = GONE
             }
 
             // Медиа и файлы
-            val attach = message.attaches.firstOrNull()
             media.visibility = GONE
             fileRow.visibility = GONE
+            mediaMeta.visibility = GONE
             var bodyText = message.text
             when {
-                attach != null && (attach.isPhoto || attach.isVideo || attach.isSticker) -> {
+                visual && attach != null -> {
                     media.visibility = VISIBLE
-                    val (w, h) = mediaSize(attach, maxWidth - AndroidUtilities.dp(20f))
+                    val (w, h) = mediaSize(attach, maxWidth - AndroidUtilities.dp(if (mediaOnly) 14f else 28f))
                     val params = media.layoutParams as LinearLayout.LayoutParams
                     params.width = w
                     params.height = h
+                    params.bottomMargin = if (mediaOnly) 0 else AndroidUtilities.dp(4f)
                     media.layoutParams = params
-                    MaxImages.bindImage(image, attach.url, maxOf(w, h), Theme.getColor(Theme.key_chat_serviceBackground))
-                    when {
-                        attach.isVideo -> {
-                            mediaBadge.visibility = VISIBLE
-                            mediaBadge.text = "▶  " + MaxMedia.durationText(attach.duration)
-                        }
-                        else -> mediaBadge.visibility = GONE
+                    image.setRoundRadius(AndroidUtilities.dp(if (sticker) 0f else 12f))
+                    MaxImages.bindImage(image, attach.url, maxOf(w, h), if (sticker) 0 else Theme.getColor(Theme.key_chat_serviceBackground))
+                    if (attach.isVideo) {
+                        mediaBadge.visibility = VISIBLE
+                        mediaBadge.text = "▶  " + MaxMedia.durationText(attach.duration)
+                    } else {
+                        mediaBadge.visibility = GONE
+                    }
+                    if (mediaOnly) {
+                        mediaMeta.visibility = VISIBLE
+                        mediaMeta.bind(message.time, message.edited, status, MaxBubbles.Mode.MEDIA)
                     }
                 }
                 attach != null && (attach.isFile || attach.isAudio) -> {
@@ -968,14 +1120,13 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                     fileIcon.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(22f), accent)
                     fileName.text = if (attach.isAudio) "Голосовое сообщение" else (attach.name ?: "Файл")
                     fileName.setTextColor(textColor)
-                    fileName.maxWidth = maxWidth - AndroidUtilities.dp(80f)
+                    fileName.maxWidth = maxWidth - AndroidUtilities.dp(90f)
                     fileSize.text = if (attach.isAudio) MaxMedia.durationText(attach.duration) else MaxMedia.sizeText(attach.size)
                     fileSize.setTextColor(secondary)
                 }
                 attach != null && bodyText.isEmpty() -> bodyText = message.attachLabel ?: ""
                 attach != null && attach.type in setOf("LOCATION", "CONTACT", "POLL", "CALL", "SHARE") ->
                     bodyText = (message.attachLabel ?: "") + "\n" + bodyText
-                attach == null && bodyText.isEmpty() && message.pending -> bodyText = message.attachLabel ?: "…"
             }
             if (attach == null && message.pending && message.attachLabel != null) {
                 fileRow.visibility = VISIBLE
@@ -988,35 +1139,46 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 bodyText = ""
             }
 
-            body.visibility = if (bodyText.isEmpty()) GONE else VISIBLE
-            body.text = bodyText
+            // Текст и время. У фото без подписи время уже стоит поверх картинки.
+            textBox.visibility = if (mediaOnly) GONE else VISIBLE
+            meta.bind(message.time, message.edited, status, if (bigEmoji > 0) MaxBubbles.Mode.MEDIA else if (out) MaxBubbles.Mode.OUT else MaxBubbles.Mode.IN)
             body.setTextColor(textColor)
             body.maxWidth = maxWidth
-
-            // Время, «изменено», отметки
-            val time = LocaleController.getInstance().formatterDay.format(message.time)
-            val status = when {
-                !out -> ""
-                message.failed -> "  ⚠"
-                message.pending -> "  ◷"
-                chat.isReadByOthers(message.time) -> "  ✓✓"
-                else -> "  ✓"
+            if (bigEmoji > 0) {
+                body.visibility = VISIBLE
+                body.textSize = MaxBubbles.bigEmojiSize(bigEmoji)
+                body.text = MaxBubbles.emojify(bodyText, body)
+                body.setPadding(0, 0, 0, AndroidUtilities.dp(22f))
+            } else if (bodyText.isEmpty()) {
+                body.visibility = GONE
+            } else {
+                body.visibility = VISIBLE
+                body.textSize = SharedConfig.fontSize.toFloat()
+                body.setPadding(0, 0, 0, 0)
+                val room = meta.measureWidth() + AndroidUtilities.dp(6f)
+                body.text = MaxBubbles.withTimeRoom(MaxBubbles.emojify(bodyText, body), room)
             }
-            meta.text = (if (message.edited) "изм.  " else "") + time + status
-            meta.setTextColor(if (message.failed) Theme.getColor(Theme.key_text_RedRegular) else secondary)
 
-            bubble.background = Theme.createRoundRectDrawable(
-                AndroidUtilities.dp(16f),
-                Theme.getColor(if (out) Theme.key_chat_outBubble else Theme.key_chat_inBubble)
-            )
+            // Пузырь Telegram; у крупных эмодзи и стикеров пузыря нет.
+            val noBubble = bigEmoji > 0 || sticker
+            if (noBubble) {
+                bubble.background = null
+                bubble.setPadding(0, 0, 0, 0)
+            } else {
+                val drawable = if (mediaOnly) (if (out) outMediaBubble else inMediaBubble) else (if (out) outBubble else inBubble)
+                drawable.topNear = topNear
+                drawable.bottomNear = bottomNear
+                bubble.background = drawable
+                MaxBubbles.applyPadding(bubble, out, mediaOnly)
+            }
             val params = bubble.layoutParams as LayoutParams
             params.gravity = if (out) Gravity.END else Gravity.START
-            params.leftMargin = AndroidUtilities.dp(if (out) 48f else 8f)
-            params.rightMargin = AndroidUtilities.dp(if (out) 8f else 48f)
+            params.leftMargin = AndroidUtilities.dp(if (out) 48f else 4f)
+            params.rightMargin = AndroidUtilities.dp(if (out) 4f else 48f)
+            params.topMargin = AndroidUtilities.dp(if (topNear) 1f else 4f)
+            params.bottomMargin = AndroidUtilities.dp(if (bottomNear) 1f else 4f)
             bubble.layoutParams = params
         }
-
-        private fun quoteBackground(color: Int) = Theme.createRoundRectDrawable(AndroidUtilities.dp(6f), (color and 0x00ffffff) or 0x22000000)
 
         /** Размер превью по пропорциям вложения: не шире пузыря, не выше 320dp. */
         private fun mediaSize(attach: MaxAttach, maxW: Int): Pair<Int, Int> {
@@ -1039,6 +1201,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private const val TYPE_SERVICE = 1
         private const val REQ_PHOTO = 7101
         private const val REQ_FILE = 7102
+        private const val REQ_MIC = 7103
         private const val MAX_FILE = 100L * 1024 * 1024
 
         private val NAME_COLORS = intArrayOf(

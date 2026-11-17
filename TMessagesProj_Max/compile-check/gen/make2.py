@@ -60,7 +60,7 @@ write("org.telegram.ui.ActionBar","BaseFragment",
     protected ActionBar actionBar;
     protected boolean isPaused = true;
     protected View createView(Context context) { return null; }
-""" + M("org/telegram/ui/ActionBar/BaseFragment.java", ["onFragmentCreate","onFragmentDestroy","onResume","onPause","isPaused","presentFragment","finishFragment","getParentActivity","showDialog","getActionBar","getContext","startActivityForResult","onActivityResultFragment"]) + "\n}", UI)
+""" + M("org/telegram/ui/ActionBar/BaseFragment.java", ["onFragmentCreate","onFragmentDestroy","onResume","onPause","isPaused","presentFragment","finishFragment","getParentActivity","showDialog","getActionBar","getContext","startActivityForResult","onActivityResultFragment","onRequestPermissionsResultFragment"]) + "\n}", UI)
 
 # --- vendored RecyclerView: только то, что реально используется, с настоящими дженериками ---
 write("androidx.recyclerview.widget","RecyclerView",
@@ -153,4 +153,42 @@ write("org.telegram.ui.Components","SizeNotifierFrameLayout",
     public SizeNotifierFrameLayout(Context context) { super(context); }
     protected boolean isActionBarVisible() { return true; }
 """ + M("org/telegram/ui/Components/SizeNotifierFrameLayout.java", ["setBackgroundImage","setOccupyStatusBar"]) + "\n}", UI)
+
+
+# --- оформление сообщений: пузыри, эмодзи, часики ---
+write("org.telegram.ui.ActionBar","MessageDrawable",
+"""public class MessageDrawable extends Drawable {
+    public static final int TYPE_TEXT = 0;
+    public static final int TYPE_MEDIA = 1;
+    public static final int TYPE_PREVIEW = 2;
+    public MessageDrawable(int type, boolean out, boolean selected) {}
+    public void setAlpha(int a) {}
+    public void setColorFilter(ColorFilter f) {}
+    public int getOpacity() { return 0; }
+""" + M("org/telegram/ui/ActionBar/MessageDrawable.java", ["setTop","draw"]) + "\n}", UI)
+
+write("org.telegram.ui.Components","MsgClockDrawable",
+"""public class MsgClockDrawable extends Drawable {
+    public MsgClockDrawable() {}
+    public void draw(Canvas c) {}
+    public void setAlpha(int a) {}
+    public void setColorFilter(ColorFilter f) {}
+    public int getOpacity() { return 0; }
+""" + M("org/telegram/ui/Components/MsgClockDrawable.java", ["setColor"]) + "\n}", UI)
+
+# parseEmojis возвращает ArrayList<EmojiSpanRange>; модулю нужен только размер.
+write("org.telegram.messenger","Emoji",
+"""public class Emoji {
+    public static class EmojiSpanRange {}
+    public static java.util.ArrayList<EmojiSpanRange> parseEmojis(CharSequence cs) { return null; }
+    public static CharSequence replaceEmoji(CharSequence cs, Paint.FontMetricsInt fontMetrics, boolean createNew) { return null; }
+    public static boolean fullyConsistsOfEmojis(CharSequence cs) { return false; }
+}""", UI)
+
+write("org.telegram.messenger","SharedConfig","public class SharedConfig {\n    public static int fontSize = 16;\n}", UI)
 print("ok")
+
+write("org.telegram.messenger","MediaController",
+"""public class MediaController {
+""" + M("org/telegram/messenger/MediaController.java", ["getInstance"]) + "\n}", UI)
+

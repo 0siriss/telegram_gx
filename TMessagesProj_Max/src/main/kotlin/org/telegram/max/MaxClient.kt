@@ -69,6 +69,7 @@ object MaxClient {
     private const val OP_MSG_DELETE = 66
     private const val OP_MSG_EDIT = 67
     private const val OP_PHOTO_UPLOAD = 80
+    private const val OP_VIDEO_UPLOAD = 82
     private const val OP_VIDEO_PLAY = 83
     private const val OP_FILE_UPLOAD = 87
     private const val OP_FILE_DOWNLOAD = 88
@@ -221,7 +222,7 @@ object MaxClient {
             } catch (e: Throwable) {
                 last = e
                 MaxLog.e("хост $host не ответил", e)
-                closeQuietly(candidate)
+                retire(candidate)
             }
         }
         throw last ?: IllegalStateException("не удалось подключиться")
@@ -231,23 +232,38 @@ object MaxClient {
         authorized = false
         pushJob?.cancel()
         pushJob = null
-        session?.let { closeQuietly(it) }
+        session?.let { retire(it) }
         session = null
     }
 
-    private fun dropSession() {
-        synchronized(connectLock) { dropSessionLocked() }
-    }
+    /** Отключённые, но ещё не освобождённые сессии: держим ссылку, пока их не закроем. */
+    private val retired = java.util.Collections.synchronizedSet(HashSet<Session>())
 
-    private fun closeQuietly(s: Session) {
+    /**
+     * Сессию сначала только отключаем, а освобождаем через 30 секунд. Освобождение
+     * удаляет нативный объект, и если в этот момент другой поток ещё внутри него (цикл
+     * пушей ждёт следующий пуш до секунды, запрос ждёт ответа), Rust обращается к
+     * удалённой памяти и падает весь процесс — так «Обновить» и ронял приложение.
+     * Ссылку держим в [retired], иначе её раньше времени освободит сборщик мусора.
+     */
+    private fun retire(s: Session) {
         try {
             s.disconnect()
         } catch (ignored: Throwable) {
         }
-        try {
-            s.close()
-        } catch (ignored: Throwable) {
+        retired.add(s)
+        scope.launch {
+            delay(30_000L)
+            retired.remove(s)
+            try {
+                s.close()
+            } catch (ignored: Throwable) {
+            }
         }
+    }
+
+    private fun dropSession() {
+        synchronized(connectLock) { dropSessionLocked() }
     }
 
     private fun openSession(host: String): Session = Session.open(
@@ -380,6 +396,38 @@ object MaxClient {
                 onDone(e)
             }
         }
+    }
+
+    @Volatile
+    private var restored = false
+
+    /**
+     * Чаты и люди из кеша — чтобы список появился сразу, ещё до соединения. Вызывается
+     * один раз за процесс; свежий вход потом заменит всё серверными данными.
+     */
+    fun restoreFromCache() {
+        if (restored || MaxStore.token == null) return
+        restored = true
+        try {
+            MaxContacts.putAll(MaxContact.parseList(MaxCache.loadPeople()))
+            val book = MaxContact.parseList(MaxCache.loadBook())
+            MaxContacts.putAll(book)
+            if (contacts.isEmpty()) contacts = book.filter { it.id != MaxStore.accountId }.sortedBy { it.name.lowercase() }
+            if (chats.isEmpty()) chats = MaxChat.parseList(MaxCache.loadChats())
+            if (chats.isNotEmpty()) {
+                forEachListener { it.onChatsChanged() }
+                forEachListener { it.onContactsChanged() }
+            }
+        } catch (e: Throwable) {
+            MaxLog.e("кеш MAX не восстановлен", e)
+        }
+    }
+
+    /** Первая страница истории из кеша: экран показывает её, пока грузится свежая. */
+    fun cachedHistory(chatId: Long): List<MaxMessage> = try {
+        MaxMessage.parseList(MaxCache.loadHistory(chatId))
+    } catch (e: Throwable) {
+        emptyList()
     }
 
     /**
@@ -579,6 +627,7 @@ object MaxClient {
         pendingRegisterToken = null
         pendingTrackId = null
         MaxStore.clear()
+        MaxCache.clear()
         MaxContacts.clear()
         MaxPresence.clear()
         chats = emptyList()
@@ -613,6 +662,8 @@ object MaxClient {
         MaxContacts.putAll(MaxContact.parseList(answer.optJSONArray("contacts")))
         MaxPresence.putAll(answer.optJSONObject("presence"))
         chats = MaxChat.parseList(answer.optJSONArray("chats"))
+        MaxCache.saveChats(answer.optJSONArray("chats"))
+        MaxCache.savePeople(answer.optJSONArray("contacts"))
         MaxLog.i("вход выполнен, чатов: " + chats.size)
         forEachListener { it.onChatsChanged() }
         resolveMissing(chats.map { it.peerId }.filter { it != 0L })
@@ -627,6 +678,7 @@ object MaxClient {
         val list = MaxContact.parseList(answer.optJSONArray("contacts"))
         MaxContacts.putAll(list)
         MaxPresence.putAll(answer.optJSONObject("presence"))
+        MaxCache.saveBook(answer.optJSONArray("contacts"))
         contacts = list.filter { it.id != MaxStore.accountId }.sortedBy { it.name.lowercase() }
         forEachListener { it.onContactsChanged() }
         forEachListener { it.onChatsChanged() }
@@ -797,6 +849,7 @@ object MaxClient {
                     .put("getMessages", true)
                 val answer = JSONObject(request(OP_CHAT_HISTORY, payload))
                 val list = MaxMessage.parseList(answer.optJSONArray("messages"))
+                if (before == null) MaxCache.saveHistory(chatId, answer.optJSONArray("messages"))
                 resolveMissing(list.flatMap { listOf(it.senderId, it.forwardSenderId, it.reply?.senderId ?: 0L) })
                 onResult(list, null)
             } catch (e: Throwable) {
@@ -993,6 +1046,42 @@ object MaxClient {
                 onResult(send(chatId, message), null)
             } catch (e: Throwable) {
                 MaxLog.e("sendFile failed", e)
+                onResult(null, e)
+            }
+        }
+    }
+
+    /**
+     * Голосовое: адрес загрузки — опкод 82 с uploaderType 1, type 2 (как у Komet
+     * requestAudioUploadUrl), загрузка Ogg/Opus, затем вложение AUDIO с token, duration
+     * в миллисекундах и волной из 80 значений.
+     */
+    fun sendVoice(chatId: Long, data: ByteArray, durationMs: Long, wave: ByteArray, onResult: (MaxMessage?, Throwable?) -> Unit) {
+        io {
+            try {
+                val answer = JSONObject(request(OP_VIDEO_UPLOAD, JSONObject().put("uploaderType", 1).put("type", 2).put("count", 1)))
+                val info = answer.optJSONArray("info")?.optJSONObject(0)
+                    ?: throw IllegalStateException("сервер не выдал адрес загрузки")
+                val url = info.optString("url", "")
+                val token = info.optString("token", "")
+                if (url.isEmpty() || token.isEmpty()) throw IllegalStateException("сервер не выдал адрес загрузки")
+                val live = session ?: throw IllegalStateException("нет соединения с MAX")
+                val result = live.blocking.uploadFile(url, data, "voice.ogg")
+                if (result.status != 200) throw IllegalStateException("голосовое не загрузилось: ${result.status}")
+                val attach = JSONObject()
+                    .put("duration", durationMs)
+                    .put("_type", "AUDIO")
+                    .put("wave", JSONObject().put("\$bin", Base64.encodeToString(wave, Base64.NO_WRAP)))
+                    .put("token", token)
+                val message = JSONObject()
+                    .put("isLive", false)
+                    .put("detectShare", false)
+                    .put("elements", JSONArray())
+                    .put("cid", -System.currentTimeMillis())
+                    .put("attaches", JSONArray().put(attach))
+                onResult(send(chatId, message), null)
+            } catch (e: Throwable) {
+                MaxLog.e("sendVoice failed", e)
                 onResult(null, e)
             }
         }
