@@ -74,6 +74,15 @@ object MaxClient {
     var diagnostics: String = ""
         private set
 
+    /** Как нас видит сам сервер MAX: страна и признак VPN из рукопожатия. */
+    @Volatile
+    var serverLocation: String? = null
+        private set
+
+    @Volatile
+    var serverSeesVpn: Boolean? = null
+        private set
+
     private fun note(line: String) {
         diagnostics = if (diagnostics.isEmpty()) line else diagnostics + "\n" + line
         MaxLog.i(line)
@@ -210,6 +219,8 @@ object MaxClient {
         val answer = live.blocking.connect()
         note("рукопожатие: $answer")
         val handshake = JSONObject(answer)
+        serverLocation = handshake.optString("location", "").ifEmpty { null }
+        serverSeesVpn = if (handshake.has("isVpn")) handshake.optBoolean("isVpn") else null
         callsSeed = handshake.optLong("callsSeed", 0L)
         if (callsSeed == 0L) {
             throw IllegalStateException("сервер не прислал callsSeed, вход невозможен")

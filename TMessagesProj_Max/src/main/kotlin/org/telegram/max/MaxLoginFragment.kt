@@ -28,6 +28,11 @@ class MaxLoginFragment : BaseFragment() {
     private lateinit var button: TextView
     private lateinit var status: TextView
     private lateinit var diag: TextView
+    private lateinit var connection: TextView
+
+    /** Результат внешней проверки; null — ещё не пришёл или не удался. */
+    private var ipLine: String? = null
+    private var ipChecking = false
 
     private var tempToken: String? = null
     private var busy = false
@@ -51,6 +56,14 @@ class MaxLoginFragment : BaseFragment() {
         val column = LinearLayout(context)
         column.orientation = LinearLayout.VERTICAL
         column.setPadding(AndroidUtilities.dp(24f), AndroidUtilities.dp(24f), AndroidUtilities.dp(24f), AndroidUtilities.dp(24f))
+
+        // Подключение: внешний IP со страной и то, кем нас видит сам MAX. Нажатие — проверить заново.
+        connection = TextView(context)
+        connection.textSize = 14f
+        connection.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+        connection.text = "Проверяем подключение…"
+        connection.setOnClickListener { checkIp() }
+        column.addView(connection, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 0f, 0f, 20f))
 
         hint = TextView(context)
         hint.textSize = 15f
@@ -112,6 +125,7 @@ class MaxLoginFragment : BaseFragment() {
 
         root.addView(column, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.TOP))
         fragmentView = root
+        checkIp()
         connect()
         return root
     }
@@ -127,6 +141,7 @@ class MaxLoginFragment : BaseFragment() {
             AndroidUtilities.runOnUIThread {
                 button.isEnabled = true
                 showDiagnostics()
+                showConnection()
                 if (step == STEP_PHONE) {
                     hint.text = PHONE_HINT
                 }
@@ -206,6 +221,40 @@ class MaxLoginFragment : BaseFragment() {
                 }
             }
         }
+    }
+
+    private fun checkIp() {
+        if (ipChecking) return
+        ipChecking = true
+        ipLine = null
+        showConnection()
+        Thread {
+            val result = MaxIpCheck.lookup()
+            AndroidUtilities.runOnUIThread {
+                ipChecking = false
+                ipLine = if (result == null) "IP: не удалось определить"
+                else MaxIpCheck.describe(result.countryCode) + " · " + result.ip
+                showConnection()
+            }
+        }.start()
+    }
+
+    private fun showConnection() {
+        if (!::connection.isInitialized) return
+        val lines = ArrayList<String>()
+        lines.add(ipLine ?: "Проверяем подключение…")
+        val location = MaxClient.serverLocation
+        val vpn = MaxClient.serverSeesVpn
+        if (location != null || vpn != null) {
+            val where = if (location != null) MaxIpCheck.describe(location.uppercase()) else "страна неизвестна"
+            val vpnText = when (vpn) {
+                true -> ", видит VPN"
+                false -> ", VPN не видит"
+                null -> ""
+            }
+            lines.add("MAX видит: $where$vpnText")
+        }
+        connection.text = lines.joinToString("\n")
     }
 
     /** Подтягивает ответы сервера на экран после каждого шага. */
