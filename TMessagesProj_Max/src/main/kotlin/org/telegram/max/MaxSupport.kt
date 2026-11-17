@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import org.telegram.messenger.ApplicationLoader
 import org.telegram.messenger.FileLog
+import java.security.SecureRandom
 import java.util.UUID
 
 /**
@@ -65,7 +66,10 @@ object MaxStore {
     private const val PREFS = "max_account"
     private const val KEY_TOKEN = "token"
     private const val KEY_ACCOUNT_ID = "account_id"
-    private const val KEY_DEVICE_ID = "device_id"
+    // Новые ключи: прежний deviceId был UUID и уже засветился в неудачных попытках входа.
+    // Старый ключ "device_id" не читаем, чтобы все установки получили свежую пару.
+    private const val KEY_DEVICE_ID = "device_id_hex"
+    private const val KEY_INSTANCE_ID = "instance_id"
 
     private val prefs: SharedPreferences
         get() = ApplicationLoader.applicationContext
@@ -85,15 +89,29 @@ object MaxStore {
             prefs.edit().putLong(KEY_ACCOUNT_ID, value).apply()
         }
 
-    /** Идентификатор устройства держим постоянным: он участвует в отпечатке клиента. */
+    /**
+     * Идентификатор устройства: 16 hex-символов, в формате Android ID, как у официального
+     * клиента и у Komet. С UUID сервер принимал запрос кода, но код не отправлял.
+     * Постоянный: участвует в отпечатке клиента.
+     */
     val deviceId: String
-        get() {
-            val stored = prefs.getString(KEY_DEVICE_ID, null)
-            if (stored != null) return stored
-            val generated = UUID.randomUUID().toString()
-            prefs.edit().putString(KEY_DEVICE_ID, generated).apply()
-            return generated
+        get() = stored(KEY_DEVICE_ID) {
+            val bytes = ByteArray(8)
+            SecureRandom().nextBytes(bytes)
+            bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
         }
+
+    /** Идентификатор установки — отдельный UUID, не совпадает с deviceId. */
+    val instanceId: String
+        get() = stored(KEY_INSTANCE_ID) { UUID.randomUUID().toString() }
+
+    private fun stored(key: String, generate: () -> String): String {
+        val existing = prefs.getString(key, null)
+        if (!existing.isNullOrEmpty()) return existing
+        val generated = generate()
+        prefs.edit().putString(key, generated).apply()
+        return generated
+    }
 
     fun clear() {
         prefs.edit().remove(KEY_TOKEN).remove(KEY_ACCOUNT_ID).apply()

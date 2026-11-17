@@ -24,20 +24,24 @@ import java.io.File
 object MaxClient {
 
     /**
-     * Основной хост протокола — тот, с которым работают все примеры ядра. `api2` оставлен
-     * запасным: он живой, но отдаёт сертификат Минцифры и ведёт себя не во всём так же.
+     * Параметры клиента сверены с Komet, который у пользователя работает. Пара «версия +
+     * хеши отпечатка» должна быть согласованной: хеши dex и so меняются от версии к версии.
+     * Когда сервер отвечает «Приложение устарело», брать свежую пару из Komet
+     * (lib/core/storage/spoofing_service.dart и lib/core/protocol/chat_cache_fingerprint.dart),
+     * а не поднимать версию отдельно — с чужими хешами код молча не приходит.
      */
-    private val HOSTS = listOf("api.oneme.ru", "api2.oneme.ru")
+    private val HOSTS = listOf("api2.oneme.ru", "api.oneme.ru")
+    private const val APP_VERSION = "26.23.2"
+    private const val BUILD_NUMBER = 6779L
+    private val SIGNATURE_DIGEST = hex("1684414033eb263e2c615f8b7df5ed8793850a07656304997fbf07e9e21e1e93")
+    private val DEX_DIGEST = hex("38cff46f392dc1734c308be011c2f0d8da152a390b41063dbb2c913e3032f4b3")
+    private val SO_DIGEST = hex("634ecc42b246784d975f180b4fecf903df235cdf0476da47163a85630eb1a6a8")
 
-    /**
-     * Версия официального приложения MAX, которой мы представляемся в рукопожатии.
-     * Сервер проверяет её и старые сборки отшивает: «Приложение устарело, пожалуйста,
-     * обновитесь». В ядре по умолчанию стоит 26.20.2 (6758) — она уже не проходит.
-     * Актуальные значения смотреть в дампах RuStore: github.com/KometTeam/max-dumper,
-     * в заголовке релиза есть и versionName, и build.
-     */
-    private const val APP_VERSION = "26.38.2"
-    private const val BUILD_NUMBER = 6911L
+    /** Случайный на каждый запуск процесса, как у официального клиента. */
+    private val CLIENT_SESSION_ID = java.security.SecureRandom().nextInt(0x7FFFFFFF).toLong() + 1
+
+    private fun hex(value: String): ByteArray =
+        ByteArray(value.length / 2) { value.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 
     private const val OP_AUTH_REQUEST = 17
     private const val OP_AUTH = 18
@@ -188,10 +192,13 @@ object MaxClient {
             appVersion = APP_VERSION,
             buildNumber = BUILD_NUMBER,
             deviceId = MaxStore.deviceId,
-            instanceId = MaxStore.deviceId,
-            deviceName = android.os.Build.MODEL ?: "Android",
+            instanceId = MaxStore.instanceId,
+            clientSessionId = CLIENT_SESSION_ID,
+            deviceName = (android.os.Build.MANUFACTURER ?: "") + " " + (android.os.Build.MODEL ?: ""),
             osVersion = "Android " + android.os.Build.VERSION.RELEASE,
+            timezone = java.util.TimeZone.getDefault().id,
             arch = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a",
+            pingIntervalSeconds = 10,
         )
     )
 
@@ -376,7 +383,8 @@ object MaxClient {
             .put("interactive", true)
             .put("presenceSync", -1)
             .put("chatsSync", -1)
-            .put("contactsSync", 0)
+            // Как у Komet: бинарное поле 0x0b 0x32, ядро понимает {"$bin": base64}.
+            .put("exp", JSONObject().put("chatsCountGroups", JSONObject().put("\$bin", "CzI=")))
         fingerprint()?.let { payload.put("chatCacheFingerprint", it) }
         val answer = JSONObject(request(OP_LOGIN, payload))
         answer.optString("token", "").takeIf { it.isNotEmpty() }?.let { MaxStore.token = it }
@@ -515,7 +523,7 @@ object MaxClient {
             return null
         }
         return try {
-            val bytes = Auth.fingerprint(callsSeed, MaxStore.deviceId)
+            val bytes = Auth.fingerprint(callsSeed, MaxStore.deviceId, SIGNATURE_DIGEST, DEX_DIGEST, SO_DIGEST)
             JSONObject().put("\$bin", Base64.encodeToString(bytes, Base64.NO_WRAP))
         } catch (e: Throwable) {
             MaxLog.e("fingerprint failed", e)
