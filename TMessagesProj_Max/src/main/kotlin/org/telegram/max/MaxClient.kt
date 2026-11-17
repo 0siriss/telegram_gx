@@ -61,6 +61,20 @@ object MaxClient {
     var chats: List<MaxChat> = emptyList()
         private set
 
+    /**
+     * Последние ответы сервера как есть. Нужны на экране входа: когда код не приходит,
+     * понять причину можно только по тому, что реально ответил сервер, а лог приложения
+     * с телефона не достать.
+     */
+    @Volatile
+    var diagnostics: String = ""
+        private set
+
+    private fun note(line: String) {
+        diagnostics = if (diagnostics.isEmpty()) line else diagnostics + "\n" + line
+        MaxLog.i(line)
+    }
+
     /** Слушатели изменений списка чатов и входящих сообщений. */
     private val listeners = mutableListOf<Listener>()
 
@@ -151,6 +165,7 @@ object MaxClient {
                 // берёт её отсюда.
                 session = candidate
                 try {
+                    note("хост: $host")
                     handshake(candidate)
                     return
                 } catch (e: Throwable) {
@@ -186,7 +201,7 @@ object MaxClient {
      */
     private fun handshake(live: Session) {
         val answer = live.blocking.connect()
-        MaxLog.i("рукопожатие: $answer")
+        note("рукопожатие: $answer")
         val handshake = JSONObject(answer)
         callsSeed = handshake.optLong("callsSeed", 0L)
         if (callsSeed == 0L) {
@@ -249,7 +264,7 @@ object MaxClient {
                     .put("language", "ru")
                     .put("mode", mode)
                 val raw = request(OP_AUTH_REQUEST, payload)
-                MaxLog.i("ответ на запрос кода: $raw")
+                note("запрос кода: $raw")
                 val answer = JSONObject(raw)
                 val token = answer.optString("token", "")
                 if (token.isEmpty()) {

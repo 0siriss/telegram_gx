@@ -3,6 +3,7 @@ package org.telegram.max
 import android.content.Context
 import android.graphics.Typeface
 import android.text.InputType
+import android.widget.Toast
 import android.view.Gravity
 import android.view.View
 import android.widget.EditText
@@ -26,6 +27,7 @@ class MaxLoginFragment : BaseFragment() {
     private lateinit var hint: TextView
     private lateinit var button: TextView
     private lateinit var status: TextView
+    private lateinit var diag: TextView
 
     private var tempToken: String? = null
     private var busy = false
@@ -95,6 +97,19 @@ class MaxLoginFragment : BaseFragment() {
         status.setTextColor(Theme.getColor(Theme.key_text_RedRegular))
         column.addView(status, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 16f, 0f, 0f))
 
+        // Ответ сервера как есть. Пока раздел обкатывается, это единственный способ
+        // понять, почему код не дошёл: лог приложения с телефона не достать.
+        diag = TextView(context)
+        diag.textSize = 11f
+        diag.setTextIsSelectable(true)
+        diag.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
+        diag.setOnLongClickListener {
+            AndroidUtilities.addToClipboard(diag.text.toString())
+            Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
+            true
+        }
+        column.addView(diag, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 20f, 0f, 0f))
+
         root.addView(column, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.TOP))
         fragmentView = root
         connect()
@@ -111,6 +126,7 @@ class MaxLoginFragment : BaseFragment() {
         MaxClient.start { error ->
             AndroidUtilities.runOnUIThread {
                 button.isEnabled = true
+                showDiagnostics()
                 if (step == STEP_PHONE) {
                     hint.text = PHONE_HINT
                 }
@@ -137,6 +153,7 @@ class MaxLoginFragment : BaseFragment() {
                         fail(error)
                         return@runOnUIThread
                     }
+                    showDiagnostics()
                     tempToken = token
                     step = STEP_CODE
                     hint.text = "Код отправлен. Он приходит сообщением, а если MAX уже\n" +
@@ -191,7 +208,14 @@ class MaxLoginFragment : BaseFragment() {
         }
     }
 
+    /** Подтягивает ответы сервера на экран после каждого шага. */
+    private fun showDiagnostics() {
+        if (!::diag.isInitialized) return
+        diag.text = MaxClient.diagnostics
+    }
+
     private fun fail(error: Throwable?) {
+        showDiagnostics()
         status.text = if (error == null) "Не получилось, попробуйте ещё раз" else MaxLog.describe(error)
         button.text = when (step) {
             STEP_PHONE -> "Получить код"
