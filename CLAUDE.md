@@ -244,6 +244,29 @@ Komet, не дообрабатывает. Кнопка: пустое поле �
   CHAT, title, userIds}`, в ответе `chat`; участники — опкод 77 `{chatId, userIds,
   operation: add|remove, showHistory}`; выход — опкод 58 `{chatId}`.
 
+Оформление v2.4.14 — по скриншотам пользователя сверено с Telegram 13 («есть разница в
+оформлении»). Telegram 13 рисует элементы поверх ленты «стеклом» (`blur3`):
+`MaxGlass` берёт те же `BlurredBackgroundDrawable` и цвета `BlurredBackgroundProviderImpl`
+(`topPanelChatActivity`, `bottomPanelChatActivity`, `topPanel`) с цветным источником
+без размытия. Переписка: `actionBar.setupGlass(...)` — круг «назад», плашка заголовка,
+круг «⋮» (поиск — пунктом меню, скрытый `searchItem` открывается `openSearch`), шапка
+не в контейнере, лента на весь экран с отступами под плавающие плашки
+(`updateListInsets`); закреп — стеклянная карточка, снизу кнопка «вниз», ответ, строка
+ввода «круг скрепки | плашка поля | круг микрофона», «отправить» — круг цвета темы.
+Вкладка MAX: белая шапка как у вкладок Telegram, `FragmentSearchField` и `FilterTabsView`
+(«Чаты / Контакты», делегат обязан вернуть `canPerformActions() = true`, иначе нажатия
+игнорируются), над ними полоса историй.
+
+Истории (v2.4.14, сверено с Komet `stories.dart`/`story.dart`): лента — опкод 208
+`{cursor: "", count}` → `storiesPreviews [{owner {ownerId, type}, totalCount, readCount,
+updateTime}]`; истории владельца — 210 `{owners: [...]}` → `peerStories [{owner, stories}]`,
+у истории `media {_type, photoUrl|baseUrl|url, mp4Url|videoUrl|MP4_1080, thumbnail,
+duration}`; просмотр — 214 `{owner, storyId}`; своя из фото — адрес опкодом 80 с
+`type: 1`, публикация 215 `{stories: [{cid, settings: 1, media {_type: PHOTO,
+photoToken}, expiration: 86400000}]}`; пуш 216 `{storiesPreview}`. `MaxStoriesBar` —
+кольца градиентом `key_stories_circle1/2`, `MaxStoryViewerFragment` — полоски, 6 с на
+фото, видео через VideoView, нажатие слева/справа, переход к следующему кольцу.
+
 Что ещё НЕ сделано: звонки (это WebRTC-стек MAX, отдельный большой проект), панель
 стикеров, каналы (создание и управление), отправка с камеры. Голосовые пользователь на
 устройстве ещё не проверял.
@@ -255,11 +278,12 @@ Kotlin-код модуля и обёртка ядра компилируются
 `LayoutHelper`, все ключи `Theme`). Минута вместо часа CI. Новый вызов Telegram API —
 добавить имя метода в `gen/make.py` или `gen/make2.py`; объявления, написанные там
 вручную (слушатели `RecyclerListView`, `AlertDialog.Builder`, `ItemOptions`,
-`FragmentFloatingButton`, `Theme.ResourcesProvider`/`AdaptiveRipple`), сверять с исходником.
+`FragmentFloatingButton`, `Theme.ResourcesProvider`/`AdaptiveRipple`, `blur3`, `FragmentSearchField`,
+`FilterTabsView`), сверять с исходником.
 Java-правки самого Telegram (патч) этой проверкой не покрыты — только CI.
 Заглушки не проверяют поведение, только типы и перегрузки.
 
-Тестовые сборки раздела: `v2.4.1` … `v2.4.13`. v2.4.13 — вкладка на главном экране,
+Тестовые сборки раздела: `v2.4.1` … `v2.4.14`. v2.4.14 — «стеклянное» оформление Telegram 13 и истории. v2.4.13 — вкладка на главном экране,
 бейдж, переход из уведомления, реакции, закрепы, поиск, видео, группы. На v2.4.11 пользователь подтвердил, что
 стало лучше, но «Обновить» ронял приложение; v2.4.12 — исправление, оформление из
 деталей Telegram, голосовые, кеш. На v2.4.9 вход подтверждён на

@@ -96,6 +96,28 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
     private val headerTicker = Runnable { updateHeader() }
 
+    private lateinit var searchItem: ActionBarMenuItem
+    private var sendGlass: android.graphics.drawable.Drawable? = null
+    private lateinit var bottomStack: LinearLayout
+
+    /** Высота зоны шапки: строка состояния + панель. */
+    private fun headerHeight(): Int =
+        ActionBar.getCurrentActionBarHeight() + (if (actionBar.getOccupyStatusBar()) AndroidUtilities.statusBarHeight else 0)
+
+    /** Отступы ленты под плавающие шапку, закреп и нижние плашки (кнопка «вниз» не в счёт). */
+    private fun updateListInsets() {
+        if (!::listView.isInitialized || !::bottomStack.isInitialized) return
+        val pin = if (::pinBar.isInitialized && pinBar.visibility == View.VISIBLE) AndroidUtilities.dp(56f) else 0
+        val goDownSpace = if (::goDown.isInitialized && goDown.visibility != View.GONE) AndroidUtilities.dp(54f) else 0
+        val top = headerHeight() + pin + AndroidUtilities.dp(4f)
+        val bottom = bottomStack.height - goDownSpace + AndroidUtilities.dp(4f)
+        if (listView.paddingTop != top || listView.paddingBottom != bottom) {
+            val stick = isAtBottom()
+            listView.setPadding(0, top, 0, bottom)
+            if (stick && rows.isNotEmpty()) layoutManager.scrollToPositionWithOffset(rows.size - 1, -100000)
+        }
+    }
+
     override fun createView(context: Context): View {
         actionBar.setBackButtonImage(org.telegram.messenger.R.drawable.ic_ab_back)
         actionBar.setActionBarMenuOnItemClick(object : ActionBar.ActionBarMenuOnItemClick() {
@@ -104,6 +126,10 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                     -1 -> finishFragment()
                     MENU_INFO -> openProfile()
                     MENU_LEAVE -> confirmLeave()
+                    MENU_OPEN_SEARCH -> {
+                        searchItem.visibility = View.VISIBLE
+                        searchItem.openSearch(true)
+                    }
                 }
             }
         })
@@ -117,6 +143,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
                 override fun onSearchCollapse() {
                     header.visibility = View.VISIBLE
+                    searchItem.visibility = View.GONE
                     closeSearch()
                 }
 
@@ -125,8 +152,12 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 }
             })
         search.setSearchFieldHint("Поиск")
+        search.visibility = View.GONE
+        searchItem = search
+        // Как в Telegram: в шапке только круглое «⋮», поиск — пунктом меню.
+        val more = menu.addItem(MENU_MORE, org.telegram.messenger.R.drawable.ic_ab_other)
+        more.addSubItem(MENU_OPEN_SEARCH, org.telegram.messenger.R.drawable.msg_search, "Поиск")
         if (!chat.isSaved) {
-            val more = menu.addItem(MENU_MORE, org.telegram.messenger.R.drawable.ic_ab_other)
             more.addSubItem(MENU_INFO, org.telegram.messenger.R.drawable.msg_info, if (chat.isDialog) "Профиль" else "Информация")
             if (!chat.isDialog) more.addSubItem(MENU_LEAVE, org.telegram.messenger.R.drawable.msg_leave, if (chat.isChannel) "Покинуть канал" else "Покинуть группу")
         }
@@ -134,22 +165,20 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         // под часами и значками и кажется пропавшим.
         val headerParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ActionBar.getCurrentActionBarHeight(), Gravity.TOP or Gravity.START)
         headerParams.topMargin = if (actionBar.occupyStatusBar) AndroidUtilities.statusBarHeight else 0
-        headerParams.leftMargin = AndroidUtilities.dp(56f)
-        headerParams.rightMargin = AndroidUtilities.dp(if (chat.isSaved) 56f else 104f)
+        // Внутри стеклянной плашки заголовка: слева круг «назад», справа круг «⋮».
+        headerParams.leftMargin = AndroidUtilities.dp(66f)
+        headerParams.rightMargin = AndroidUtilities.dp(74f)
         header = createHeader(context)
         actionBar.addView(header, headerParams)
+        MaxGlass.setupChatHeader(actionBar)
+        actionBar.setAddToContainer(false)
 
         val root = ChatBackground(context)
         root.setBackgroundImage(Theme.getCachedWallpaper(), Theme.isWallpaperMotion())
 
-        val column = LinearLayout(context)
-        column.orientation = LinearLayout.VERTICAL
-        root.addView(column, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
-
-        column.addView(createPinBar(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48))
-
+        // Как в Telegram 13: лента на весь экран, шапка, закреп и поле ввода плавают над ней.
         val listHolder = FrameLayout(context)
-        column.addView(listHolder, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 0, 1f))
+        root.addView(listHolder, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
 
         listView = RecyclerListView(context)
         layoutManager = LinearLayoutManager(context)
@@ -157,7 +186,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         listView.layoutManager = layoutManager
         listView.adapter = adapter
         listView.clipToPadding = false
-        listView.setPadding(0, AndroidUtilities.dp(4f), 0, AndroidUtilities.dp(4f))
+        listView.setPadding(0, headerHeight() + AndroidUtilities.dp(4f), 0, AndroidUtilities.dp(70f))
         listView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                 if (layoutManager.findFirstVisibleItemPosition() <= 5) loadOlder()
@@ -183,12 +212,24 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         emptyView.gravity = Gravity.CENTER
         emptyView.text = "Загружаем сообщения…"
         listHolder.addView(emptyView, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.CENTER, 24f, 0f, 24f, 0f))
-        listHolder.addView(createGoDown(context), LayoutHelper.createFrame(46, 46f, Gravity.BOTTOM or Gravity.END, 0f, 0f, 8f, 8f))
 
-        column.addView(createReplyBar(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
+        val pinParams = LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 52f, Gravity.TOP, 8f, 0f, 8f, 0f)
+        pinParams.topMargin = headerHeight() + AndroidUtilities.dp(2f)
+        root.addView(createPinBar(context), pinParams)
+
+        // Низ: кнопка «вниз», плашка ответа, строка ввода (или панель поиска).
+        bottomStack = LinearLayout(context)
+        bottomStack.orientation = LinearLayout.VERTICAL
+        bottomStack.setPadding(AndroidUtilities.dp(8f), 0, AndroidUtilities.dp(8f), AndroidUtilities.dp(8f))
+        bottomStack.addView(createGoDown(context), LayoutHelper.createLinear(46, 46, Gravity.END, 0, 0, 0, 8))
+        bottomStack.addView(createReplyBar(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 0f, 0f, 6f))
         inputPanel = createInput(context)
-        column.addView(inputPanel, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
-        column.addView(createSearchBar(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48))
+        bottomStack.addView(inputPanel, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
+        bottomStack.addView(createSearchBar(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 46))
+        bottomStack.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateListInsets() }
+        root.addView(bottomStack, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.BOTTOM, 0f, 0f, 0f, 0f))
+
+        root.addView(actionBar, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP, 0f, 0f, 0f, 0f))
 
         fragmentView = root
         updateHeader()
@@ -212,25 +253,25 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     private fun createHeader(context: Context): View {
         val header = FrameLayout(context)
         avatarView = BackupImageView(context)
-        avatarView.setRoundRadius(AndroidUtilities.dp(21f))
-        header.addView(avatarView, LayoutHelper.createFrame(42, 42f, Gravity.START or Gravity.CENTER_VERTICAL, 0f, 0f, 0f, 0f))
+        avatarView.setRoundRadius(AndroidUtilities.dp(19f))
+        header.addView(avatarView, LayoutHelper.createFrame(38, 38f, Gravity.START or Gravity.CENTER_VERTICAL, 0f, 0f, 0f, 0f))
 
         val texts = LinearLayout(context)
         texts.orientation = LinearLayout.VERTICAL
         titleView = TextView(context)
-        titleView.textSize = 18f
+        titleView.textSize = 16f
         titleView.typeface = AndroidUtilities.bold()
         titleView.setTextColor(Theme.getColor(Theme.key_actionBarDefaultTitle))
         titleView.isSingleLine = true
         titleView.ellipsize = TextUtils.TruncateAt.END
         texts.addView(titleView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
         subtitleView = TextView(context)
-        subtitleView.textSize = 14f
+        subtitleView.textSize = 13f
         subtitleView.setTextColor(Theme.getColor(Theme.key_actionBarDefaultSubtitle))
         subtitleView.isSingleLine = true
         subtitleView.ellipsize = TextUtils.TruncateAt.END
         texts.addView(subtitleView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
-        header.addView(texts, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.START or Gravity.CENTER_VERTICAL, 54f, 0f, 0f, 0f))
+        header.addView(texts, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.START or Gravity.CENTER_VERTICAL, 48f, 0f, 0f, 0f))
 
         header.setOnClickListener { openProfile() }
         return header
@@ -248,7 +289,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         val current = chat
         val name = current.title
         titleView.text = MaxBubbles.emojify(name, titleView)
-        MaxImages.bindAvatar(avatarView, current.avatarKey, name, current.avatarUrl, 42)
+        MaxImages.bindAvatar(avatarView, current.avatarKey, name, current.avatarUrl, 38)
         val subtitle = MaxText.chatSubtitle(current)
         subtitleView.text = subtitle
         subtitleView.visibility = if (subtitle.isEmpty()) View.GONE else View.VISIBLE
@@ -263,7 +304,6 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
     private fun createPinBar(context: Context): View {
         pinBar = FrameLayout(context)
-        pinBar.setBackgroundColor(Theme.getColor(Theme.key_chat_topPanelBackground))
         pinBar.visibility = View.GONE
         val line = View(context)
         line.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(1f), Theme.getColor(Theme.key_chat_topPanelLine))
@@ -285,18 +325,14 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         texts.addView(pinText, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
         pinBar.addView(texts, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.CENTER_VERTICAL, 22f, 0f, 48f, 0f))
         val close = ImageView(context)
-        close.setImageResource(org.telegram.messenger.R.drawable.miniplayer_close)
+        close.setImageResource(org.telegram.messenger.R.drawable.msg_unpin)
         close.scaleType = ImageView.ScaleType.CENTER
         close.colorFilter = android.graphics.PorterDuffColorFilter(Theme.getColor(Theme.key_chat_topPanelClose), android.graphics.PorterDuff.Mode.SRC_IN)
         close.background = Theme.createSelectorDrawable(Theme.getColor(Theme.key_listSelector), 1)
         close.setOnClickListener { confirmUnpin() }
         pinBar.addView(close, LayoutHelper.createFrame(48, 48f, Gravity.END or Gravity.CENTER_VERTICAL, 0f, 0f, 0f, 0f))
-        pinBar.background = Theme.createSelectorDrawable(Theme.getColor(Theme.key_listSelector), 2)
-        pinBar.setBackgroundColor(Theme.getColor(Theme.key_chat_topPanelBackground))
+        pinBar.background = MaxGlass.chatTop(pinBar, 18f)
         pinBar.setOnClickListener { chat.pinned?.let { jumpTo(it.id, it.time) } }
-        val shadow = View(context)
-        shadow.setBackgroundColor(Theme.getColor(Theme.key_divider))
-        pinBar.addView(shadow, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 1f, Gravity.BOTTOM, 0f, 0f, 0f, 0f))
         return pinBar
     }
 
@@ -304,10 +340,16 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         if (!::pinBar.isInitialized) return
         val pinned = chat.pinned
         if (pinned == null || pinned.id == 0L) {
-            pinBar.visibility = View.GONE
+            if (pinBar.visibility != View.GONE) {
+                pinBar.visibility = View.GONE
+                updateListInsets()
+            }
             return
         }
-        pinBar.visibility = View.VISIBLE
+        if (pinBar.visibility != View.VISIBLE) {
+            pinBar.visibility = View.VISIBLE
+            updateListInsets()
+        }
         pinText.text = MaxBubbles.emojify(pinned.displayText.replace('\n', ' '), pinText)
     }
 
@@ -361,13 +403,13 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
     private fun createGoDown(context: Context): View {
         goDown = FrameLayout(context)
-        goDown.background = Theme.createCircleDrawable(AndroidUtilities.dp(42f), Theme.getColor(Theme.key_chat_goDownButton))
+        goDown.background = MaxGlass.chatBottom(goDown, 23f)
         val icon = ImageView(context)
         icon.setImageResource(org.telegram.messenger.R.drawable.pagedown)
         icon.scaleType = ImageView.ScaleType.CENTER
         icon.colorFilter = android.graphics.PorterDuffColorFilter(Theme.getColor(Theme.key_chat_messagePanelIcons), android.graphics.PorterDuff.Mode.SRC_IN)
         goDown.addView(icon, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
-        goDown.visibility = View.GONE
+        goDown.visibility = View.INVISIBLE
         goDown.setOnClickListener {
             if (rows.isNotEmpty()) listView.smoothScrollToPosition(rows.size - 1)
         }
@@ -377,7 +419,8 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     private fun updateGoDown() {
         if (!::goDown.isInitialized) return
         val far = rows.isNotEmpty() && layoutManager.findLastVisibleItemPosition() < rows.size - 4
-        goDown.visibility = if (far) View.VISIBLE else View.GONE
+        val wanted = if (far) View.VISIBLE else View.INVISIBLE
+        if (goDown.visibility != wanted) goDown.visibility = wanted
     }
 
     // ---- поиск по чату: поле в шапке, внизу «N из M» со стрелками, как в Telegram ----
@@ -386,7 +429,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         searchBar = LinearLayout(context)
         searchBar.orientation = LinearLayout.HORIZONTAL
         searchBar.gravity = Gravity.CENTER_VERTICAL
-        searchBar.setBackgroundColor(Theme.getColor(Theme.key_chat_messagePanelBackground))
+        searchBar.background = MaxGlass.chatBottom(searchBar, 23f)
         searchBar.visibility = View.GONE
         searchCounter = TextView(context)
         searchCounter.textSize = 15f
@@ -489,13 +532,13 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     private fun createReplyBar(context: Context): View {
         replyBar = LinearLayout(context)
         replyBar.orientation = LinearLayout.HORIZONTAL
-        replyBar.setBackgroundColor(Theme.getColor(Theme.key_chat_messagePanelBackground))
-        replyBar.setPadding(AndroidUtilities.dp(12f), AndroidUtilities.dp(6f), AndroidUtilities.dp(4f), AndroidUtilities.dp(2f))
+        replyBar.background = MaxGlass.chatBottom(replyBar, 18f)
+        replyBar.setPadding(AndroidUtilities.dp(14f), AndroidUtilities.dp(6f), AndroidUtilities.dp(4f), AndroidUtilities.dp(6f))
         replyBar.visibility = View.GONE
 
         val line = View(context)
-        line.setBackgroundColor(Theme.getColor(Theme.key_chat_replyPanelLine))
-        replyBar.addView(line, LayoutHelper.createLinear(2, 36, Gravity.CENTER_VERTICAL))
+        line.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(1f), Theme.getColor(Theme.key_chat_replyPanelLine))
+        replyBar.addView(line, LayoutHelper.createLinear(2, 34, Gravity.CENTER_VERTICAL))
 
         val texts = LinearLayout(context)
         texts.orientation = LinearLayout.VERTICAL
@@ -525,17 +568,22 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     private fun createInput(context: Context): View {
         val panel = LinearLayout(context)
         panel.orientation = LinearLayout.HORIZONTAL
-        panel.setBackgroundColor(Theme.getColor(Theme.key_chat_messagePanelBackground))
-        panel.setPadding(AndroidUtilities.dp(2f), AndroidUtilities.dp(2f), AndroidUtilities.dp(2f), AndroidUtilities.dp(2f))
+        panel.gravity = Gravity.BOTTOM
 
         val attach = ImageView(context)
         attachButton = attach
         attach.setImageResource(org.telegram.messenger.R.drawable.input_attach)
         attach.scaleType = ImageView.ScaleType.CENTER
         attach.colorFilter = android.graphics.PorterDuffColorFilter(Theme.getColor(Theme.key_chat_messagePanelIcons), android.graphics.PorterDuff.Mode.SRC_IN)
-        attach.background = Theme.createSelectorDrawable(Theme.getColor(Theme.key_listSelector), 1)
+        attach.background = MaxGlass.chatBottom(attach, 23f)
         attach.setOnClickListener { showAttachMenu() }
-        panel.addView(attach, LayoutHelper.createLinear(48, 48, Gravity.BOTTOM))
+        panel.addView(attach, LayoutHelper.createLinear(46, 46, Gravity.BOTTOM))
+
+        // Поле ввода — скруглённая стеклянная плашка, как в Telegram 13.
+        val pill = FrameLayout(context)
+        pill.background = MaxGlass.chatBottom(pill, 23f)
+        pill.minimumHeight = AndroidUtilities.dp(46f)
+        panel.addView(pill, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.BOTTOM, 6, 0, 6, 0))
 
         input = EditText(context)
         input.textSize = 18f
@@ -544,8 +592,9 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         input.hint = "Сообщение"
         input.background = null
         input.maxLines = 6
-        input.minHeight = AndroidUtilities.dp(48f)
-        input.setPadding(AndroidUtilities.dp(4f), AndroidUtilities.dp(12f), 0, AndroidUtilities.dp(12f))
+        input.minHeight = AndroidUtilities.dp(46f)
+        input.textSize = 17f
+        input.setPadding(AndroidUtilities.dp(16f), AndroidUtilities.dp(11f), AndroidUtilities.dp(12f), AndroidUtilities.dp(11f))
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -554,7 +603,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 if (!s.isNullOrBlank() && editing == null) MaxClient.sendTyping(chatId)
             }
         })
-        panel.addView(input, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.CENTER_VERTICAL))
+        pill.addView(input, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.CENTER_VERTICAL, 0f, 0f, 0f, 0f))
 
         // Полоса записи голосового: занимает место поля ввода, пока идёт запись.
         recordBar = LinearLayout(context)
@@ -564,7 +613,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         recordTime = TextView(context)
         recordTime.textSize = 16f
         recordTime.setTextColor(Theme.getColor(Theme.key_chat_messagePanelText))
-        recordBar.addView(recordTime, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.CENTER_VERTICAL, 4, 0, 0, 0))
+        recordBar.addView(recordTime, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.CENTER_VERTICAL, 16, 0, 0, 0))
         val cancel = TextView(context)
         cancel.text = "Отмена"
         cancel.textSize = 15f
@@ -573,7 +622,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         cancel.setPadding(AndroidUtilities.dp(12f), AndroidUtilities.dp(12f), AndroidUtilities.dp(12f), AndroidUtilities.dp(12f))
         cancel.setOnClickListener { stopVoice(send = false) }
         recordBar.addView(cancel, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL))
-        panel.addView(recordBar, LayoutHelper.createLinear(0, 48, 1f, Gravity.CENTER_VERTICAL))
+        pill.addView(recordBar, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 46f, Gravity.CENTER_VERTICAL, 0f, 0f, 0f, 0f))
 
         sendButton = ImageView(context)
         sendButton.setImageResource(org.telegram.messenger.R.drawable.attach_send)
@@ -581,9 +630,10 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         sendButton.colorFilter = android.graphics.PorterDuffColorFilter(
             Theme.getColor(Theme.key_chat_messagePanelSend), android.graphics.PorterDuff.Mode.SRC_IN
         )
-        sendButton.background = Theme.createSelectorDrawable(Theme.getColor(Theme.key_listSelector), 1)
+        sendGlass = MaxGlass.chatBottom(sendButton, 23f)
+        sendButton.background = sendGlass
         sendButton.setOnClickListener { onSendButton() }
-        panel.addView(sendButton, LayoutHelper.createLinear(48, 48, Gravity.BOTTOM))
+        panel.addView(sendButton, LayoutHelper.createLinear(46, 46, Gravity.BOTTOM))
         updateSendButton()
         return panel
     }
@@ -594,8 +644,10 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         val has = input.text.toString().isNotBlank()
         val voice = !has && editing == null && !MaxRecorder.isRecording
         sendButton.setImageResource(if (voice) org.telegram.messenger.R.drawable.input_mic else org.telegram.messenger.R.drawable.attach_send)
+        // Микрофон — на стеклянном круге, «отправить» — белая стрелка на круге цвета темы.
+        sendButton.background = if (voice) sendGlass else Theme.createCircleDrawable(AndroidUtilities.dp(46f), Theme.getColor(Theme.key_chat_messagePanelSend))
         sendButton.colorFilter = android.graphics.PorterDuffColorFilter(
-            Theme.getColor(if (voice) Theme.key_chat_messagePanelIcons else Theme.key_chat_messagePanelSend),
+            if (voice) Theme.getColor(Theme.key_chat_messagePanelIcons) else 0xffffffff.toInt(),
             android.graphics.PorterDuff.Mode.SRC_IN
         )
         sendButton.alpha = 1f
@@ -1617,6 +1669,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private const val MENU_MORE = 2
         private const val MENU_INFO = 3
         private const val MENU_LEAVE = 4
+        private const val MENU_OPEN_SEARCH = 5
         private const val MAX_FILE = 100L * 1024 * 1024
 
         private val NAME_COLORS = intArrayOf(

@@ -80,6 +80,10 @@ object MaxClient {
     private const val OP_MSG_SEARCH = 73
     private const val OP_CHAT_MEMBERS_UPDATE = 77
     private const val OP_MSG_REACTION = 178
+    private const val OP_STORIES_LIST = 208
+    private const val OP_STORIES_GET_BY_OWNER = 210
+    private const val OP_STORIES_MARK = 214
+    private const val OP_STORIES_SEND = 215
     private const val OP_MSG_CANCEL_REACTION = 179
 
     private const val PUSH_MESSAGE = 128
@@ -88,6 +92,7 @@ object MaxClient {
     private const val PUSH_PRESENCE = 132
     private const val PUSH_MSG_DELETE = 142
     private const val PUSH_REACTIONS = 155
+    private const val PUSH_STORIES = 216
 
     @Volatile
     private var session: Session? = null
@@ -158,6 +163,7 @@ object MaxClient {
         fun onPresenceChanged(userId: Long) {}
         fun onReadMarkChanged(chatId: Long) {}
         fun onReactionsChanged(chatId: Long, messageId: Long, reactions: MaxReactions?) {}
+        fun onStoriesChanged() {}
         fun onStateChanged() {}
     }
 
@@ -648,6 +654,7 @@ object MaxClient {
         MaxCache.clear()
         MaxContacts.clear()
         MaxPresence.clear()
+        MaxStoriesStore.clear()
         chats = emptyList()
         contacts = emptyList()
         livenessJob?.cancel()
@@ -686,6 +693,7 @@ object MaxClient {
         chatsChanged()
         resolveMissing(chats.map { it.peerId }.filter { it != 0L })
         io { fetchContacts() }
+        loadStories()
     }
 
     // ---- люди ----
@@ -1066,6 +1074,113 @@ object MaxClient {
         }
     }
 
+    // ---- истории ----
+
+    private fun storiesChanged() = forEachListener { it.onStoriesChanged() }
+
+    /** Лента колец (опкод 208 `{cursor: "", count}` -> `storiesPreviews`), как Komet loadFeed. */
+    fun loadStories() {
+        io {
+            try {
+                val answer = JSONObject(request(OP_STORIES_LIST, JSONObject().put("cursor", "").put("count", 30)))
+                val raw = answer.optJSONArray("storiesPreviews")
+                val list = ArrayList<MaxStoryPreview>()
+                if (raw != null) for (i in 0 until raw.length()) MaxStoryPreview.parse(raw.optJSONObject(i))?.let { list.add(it) }
+                // Своё кольцо лента не всегда несёт — спрашиваем отдельно.
+                val me = MaxStore.accountId
+                if (me != 0L && list.none { it.owner.id == me }) {
+                    try {
+                        val own = JSONObject(request(OP_STORIES_GET_BY_OWNER, JSONObject().put("owners", JSONArray().put(MaxStoryOwner(me, 0).toJson()))))
+                        own.optJSONArray("storiesPreviews")?.let { arr ->
+                            for (i in 0 until arr.length()) MaxStoryPreview.parse(arr.optJSONObject(i))?.let { list.add(it) }
+                        }
+                        applyPeerStories(own.optJSONArray("peerStories"))
+                    } catch (ignored: Throwable) {
+                    }
+                }
+                MaxStoriesStore.replaceAll(list)
+                resolveMissing(list.filter { it.owner.type == 0 }.map { it.owner.id })
+                storiesChanged()
+            } catch (e: Throwable) {
+                MaxLog.e("loadStories failed", e)
+            }
+        }
+    }
+
+    private fun applyPeerStories(raw: JSONArray?) {
+        if (raw == null) return
+        for (i in 0 until raw.length()) {
+            val peer = raw.optJSONObject(i) ?: continue
+            val owner = MaxStoryOwner.parse(peer.optJSONObject("owner")) ?: continue
+            MaxStoriesStore.stories[owner.id] = MaxStory.parseList(peer.optJSONArray("stories"))
+        }
+    }
+
+    /** Истории владельца целиком (опкод 210 `{owners: [{ownerId, type}]}` -> `peerStories`). */
+    fun storiesOf(owner: MaxStoryOwner, onResult: (List<MaxStory>?, Throwable?) -> Unit) {
+        io {
+            try {
+                val answer = JSONObject(request(OP_STORIES_GET_BY_OWNER, JSONObject().put("owners", JSONArray().put(owner.toJson()))))
+                applyPeerStories(answer.optJSONArray("peerStories"))
+                onResult(MaxStoriesStore.stories[owner.id] ?: emptyList(), null)
+            } catch (e: Throwable) {
+                MaxLog.e("storiesOf failed", e)
+                onResult(null, e)
+            }
+        }
+    }
+
+    /** Отметка просмотра (опкод 214 `{owner, storyId}`); кольцо гаснет сразу. */
+    fun markStory(story: MaxStory) {
+        MaxStoriesStore.previews.firstOrNull { it.owner.id == story.owner.id }?.let {
+            if (it.read < it.total) it.read += 1
+        }
+        storiesChanged()
+        io {
+            try {
+                request(OP_STORIES_MARK, JSONObject().put("owner", story.owner.toJson()).put("storyId", story.id))
+            } catch (e: Throwable) {
+                MaxLog.e("markStory failed", e)
+            }
+        }
+    }
+
+    /**
+     * Своя история из фото: адрес — опкод 80 `{type: 1, count: 1}`, загрузка как у фото,
+     * публикация — опкод 215 `{stories: [{cid, settings: 1, media {_type: PHOTO, photoToken},
+     * expiration: сутки}]}`. Сверено с Komet (story_composer_screen.dart, publishPhoto).
+     */
+    fun publishPhotoStory(data: ByteArray, onResult: (Throwable?) -> Unit) {
+        io {
+            try {
+                val urlAnswer = JSONObject(request(OP_PHOTO_UPLOAD, JSONObject().put("type", 1).put("count", 1)))
+                val url = urlAnswer.optString("url", "").ifEmpty { throw IllegalStateException("сервер не выдал адрес загрузки") }
+                val live = session ?: throw IllegalStateException("нет соединения с MAX")
+                val result = live.blocking.uploadPhoto(url, data, "story.jpg")
+                if (result.status != 200) throw IllegalStateException("фото не загрузилось: ${result.status}")
+                val token = photoToken(String(result.body, Charsets.UTF_8))
+                    ?: throw IllegalStateException("сервер не вернул токен фото")
+                val story = JSONObject()
+                    .put("cid", System.currentTimeMillis())
+                    .put("settings", 1)
+                    .put("media", JSONObject().put("_type", "PHOTO").put("photoToken", token))
+                    .put("expiration", 86_400_000L)
+                val answer = JSONObject(request(OP_STORIES_SEND, JSONObject().put("stories", JSONArray().put(story))))
+                MaxStoryPreview.parse(answer.optJSONObject("storiesPreview"))?.let { MaxStoriesStore.apply(it) }
+                val sent = MaxStory.parseList(answer.optJSONArray("stories"))
+                if (sent.isNotEmpty()) {
+                    val me = MaxStore.accountId
+                    MaxStoriesStore.stories[me] = (MaxStoriesStore.stories[me] ?: emptyList()) + sent
+                }
+                storiesChanged()
+                onResult(null)
+            } catch (e: Throwable) {
+                MaxLog.e("publishPhotoStory failed", e)
+                onResult(e)
+            }
+        }
+    }
+
     // ---- группы ----
 
     /** Свежий объект чата из ответа сервера заменяет наш. */
@@ -1404,6 +1519,13 @@ object MaxClient {
                     val messageId = body.optString("messageId", "").toLongOrNull() ?: return
                     val info = if ((body.optJSONArray("counters")?.length() ?: 0) == 0) null else MaxReactions.parse(body)
                     forEachListener { it.onReactionsChanged(chatId, messageId, info) }
+                }
+                PUSH_STORIES -> {
+                    MaxStoryPreview.parse(body.optJSONObject("storiesPreview"))?.let {
+                        MaxStoriesStore.apply(it)
+                        resolveMissing(listOf(it.owner.id))
+                        storiesChanged()
+                    }
                 }
                 PUSH_MSG_DELETE -> {
                     val id = if (chatId != 0L) chatId else body.optJSONObject("chat")?.optLong("id", 0L) ?: 0L

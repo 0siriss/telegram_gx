@@ -14,7 +14,7 @@ write("org.telegram.ui.ActionBar","ActionBar",
         public void onItemClick(int id) {}
         public boolean canOpenMenu() { return true; }
     }
-""" + M("org/telegram/ui/ActionBar/ActionBar.java", ["getCurrentActionBarHeight","getOccupyStatusBar","setOccupyStatusBar","setTitle","setSubtitle","setBackButtonImage","setAllowOverlayTitle","setActionBarMenuOnItemClick","createMenu","setTitleColor","setSubtitleColor","setAddToContainer"]) + "\n}", UI)
+""" + M("org/telegram/ui/ActionBar/ActionBar.java", ["getCurrentActionBarHeight","getOccupyStatusBar","setOccupyStatusBar","setTitle","setSubtitle","setBackButtonImage","setAllowOverlayTitle","setActionBarMenuOnItemClick","createMenu","setTitleColor","setSubtitleColor","setAddToContainer","setItemsColor","setItemsBackgroundColor","setCastShadows"]) + "\n}", UI)
 
 write("org.telegram.ui.ActionBar","ActionBarMenu",
 "public class ActionBarMenu extends LinearLayout {\n    public ActionBarMenu(Context context) { super(context); }\n" + M("org/telegram/ui/ActionBar/ActionBarMenu.java", ["addItem"]) + "\n}", UI)
@@ -33,7 +33,7 @@ write("org.telegram.ui.ActionBar","ActionBarMenuItem",
         public void onTextChanged(EditText editText) {}
         public void onSearchPressed(EditText editText) {}
     }
-""" + M("org/telegram/ui/ActionBar/ActionBarMenuItem.java", ["addSubItem","setIsSearchField","setSearchFieldHint","setActionBarMenuItemSearchListener"]) + "\n}", UI)
+""" + M("org/telegram/ui/ActionBar/ActionBarMenuItem.java", ["addSubItem","setIsSearchField","setSearchFieldHint","setActionBarMenuItemSearchListener","openSearch"]) + "\n}", UI)
 
 write("org.telegram.ui.ActionBar","AlertDialog",
 """public class AlertDialog extends Dialog {
@@ -60,7 +60,7 @@ write("org.telegram.ui.ActionBar","BaseFragment",
     protected ActionBar actionBar;
     protected boolean isPaused = true;
     protected View createView(Context context) { return null; }
-""" + M("org/telegram/ui/ActionBar/BaseFragment.java", ["onFragmentCreate","onFragmentDestroy","onResume","onPause","isPaused","presentFragment","finishFragment","getParentActivity","showDialog","getActionBar","getContext","startActivityForResult","onActivityResultFragment","onRequestPermissionsResultFragment"]) + "\n}", UI)
+""" + M("org/telegram/ui/ActionBar/BaseFragment.java", ["onFragmentCreate","onFragmentDestroy","onResume","onPause","isPaused","presentFragment","finishFragment","getParentActivity","showDialog","getActionBar","getContext","startActivityForResult","onActivityResultFragment","onRequestPermissionsResultFragment","isLightStatusBar"]) + "\n}", UI)
 
 # --- vendored RecyclerView: только то, что реально используется, с настоящими дженериками ---
 write("androidx.recyclerview.widget","RecyclerView",
@@ -105,6 +105,8 @@ write("androidx.recyclerview.widget","RecyclerView",
 
 write("androidx.recyclerview.widget","LinearLayoutManager",
 """public class LinearLayoutManager extends RecyclerView.LayoutManager {
+    public static final int HORIZONTAL = 0;
+    public static final int VERTICAL = 1;
     public LinearLayoutManager(Context context) {}
     public LinearLayoutManager(Context context, int orientation, boolean reverseLayout) {}
     public void setStackFromEnd(boolean stackFromEnd) {}
@@ -223,4 +225,71 @@ write("org.telegram.ui.Components","ItemOptions",
     public ItemOptions setGravity(int gravity) { return this; }
     public ItemOptions show() { return this; }
     public void dismiss() { }
+}""", UI)
+
+# Стекло Telegram 13 — вручную, сверено с blur3/* (абстрактные классы и интерфейсы).
+B3 = "org.telegram.ui.Components.blur3"
+write(B3 + ".source","BlurredBackgroundSource","public interface BlurredBackgroundSource {}", UI)
+write(B3 + ".source","BlurredBackgroundSourceColor","public class BlurredBackgroundSourceColor implements BlurredBackgroundSource {\n    public void setColor(int color) { }\n}", UI)
+write(B3 + ".drawable.color","BlurredBackgroundColorProvider","public interface BlurredBackgroundColorProvider {}", UI)
+write(B3 + ".drawable.color","BlurredBackgroundProvider","public interface BlurredBackgroundProvider extends BlurredBackgroundColorProvider {}", UI)
+write(B3 + ".drawable","BlurredBackgroundDrawable",
+"""public abstract class BlurredBackgroundDrawable extends Drawable {
+    public BlurredBackgroundDrawable setRadius(float radius) { return this; }
+    public BlurredBackgroundDrawable setPadding(int padding) { return this; }
+    public BlurredBackgroundDrawable setColorProvider(org.telegram.ui.Components.blur3.drawable.color.BlurredBackgroundColorProvider p) { return this; }
+}""", UI)
+write(B3 + ".drawable.color.impl","BlurredBackgroundProviderImpl",
+"""public class BlurredBackgroundProviderImpl {
+    public static org.telegram.ui.Components.blur3.drawable.color.BlurredBackgroundProvider topPanel(org.telegram.ui.ActionBar.Theme.ResourcesProvider r) { return null; }
+    public static org.telegram.ui.Components.blur3.drawable.color.BlurredBackgroundProvider topPanelChatActivity(org.telegram.ui.ActionBar.Theme.ResourcesProvider r) { return null; }
+    public static org.telegram.ui.Components.blur3.drawable.color.BlurredBackgroundProvider bottomPanelChatActivity(org.telegram.ui.ActionBar.Theme.ResourcesProvider r) { return null; }
+}""", UI)
+write(B3,"BlurredBackgroundDrawableViewFactory",
+"""public class BlurredBackgroundDrawableViewFactory {
+    public BlurredBackgroundDrawableViewFactory(org.telegram.ui.Components.blur3.source.BlurredBackgroundSource source) { }
+    public org.telegram.ui.Components.blur3.drawable.BlurredBackgroundDrawable create(View view, org.telegram.ui.Components.blur3.drawable.color.BlurredBackgroundColorProvider provider) { return null; }
+}""", UI)
+
+# ActionBar.setupGlass и ActionBarMenuItem.openSearch — сверено с исходником.
+p_ab = os.path.join(os.path.dirname(__file__), "..", "build", "stubs", "org", "telegram", "ui", "ActionBar", "ActionBar.java")
+src = open(p_ab).read().rstrip().rstrip("}")
+src += "    public void setupGlass(org.telegram.ui.Components.blur3.BlurredBackgroundDrawableViewFactory factory, org.telegram.ui.Components.blur3.drawable.color.BlurredBackgroundColorProvider colorProvider) { }\n}\n"
+open(p_ab, "w").write(src)
+
+write("org.telegram.ui.Components","EditTextBoldCursor","public class EditTextBoldCursor extends EditText {\n    public EditTextBoldCursor(Context context) { super(context); }\n}", UI)
+write("org.telegram.ui.Components","FragmentSearchField",
+"""public class FragmentSearchField extends FrameLayout {
+    public final EditTextBoldCursor editText = null;
+    public FragmentSearchField(Context context, org.telegram.ui.ActionBar.Theme.ResourcesProvider resourcesProvider) { super(context); }
+    public void setHintText(CharSequence text, boolean animated) { }
+    public void setSectionBackground() { }
+    public void setupBlurredBackground(org.telegram.ui.Components.blur3.drawable.BlurredBackgroundDrawable drawable) { }
+    public void setCloseButtonOnClickListener(Runnable onCloseSearch) { }
+    public void setCloseButtonVisible(boolean visible) { }
+}""", UI)
+write("org.telegram.ui.Components","FilterTabsView",
+"""public class FilterTabsView extends FrameLayout {
+    public FilterTabsView(Context context, org.telegram.ui.ActionBar.Theme.ResourcesProvider resourcesProvider) { super(context); }
+    public interface FilterTabsViewDelegate {
+        void onPageSelected(Tab tab, boolean forward);
+        void onPageScrolled(float progress);
+        void onSamePageSelected();
+        int getTabCounter(int tabId);
+        boolean didSelectTab(TabView tabView, boolean selected);
+        boolean isTabMenuVisible();
+        void onDeletePressed(int id);
+        void onPageReorder(int fromId, int toId);
+        boolean canPerformActions();
+    }
+    public class Tab { public int id; }
+    public class TabView extends View { public TabView(Context context) { super(context); } }
+    public void setDelegate(FilterTabsViewDelegate filterTabsViewDelegate) { }
+    public void addTab(int id, int stableId, CharSequence text, boolean noanimate, boolean isDefault, boolean isLocked) { }
+    public void finishAddingTabs(boolean animated) { }
+    public void selectFirstTab() { }
+    public boolean selectTabWithStableId(int stableId) { return false; }
+    public int getCurrentTabId() { return 0; }
+    public void setBlurredBackground(org.telegram.ui.Components.blur3.drawable.BlurredBackgroundDrawable drawable) { }
+    public void notifyTabCounterChanged(int id) { }
 }""", UI)

@@ -230,7 +230,7 @@ class MaxMessage(
                 id = id,
                 cid = json.optLong("cid", 0L),
                 senderId = json.optLong("sender", 0L),
-                text = content.optString("text", ""),
+                text = localizeServerKey(content.optString("text", "")),
                 time = json.optLong("time", 0L),
                 attachLabel = if (first != null) attachLabel(first.type, first.raw) else null,
                 isService = first?.type == "CONTROL",
@@ -242,6 +242,12 @@ class MaxMessage(
             )
             parsed.reactions = MaxReactions.parse(json.optJSONObject("reactionInfo"))
             return parsed
+        }
+
+        /** Сервер иногда шлёт ключ перевода вместо текста (приветствие «Избранного»). */
+        private fun localizeServerKey(text: String): String = when (text) {
+            "welcome.saved.dialog.message" -> "Сохраняйте здесь сообщения, фото и файлы — они будут доступны на всех устройствах"
+            else -> text
         }
 
         fun parseList(array: JSONArray?): List<MaxMessage> {

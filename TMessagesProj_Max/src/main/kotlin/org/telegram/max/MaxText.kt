@@ -26,6 +26,17 @@ object MaxText {
         }
     }
 
+    /** Время истории, как в Telegram: «5 мин назад», «3 ч назад», «вчера». */
+    fun lastSeenTime(timeMs: Long): String {
+        val diff = (System.currentTimeMillis() - timeMs) / 1000
+        return when {
+            diff < 60 -> "только что"
+            diff < 3600 -> "${diff / 60} мин назад"
+            diff < 86_400 -> "${diff / 3600} ч назад"
+            else -> "вчера"
+        }
+    }
+
     fun members(count: Int): String {
         val mod10 = count % 10
         val mod100 = count % 100

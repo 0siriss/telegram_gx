@@ -17,7 +17,9 @@ import org.telegram.ui.ActionBar.ActionBarMenuItem
 import org.telegram.ui.ActionBar.AlertDialog
 import org.telegram.ui.ActionBar.BaseFragment
 import org.telegram.ui.ActionBar.Theme
+import org.telegram.ui.Components.FilterTabsView
 import org.telegram.ui.Components.FragmentFloatingButton
+import org.telegram.ui.Components.FragmentSearchField
 import org.telegram.ui.Components.ItemOptions
 import org.telegram.ui.Components.LayoutHelper
 import org.telegram.ui.DialogsActivity
@@ -37,16 +39,15 @@ class MaxDialogsFragment(
     private var mainContent: View? = null
     private var loginStub: View? = null
     private var fab: FragmentFloatingButton? = null
-    private var searchItem: ActionBarMenuItem? = null
     private var moreItem: ActionBarMenuItem? = null
     private var started = false
 
     private lateinit var chatsList: RecyclerListView
     private lateinit var contactsList: RecyclerListView
     private lateinit var empty: TextView
-    private lateinit var tabChats: TextView
-    private lateinit var tabContacts: TextView
-    private lateinit var tabLine: View
+    private lateinit var storiesBar: MaxStoriesBar
+    private lateinit var searchField: FragmentSearchField
+    private lateinit var filterTabs: FilterTabsView
 
     private val chatsAdapter = ChatsAdapter()
     private val contactsAdapter = ContactsAdapter()
@@ -59,6 +60,12 @@ class MaxDialogsFragment(
         if (!inTab) actionBar.setBackButtonImage(org.telegram.messenger.R.drawable.ic_ab_back)
         actionBar.setAllowOverlayTitle(true)
         actionBar.setTitle(if (pick != null) "Переслать…" else "MAX")
+        // Шапка как у вкладок Telegram 13: цвет фона списка, тёмный заголовок, без тени.
+        actionBar.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite))
+        actionBar.setTitleColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+        actionBar.setItemsColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText), false)
+        actionBar.setItemsBackgroundColor(Theme.getColor(Theme.key_listSelector), false)
+        actionBar.setCastShadows(false)
         actionBar.setActionBarMenuOnItemClick(object : ActionBar.ActionBarMenuOnItemClick() {
             override fun onItemClick(id: Int) {
                 when (id) {
@@ -70,21 +77,6 @@ class MaxDialogsFragment(
             }
         })
         val menu = actionBar.createMenu()
-        val search = menu.addItem(MENU_SEARCH, org.telegram.messenger.R.drawable.outline_header_search)
-        search.setIsSearchField(true)
-            .setActionBarMenuItemSearchListener(object : ActionBarMenuItem.ActionBarMenuItemSearchListener() {
-                override fun onTextChanged(editText: EditText) {
-                    query = editText.text.toString().trim()
-                    updateUi()
-                }
-
-                override fun onSearchCollapse() {
-                    query = ""
-                    updateUi()
-                }
-            })
-        search.setSearchFieldHint("Поиск")
-        searchItem = search
         val more = menu.addItem(MENU_MORE, org.telegram.messenger.R.drawable.ic_ab_other)
         more.addSubItem(MENU_FIND_PHONE, org.telegram.messenger.R.drawable.msg_search, "Найти по номеру")
         more.addSubItem(MENU_RELOAD, org.telegram.messenger.R.drawable.msg_retry, "Обновить")
@@ -95,9 +87,52 @@ class MaxDialogsFragment(
         column.orientation = LinearLayout.VERTICAL
         val root = column
 
-        val tabsBar = createTabs(context)
-        if (pick != null) tabsBar.visibility = View.GONE
-        root.addView(tabsBar, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 44))
+        // Шапка списка, как у вкладок Telegram 13: истории, поле поиска, переключатель.
+        storiesBar = MaxStoriesBar(context, { preview -> presentFragment(MaxStoryViewerFragment(preview)) }, { addStory() })
+        if (pick != null) storiesBar.visibility = View.GONE
+        root.addView(storiesBar, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 98))
+
+        searchField = FragmentSearchField(context, null)
+        searchField.setupBlurredBackground(MaxGlass.topPanel(searchField, 20f))
+        searchField.setHintText("Поиск", false)
+        searchField.editText.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(e: android.text.Editable?) {
+                query = e?.toString()?.trim() ?: ""
+                searchField.setCloseButtonVisible(query.isNotEmpty())
+                updateUi()
+            }
+        })
+        searchField.setCloseButtonOnClickListener {
+            searchField.editText.setText("")
+            AndroidUtilities.hideKeyboard(searchField.editText)
+        }
+        searchField.setPadding(AndroidUtilities.dp(4f), AndroidUtilities.dp(4f), AndroidUtilities.dp(4f), AndroidUtilities.dp(4f))
+        root.addView(searchField, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 52, 6f, 0f, 6f, 0f))
+
+        filterTabs = FilterTabsView(context, null)
+        filterTabs.setBlurredBackground(MaxGlass.topPanel(filterTabs, 18f).setPadding(AndroidUtilities.dp(6.666f)))
+        filterTabs.setPadding(0, AndroidUtilities.dp(7f), 0, AndroidUtilities.dp(7f))
+        filterTabs.setDelegate(object : FilterTabsView.FilterTabsViewDelegate {
+            override fun onPageSelected(tab: FilterTabsView.Tab, forward: Boolean) = selectTab(tab.id)
+            override fun onPageScrolled(progress: Float) {}
+            override fun onSamePageSelected() {
+                (if (tab == TAB_CHATS) chatsList else contactsList).smoothScrollToPosition(0)
+            }
+            override fun getTabCounter(tabId: Int): Int = if (tabId == TAB_CHATS) MaxClient.chats.sumOf { it.unread } else 0
+            override fun didSelectTab(tabView: FilterTabsView.TabView, selected: Boolean): Boolean = false
+            override fun isTabMenuVisible(): Boolean = false
+            override fun onDeletePressed(id: Int) {}
+            override fun onPageReorder(fromId: Int, toId: Int) {}
+            override fun canPerformActions(): Boolean = true
+        })
+        filterTabs.addTab(TAB_CHATS, TAB_CHATS, "Чаты", true, true, false)
+        filterTabs.addTab(TAB_CONTACTS, TAB_CONTACTS, "Контакты", true, false, false)
+        filterTabs.finishAddingTabs(false)
+        filterTabs.selectFirstTab()
+        if (pick != null) filterTabs.visibility = View.GONE
+        root.addView(filterTabs, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 50, 4f, 0f, 4f, 0f))
 
         val content = FrameLayout(context)
         root.addView(content, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 0, 1f))
@@ -225,7 +260,6 @@ class MaxDialogsFragment(
         val loggedIn = MaxClient.isLoggedIn
         loginStub?.visibility = if (loggedIn) View.GONE else View.VISIBLE
         fab?.visibility = if (loggedIn && pick == null) View.VISIBLE else View.GONE
-        searchItem?.visibility = if (loggedIn) View.VISIBLE else View.GONE
         moreItem?.visibility = if (loggedIn && pick == null) View.VISIBLE else View.GONE
         if (loggedIn && !started) {
             started = true
@@ -291,53 +325,12 @@ class MaxDialogsFragment(
         AndroidUtilities.runOnUIThread({ input.requestFocus(); AndroidUtilities.showKeyboard(input) }, 200)
     }
 
-    private fun createTabs(context: Context): View {
-        val bar = FrameLayout(context)
-        bar.setBackgroundColor(Theme.getColor(Theme.key_actionBarDefault))
-        val row = LinearLayout(context)
-        row.orientation = LinearLayout.HORIZONTAL
-        tabChats = tabText(context, "Чаты") { selectTab(TAB_CHATS) }
-        tabContacts = tabText(context, "Контакты") { selectTab(TAB_CONTACTS) }
-        row.addView(tabChats, LayoutHelper.createLinear(0, LayoutHelper.MATCH_PARENT, 1f))
-        row.addView(tabContacts, LayoutHelper.createLinear(0, LayoutHelper.MATCH_PARENT, 1f))
-        bar.addView(row, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
-        tabLine = View(context)
-        tabLine.setBackgroundColor(Theme.getColor(Theme.key_actionBarTabLine))
-        bar.addView(tabLine, LayoutHelper.createFrame(0, 3f, Gravity.BOTTOM or Gravity.START, 0f, 0f, 0f, 0f))
-        bar.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> placeTabLine() }
-        return bar
-    }
-
-    private fun tabText(context: Context, text: String, onClick: () -> Unit): TextView {
-        val view = TextView(context)
-        view.text = text
-        view.textSize = 15f
-        view.typeface = AndroidUtilities.bold()
-        view.gravity = Gravity.CENTER
-        view.background = Theme.createSelectorDrawable(Theme.getColor(Theme.key_actionBarDefaultSelector), 2)
-        view.setOnClickListener { onClick() }
-        return view
-    }
-
-    private fun placeTabLine() {
-        if (!::tabLine.isInitialized) return
-        val parent = tabLine.parent as? View ?: return
-        val half = parent.width / 2
-        val params = tabLine.layoutParams as FrameLayout.LayoutParams
-        if (params.width != half || params.leftMargin != tab * half) {
-            params.width = half
-            params.leftMargin = tab * half
-            tabLine.layoutParams = params
-        }
-    }
-
     private fun selectTab(which: Int) {
         tab = which
-        tabChats.setTextColor(Theme.getColor(if (which == TAB_CHATS) Theme.key_actionBarTabActiveText else Theme.key_actionBarTabUnactiveText))
-        tabContacts.setTextColor(Theme.getColor(if (which == TAB_CONTACTS) Theme.key_actionBarTabActiveText else Theme.key_actionBarTabUnactiveText))
+        if (::filterTabs.isInitialized && filterTabs.getCurrentTabId() != which) filterTabs.selectTabWithStableId(which)
+        storiesBar.visibility = if (which == TAB_CHATS && pick == null) View.VISIBLE else View.GONE
         chatsList.visibility = if (which == TAB_CHATS) View.VISIBLE else View.GONE
         contactsList.visibility = if (which == TAB_CONTACTS) View.VISIBLE else View.GONE
-        placeTabLine()
         if (which == TAB_CONTACTS && MaxClient.contacts.isEmpty()) {
             MaxClient.loadContacts { error ->
                 AndroidUtilities.runOnUIThread {
@@ -348,6 +341,11 @@ class MaxDialogsFragment(
         }
         updateUi()
     }
+
+    override fun isLightStatusBar(): Boolean =
+        Theme.getColor(Theme.key_windowBackgroundWhite).let {
+            (0.299 * android.graphics.Color.red(it) + 0.587 * android.graphics.Color.green(it) + 0.114 * android.graphics.Color.blue(it)) > 180
+        }
 
     override fun onFragmentCreate(): Boolean {
         MaxClient.addListener(this)
@@ -386,7 +384,56 @@ class MaxDialogsFragment(
     }
 
     override fun onChatsChanged() {
-        AndroidUtilities.runOnUIThread { updateUi() }
+        AndroidUtilities.runOnUIThread {
+            updateUi()
+            if (::filterTabs.isInitialized) filterTabs.notifyTabCounterChanged(TAB_CHATS)
+        }
+    }
+
+    override fun onStoriesChanged() {
+        AndroidUtilities.runOnUIThread { if (::storiesBar.isInitialized) storiesBar.update() }
+    }
+
+    /** Своя история: фото из галереи, как «Добавить историю» у Komet. */
+    private fun addStory() {
+        val intent = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT)
+        intent.addCategory(android.content.Intent.CATEGORY_OPENABLE)
+        intent.type = "image/*"
+        try {
+            startActivityForResult(android.content.Intent.createChooser(intent, null), REQ_STORY)
+        } catch (e: Throwable) {
+            toast("Нет приложения для выбора фото")
+        }
+    }
+
+    override fun onActivityResultFragment(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        if (requestCode != REQ_STORY || resultCode != android.app.Activity.RESULT_OK) return
+        val uri = data?.data ?: return
+        val context = parentActivity ?: return
+        toast("Публикуем историю…")
+        Thread {
+            try {
+                val raw = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw IllegalStateException("фото не открылось")
+                val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size, bounds)
+                var sample = 1
+                while (bounds.outWidth / sample > 2560 || bounds.outHeight / sample > 2560) sample *= 2
+                val bitmap = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+                val bytes = if (bitmap == null) raw else java.io.ByteArrayOutputStream().also { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 87, it) }.toByteArray()
+                MaxClient.publishPhotoStory(bytes) { error ->
+                    toast(if (error == null) "История опубликована" else "История не опубликована: " + MaxLog.describe(error))
+                }
+            } catch (e: Throwable) {
+                toast("История не опубликована: " + MaxLog.describe(e))
+            }
+        }.start()
+    }
+
+    private fun toast(text: String) {
+        AndroidUtilities.runOnUIThread {
+            val context = parentActivity ?: return@runOnUIThread
+            android.widget.Toast.makeText(context, text, android.widget.Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onContactsChanged() {
@@ -557,7 +604,7 @@ class MaxDialogsFragment(
         private const val TAB_CHATS = 0
         private const val TAB_CONTACTS = 1
 
-        private const val MENU_SEARCH = 1
+        private const val REQ_STORY = 7201
         private const val MENU_MORE = 2
         private const val MENU_RELOAD = 3
         private const val MENU_LOGOUT = 4
