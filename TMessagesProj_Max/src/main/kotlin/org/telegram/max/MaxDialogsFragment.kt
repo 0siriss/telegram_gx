@@ -111,8 +111,6 @@ class MaxDialogsFragment(
         searchField.setupBlurredBackground(MaxGlass.topPanel(searchField, 20f))
         searchField.setHintText("Поиск", false)
         searchField.editText.hint = "Поиск"
-        // Поле поиска — по значку в шапке, как в Telegram.
-        searchField.visibility = View.GONE
         searchField.editText.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -124,7 +122,18 @@ class MaxDialogsFragment(
         searchField.setCloseButtonOnClickListener { toggleSearch() }
         searchField.setCloseButtonVisible(true)
         searchField.setPadding(AndroidUtilities.dp(4f), AndroidUtilities.dp(4f), AndroidUtilities.dp(4f), AndroidUtilities.dp(4f))
-        root.addView(searchField, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 52, 6f, 0f, 6f, 0f))
+        // «Активная шапка» как в Telegram: развёрнутые истории и поле поиска спрятаны и
+        // появляются, если потянуть список вниз; при прокрутке вверх снова прячутся.
+        val header = LinearLayout(context)
+        header.orientation = LinearLayout.VERTICAL
+        header.visibility = View.GONE
+        val bar = MaxStoriesBar(context, { preview -> presentFragment(MaxStoryViewerFragment(preview)) }, { addStory() })
+        storiesBar = bar
+        header.addView(bar, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 98))
+        header.addView(searchField, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 52, 6f, 0f, 6f, 0f))
+        root.addView(header, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
+        root.layoutTransition = android.animation.LayoutTransition().apply { setDuration(220) }
+        expandHeader = header
 
         filterTabs = FilterTabsView(context, null)
         filterTabs.setBlurredBackground(MaxGlass.topPanel(filterTabs, 18f).setPadding(AndroidUtilities.dp(6.666f)))
@@ -171,9 +180,11 @@ class MaxDialogsFragment(
         })
         content.addView(chatsList, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
 
+        attachPullToReveal(chatsList)
         contactsList = RecyclerListView(context)
         contactsList.layoutManager = LinearLayoutManager(context)
         contactsList.adapter = contactsAdapter
+        attachPullToReveal(contactsList)
         contactsList.visibility = View.GONE
         contactsList.setOnItemClickListener(RecyclerListView.OnItemClickListener { _, position ->
             if (position == 0) {
@@ -456,7 +467,11 @@ class MaxDialogsFragment(
     }
 
     override fun onStoriesChanged() {
-        AndroidUtilities.runOnUIThread { updateStoriesStack() }
+        AndroidUtilities.runOnUIThread {
+            updateStoriesStack()
+            storiesBar?.update()
+            if (headerExpanded) storiesStack?.visibility = View.GONE
+        }
     }
 
     /** Шапка вкладки: кружки историй внахлёст и заголовок, как «Telegram» на главном экране. */
@@ -507,15 +522,52 @@ class MaxDialogsFragment(
 
     private fun toggleSearch() {
         if (!::searchField.isInitialized) return
-        if (searchField.visibility == View.VISIBLE) {
+        if (headerExpanded && searchField.editText.hasFocus()) {
             searchField.editText.setText("")
             AndroidUtilities.hideKeyboard(searchField.editText)
-            searchField.visibility = View.GONE
+            searchField.editText.clearFocus()
+            setHeaderExpanded(false)
         } else {
-            searchField.visibility = View.VISIBLE
+            setHeaderExpanded(true)
             searchField.editText.requestFocus()
             AndroidUtilities.showKeyboard(searchField.editText)
         }
+    }
+
+    private var expandHeader: View? = null
+    private var storiesBar: MaxStoriesBar? = null
+    private var headerExpanded = false
+
+    private fun setHeaderExpanded(expanded: Boolean) {
+        if (headerExpanded == expanded || pick != null) return
+        headerExpanded = expanded
+        // Истории — только у чатов и только если они есть; поиск — всегда.
+        storiesBar?.visibility = if (tab == TAB_CHATS && MaxStoriesStore.previews.isNotEmpty()) View.VISIBLE else View.GONE
+        expandHeader?.visibility = if (expanded) View.VISIBLE else View.GONE
+        // Развёрнутые истории заменяют кружки у заголовка, как в Telegram.
+        storiesStack?.visibility = if (expanded || MaxStoriesStore.previews.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    /** Потянули список вниз, когда он уже в самом верху, — раскрываем шапку. */
+    private fun attachPullToReveal(list: RecyclerListView) {
+        var downY = 0f
+        list.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> downY = event.y
+                android.view.MotionEvent.ACTION_MOVE ->
+                    if (!headerExpanded && !list.canScrollVertically(-1) && event.y - downY > AndroidUtilities.dp(36f)) {
+                        setHeaderExpanded(true)
+                    }
+            }
+            false
+        }
+        list.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                if (dy > AndroidUtilities.dp(6f) && headerExpanded && query.isEmpty() && !searchField.editText.hasFocus()) {
+                    setHeaderExpanded(false)
+                }
+            }
+        })
     }
 
     /** Своя история: фото из галереи, как «Добавить историю» у Komet. */
