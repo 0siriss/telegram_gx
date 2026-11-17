@@ -39,7 +39,7 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
     override fun createView(context: Context): View {
         actionBar.setBackButtonImage(org.telegram.messenger.R.drawable.ic_ab_back)
         actionBar.setAllowOverlayTitle(true)
-        actionBar.setTitle(if (userId != 0L) "Профиль" else "Информация")
+        actionBar.setTitle("")
         actionBar.setActionBarMenuOnItemClick(object : ActionBar.ActionBarMenuOnItemClick() {
             override fun onItemClick(id: Int) {
                 if (id == -1) finishFragment()
@@ -47,7 +47,13 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
         })
 
         listView = RecyclerListView(context)
-        listView.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite))
+        listView.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray))
+        // Шапка профиля — одним цветом с панелью сверху, без тени, как в Telegram.
+        actionBar.setBackgroundColor(Theme.getColor(Theme.key_avatar_backgroundActionBarBlue))
+        actionBar.setItemsColor(Theme.getColor(Theme.key_profile_title), false)
+        actionBar.setItemsBackgroundColor(Theme.getColor(Theme.key_avatar_actionBarSelectorBlue), false)
+        actionBar.setTitleColor(Theme.getColor(Theme.key_profile_title))
+        actionBar.setCastShadows(false)
         listView.layoutManager = LinearLayoutManager(context)
         listView.adapter = adapter
         listView.setOnItemLongClickListener(RecyclerListView.OnItemLongClickListener { _, position ->
@@ -121,7 +127,7 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
         val context = parentActivity ?: return
         val input = EditText(context)
         input.setText(chat?.title ?: "")
-        input.textSize = 18f
+        input.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 18f)
         input.setTextColor(Theme.getColor(Theme.key_dialogTextBlack))
         val wrap = FrameLayout(context)
         wrap.setPadding(AndroidUtilities.dp(24f), 0, AndroidUtilities.dp(24f), 0)
@@ -193,57 +199,72 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
         if (!::listView.isInitialized) return
         rows.clear()
         val context = parentActivity
+        fun copy(value: String, what: String) {
+            AndroidUtilities.addToClipboard(value)
+            if (context != null) Toast.makeText(context, "$what скопирован", Toast.LENGTH_SHORT).show()
+        }
         if (userId != 0L) {
             val person = MaxContacts.get(userId)
             val name = person?.name ?: "Пользователь $userId"
-            rows.add(Row.Header(userId, name, person?.avatarUrl, MaxText.presence(userId)))
-            val phone = person?.phoneText.orEmpty()
-            if (phone.isNotEmpty()) {
-                rows.add(Row.Info(phone, "Телефон") {
-                    AndroidUtilities.addToClipboard(phone)
-                    if (context != null) Toast.makeText(context, "Номер скопирован", Toast.LENGTH_SHORT).show()
-                })
-            }
-            rows.add(Row.Info(userId.toString(), "ID в MAX") {
-                AndroidUtilities.addToClipboard(userId.toString())
-                if (context != null) Toast.makeText(context, "ID скопирован", Toast.LENGTH_SHORT).show()
-            })
+            val actions = ArrayList<HeaderAction>()
             if (userId != MaxStore.accountId) {
-                rows.add(Row.Info("Написать сообщение", null, accent = true) {
+                actions.add(HeaderAction(org.telegram.messenger.R.drawable.filled_profile_message_24, "Сообщение") {
                     val target = MaxClient.chatForContact(userId)
                     presentFragment(MaxChatFragment(target.id, userId), chatId != 0L)
                 })
             }
+            val phone = person?.phoneText.orEmpty()
+            if (phone.isNotEmpty()) actions.add(HeaderAction(org.telegram.messenger.R.drawable.filled_profile_call_24, "Номер") { copy(phone, "Номер") })
+            rows.add(Row.Header(userId, name, person?.avatarUrl, MaxText.presence(userId), actions))
+            // Как в Telegram: телефон с подписью «Мобильный», ниже идентификатор.
+            if (phone.isNotEmpty()) rows.add(Row.Info(phone, "Мобильный") { copy(phone, "Номер") })
+            rows.add(Row.Info(userId.toString(), "ID в MAX") { copy(userId.toString(), "ID") })
+            rows.add(Row.Shadow)
         } else {
             val current = chat
             val title = current?.title ?: "Чат"
             val subtitle = current?.let { if (members.isNotEmpty()) MaxText.members(members.size) else MaxText.chatSubtitle(it) } ?: ""
-            rows.add(Row.Header(current?.avatarKey ?: chatId, title, current?.avatarUrl, subtitle))
+            val actions = ArrayList<HeaderAction>()
             if (current != null && current.isGroup) {
-                rows.add(Row.Info("Добавить участников", null, accent = true) { addMembers() })
-                rows.add(Row.Info("Изменить название", null, accent = true) { rename() })
-                rows.add(Row.Info("Покинуть группу", null, red = true) { leave() })
+                actions.add(HeaderAction(org.telegram.messenger.R.drawable.filled_profile_member_24, "Добавить") { addMembers() })
+                actions.add(HeaderAction(org.telegram.messenger.R.drawable.filled_profile_edit_24, "Название") { rename() })
+                actions.add(HeaderAction(org.telegram.messenger.R.drawable.leave, "Выйти") { leave() })
             }
-            if (members.isNotEmpty()) {
-                rows.add(Row.Section("Участники"))
+            rows.add(Row.Header(current?.avatarKey ?: chatId, title, current?.avatarUrl, subtitle, actions))
+            rows.add(Row.Info(chatId.toString(), "ID чата") { copy(chatId.toString(), "ID") })
+            rows.add(Row.Shadow)
+            if (current != null && current.isGroup || members.isNotEmpty()) {
+                rows.add(Row.Section(if (members.isNotEmpty()) MaxText.members(members.size) else "Участники"))
+                if (current != null && current.isGroup) {
+                    rows.add(Row.Action(org.telegram.messenger.R.drawable.msg_contact_add, "Добавить участников") { addMembers() })
+                }
                 members.forEach { rows.add(Row.Member(it)) }
+                rows.add(Row.Shadow)
+            }
+            if (current != null && current.isGroup) {
+                rows.add(Row.Action(org.telegram.messenger.R.drawable.msg_leave, "Покинуть группу", red = true) { leave() })
+                rows.add(Row.Shadow)
             }
         }
         adapter.notifyDataSetChanged()
     }
 
+    private class HeaderAction(val icon: Int, val title: String, val onClick: () -> Unit)
+
     private sealed class Row {
-        class Header(val key: Long, val name: String, val avatar: String?, val status: String) : Row()
-        class Info(val value: String, val label: String?, val accent: Boolean = false, val red: Boolean = false, val onClick: (() -> Unit)? = null) : Row()
+        class Header(val key: Long, val name: String, val avatar: String?, val status: String, val actions: List<HeaderAction>) : Row()
+        class Info(val value: String, val label: String?, val onClick: (() -> Unit)? = null) : Row()
+        class Action(val icon: Int, val title: String, val red: Boolean = false, val onClick: () -> Unit) : Row()
         class Section(val title: String) : Row()
         class Member(val contact: MaxContact) : Row()
+        object Shadow : Row()
     }
 
     private inner class Adapter : RecyclerListView.SelectionAdapter() {
 
         override fun isEnabled(holder: RecyclerView.ViewHolder): Boolean {
             val row = rows.getOrNull(holder.adapterPosition)
-            return row is Row.Info || row is Row.Member
+            return row is Row.Info || row is Row.Member || row is Row.Action
         }
 
         override fun getItemViewType(position: Int): Int = when (rows[position]) {
@@ -251,98 +272,108 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
             is Row.Info -> 1
             is Row.Section -> 2
             is Row.Member -> 3
+            is Row.Action -> 4
+            Row.Shadow -> 5
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+            val context = parent.context
+            val white = Theme.getColor(Theme.key_windowBackgroundWhite)
             val view: View = when (viewType) {
-                0 -> HeaderCell(parent.context)
-                3 -> MaxContactCell(parent.context)
-                else -> TextRowCell(parent.context)
+                0 -> HeaderCell(context)
+                1 -> org.telegram.ui.Cells.TextDetailCell(context).also { it.setBackgroundColor(white) }
+                2 -> org.telegram.ui.Cells.HeaderCell(context).also { it.setBackgroundColor(white) }
+                3 -> MaxContactCell(context).also { it.setBackgroundColor(white) }
+                4 -> org.telegram.ui.Cells.TextCell(context).also { it.setBackgroundColor(white) }
+                else -> org.telegram.ui.Cells.ShadowSectionCell(context)
             }
             view.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             return RecyclerListView.Holder(view)
         }
 
         override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+            val next = rows.getOrNull(position + 1)
             when (val row = rows[position]) {
                 is Row.Header -> (holder.itemView as HeaderCell).bind(row)
-                is Row.Info -> (holder.itemView as TextRowCell).bind(row.value, row.label, row.accent, row.red)
-                is Row.Section -> (holder.itemView as TextRowCell).bindSection(row.title)
+                is Row.Info -> (holder.itemView as org.telegram.ui.Cells.TextDetailCell)
+                    .setTextAndValue(row.value, row.label ?: "", next is Row.Info)
+                is Row.Section -> (holder.itemView as org.telegram.ui.Cells.HeaderCell).setText(row.title)
+                is Row.Action -> {
+                    val cell = holder.itemView as org.telegram.ui.Cells.TextCell
+                    cell.setTextAndIcon(row.title, row.icon, next is Row.Member || next is Row.Action)
+                    if (row.red) cell.setColors(Theme.key_text_RedRegular, Theme.key_text_RedRegular)
+                    else cell.setColors(Theme.key_windowBackgroundWhiteBlueIcon, Theme.key_windowBackgroundWhiteBlueButton)
+                }
                 is Row.Member -> {
                     val cell = holder.itemView as MaxContactCell
                     cell.resetColors()
+                    cell.needDivider = next is Row.Member
                     cell.bind(row.contact)
                 }
+                Row.Shadow -> {}
             }
         }
 
         override fun getItemCount(): Int = rows.size
     }
 
-    /** Шапка профиля: большая аватарка, имя, статус. */
+    /**
+     * Шапка профиля как в Telegram 13: цветной фон шапки, крупная аватарка, белые имя и
+     * статус, ниже плитки действий (полупрозрачные, белые иконки ProfileActionsView).
+     */
     private class HeaderCell(context: Context) : LinearLayout(context) {
         private val avatar = BackupImageView(context)
         private val name = TextView(context)
         private val status = TextView(context)
+        private val buttons = LinearLayout(context)
 
         init {
             orientation = VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, AndroidUtilities.dp(20f), 0, AndroidUtilities.dp(16f))
+            setBackgroundColor(Theme.getColor(Theme.key_avatar_backgroundActionBarBlue))
+            setPadding(AndroidUtilities.dp(12f), AndroidUtilities.dp(4f), AndroidUtilities.dp(12f), AndroidUtilities.dp(12f))
             avatar.setRoundRadius(AndroidUtilities.dp(45f))
             addView(avatar, LayoutHelper.createLinear(90, 90))
-            name.textSize = 20f
+            name.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 20f)
             name.typeface = AndroidUtilities.bold()
             name.gravity = Gravity.CENTER
             name.maxLines = 2
             name.ellipsize = TextUtils.TruncateAt.END
-            name.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+            name.setTextColor(Theme.getColor(Theme.key_profile_title))
             addView(name, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 24f, 12f, 24f, 0f))
-            status.textSize = 14f
+            status.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
             status.gravity = Gravity.CENTER
-            status.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
-            addView(status, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 24f, 4f, 24f, 0f))
+            status.setTextColor(Theme.getColor(Theme.key_avatar_subtitleInProfileBlue))
+            addView(status, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 24f, 2f, 24f, 0f))
+            buttons.orientation = HORIZONTAL
+            addView(buttons, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 58, 0f, 16f, 0f, 0f))
         }
 
         fun bind(row: Row.Header) {
-            name.text = row.name
+            name.text = MaxBubbles.emojify(row.name, name)
             status.text = row.status
             MaxImages.bindAvatar(avatar, row.key, row.name, row.avatar, 90)
-        }
-    }
-
-    /** Строка «значение + подпись» или заголовок раздела. */
-    private class TextRowCell(context: Context) : LinearLayout(context) {
-        private val value = TextView(context)
-        private val label = TextView(context)
-
-        init {
-            orientation = VERTICAL
-            setPadding(AndroidUtilities.dp(21f), AndroidUtilities.dp(10f), AndroidUtilities.dp(21f), AndroidUtilities.dp(10f))
-            value.textSize = 16f
-            addView(value, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
-            label.textSize = 13f
-            label.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
-            addView(label, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 0f))
-        }
-
-        fun bind(text: String, hint: String?, accent: Boolean, red: Boolean) {
-            value.text = text
-            value.typeface = null
-            value.setTextColor(Theme.getColor(when {
-                red -> Theme.key_text_RedRegular
-                accent -> Theme.key_windowBackgroundWhiteBlueText2
-                else -> Theme.key_windowBackgroundWhiteBlackText
-            }))
-            label.text = hint ?: ""
-            label.visibility = if (hint == null) GONE else VISIBLE
-        }
-
-        fun bindSection(title: String) {
-            value.text = title
-            value.typeface = AndroidUtilities.bold()
-            value.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader))
-            label.visibility = GONE
+            buttons.removeAllViews()
+            buttons.visibility = if (row.actions.isEmpty()) GONE else VISIBLE
+            row.actions.forEachIndexed { i, action ->
+                val tile = LinearLayout(context)
+                tile.orientation = VERTICAL
+                tile.gravity = Gravity.CENTER
+                tile.background = Theme.createSimpleSelectorRoundRectDrawable(AndroidUtilities.dp(12f), 0x28000000, 0x40000000)
+                val icon = android.widget.ImageView(context)
+                icon.setImageResource(action.icon)
+                icon.colorFilter = android.graphics.PorterDuffColorFilter(0xffffffff.toInt(), android.graphics.PorterDuff.Mode.SRC_IN)
+                tile.addView(icon, LayoutHelper.createLinear(24, 24))
+                val label = TextView(context)
+                label.text = action.title
+                label.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 12f)
+                label.typeface = AndroidUtilities.bold()
+                label.setTextColor(0xffffffff.toInt())
+                label.isSingleLine = true
+                tile.addView(label, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 4f, 0f, 0f))
+                tile.setOnClickListener { action.onClick() }
+                buttons.addView(tile, LayoutHelper.createLinear(0, LayoutHelper.MATCH_PARENT, 1f, if (i == 0) 0 else 8, 0, 0, 0))
+            }
         }
     }
 }

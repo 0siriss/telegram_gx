@@ -45,7 +45,8 @@ class MaxDialogsFragment(
     private lateinit var chatsList: RecyclerListView
     private lateinit var contactsList: RecyclerListView
     private lateinit var empty: TextView
-    private lateinit var storiesBar: MaxStoriesBar
+    private var searchItem: ActionBarMenuItem? = null
+    private var storiesStack: LinearLayout? = null
     private lateinit var searchField: FragmentSearchField
     private lateinit var filterTabs: FilterTabsView
 
@@ -53,13 +54,18 @@ class MaxDialogsFragment(
     private val contactsAdapter = ContactsAdapter()
 
     private var tab = TAB_CHATS
+
+    /** Открытая папка (индекс в MaxClient.folders) или -1 — «Все чаты». */
+    private var folderIndex = -1
+    private var shownFolders: List<String> = emptyList()
     private var query = ""
     private var chatsLoaded = false
 
     override fun createView(context: Context): View {
         if (!inTab) actionBar.setBackButtonImage(org.telegram.messenger.R.drawable.ic_ab_back)
         actionBar.setAllowOverlayTitle(true)
-        actionBar.setTitle(if (pick != null) "Переслать…" else "MAX")
+        // В режиме выбора чата — обычный заголовок; на вкладке — своя шапка как у Telegram.
+        actionBar.setTitle(if (pick != null) "Переслать…" else "")
         // Шапка как у вкладок Telegram 13: цвет фона списка, тёмный заголовок, без тени.
         actionBar.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite))
         actionBar.setTitleColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
@@ -73,41 +79,50 @@ class MaxDialogsFragment(
                     MENU_RELOAD -> reload()
                     MENU_FIND_PHONE -> askPhone()
                     MENU_LOGOUT -> confirmLogout()
+                    MENU_SEARCH -> toggleSearch()
+                    MENU_ADD_STORY -> addStory()
                 }
             }
         })
         val menu = actionBar.createMenu()
+        // Как в шапке Telegram: значок поиска и «⋮».
+        searchItem = menu.addItem(MENU_SEARCH, org.telegram.messenger.R.drawable.outline_header_search)
         val more = menu.addItem(MENU_MORE, org.telegram.messenger.R.drawable.ic_ab_other)
+        if (pick == null) more.addSubItem(MENU_ADD_STORY, org.telegram.messenger.R.drawable.msg_camera, "Добавить историю")
         more.addSubItem(MENU_FIND_PHONE, org.telegram.messenger.R.drawable.msg_search, "Найти по номеру")
         more.addSubItem(MENU_RELOAD, org.telegram.messenger.R.drawable.msg_retry, "Обновить")
         more.addSubItem(MENU_LOGOUT, org.telegram.messenger.R.drawable.msg_leave, "Выйти из MAX")
         moreItem = more
+        if (pick == null) {
+            val headerParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ActionBar.getCurrentActionBarHeight(), Gravity.TOP or Gravity.START)
+            headerParams.topMargin = if (actionBar.getOccupyStatusBar()) AndroidUtilities.statusBarHeight else 0
+            headerParams.leftMargin = AndroidUtilities.dp(if (inTab) 14f else 64f)
+            headerParams.rightMargin = AndroidUtilities.dp(104f)
+            actionBar.addView(createTitleRow(context), headerParams)
+        }
 
         val column = LinearLayout(context)
         column.orientation = LinearLayout.VERTICAL
         val root = column
 
         // Шапка списка, как у вкладок Telegram 13: истории, поле поиска, переключатель.
-        storiesBar = MaxStoriesBar(context, { preview -> presentFragment(MaxStoryViewerFragment(preview)) }, { addStory() })
-        if (pick != null) storiesBar.visibility = View.GONE
-        root.addView(storiesBar, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 98))
 
         searchField = FragmentSearchField(context, null)
         searchField.setupBlurredBackground(MaxGlass.topPanel(searchField, 20f))
         searchField.setHintText("Поиск", false)
+        searchField.editText.hint = "Поиск"
+        // Поле поиска — по значку в шапке, как в Telegram.
+        searchField.visibility = View.GONE
         searchField.editText.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(e: android.text.Editable?) {
                 query = e?.toString()?.trim() ?: ""
-                searchField.setCloseButtonVisible(query.isNotEmpty())
                 updateUi()
             }
         })
-        searchField.setCloseButtonOnClickListener {
-            searchField.editText.setText("")
-            AndroidUtilities.hideKeyboard(searchField.editText)
-        }
+        searchField.setCloseButtonOnClickListener { toggleSearch() }
+        searchField.setCloseButtonVisible(true)
         searchField.setPadding(AndroidUtilities.dp(4f), AndroidUtilities.dp(4f), AndroidUtilities.dp(4f), AndroidUtilities.dp(4f))
         root.addView(searchField, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 52, 6f, 0f, 6f, 0f))
 
@@ -120,15 +135,19 @@ class MaxDialogsFragment(
             override fun onSamePageSelected() {
                 (if (tab == TAB_CHATS) chatsList else contactsList).smoothScrollToPosition(0)
             }
-            override fun getTabCounter(tabId: Int): Int = if (tabId == TAB_CHATS) MaxClient.chats.sumOf { it.unread } else 0
+            override fun getTabCounter(tabId: Int): Int = when {
+                tabId == TAB_CHATS -> MaxClient.chats.sumOf { it.unread }
+                tabId >= TAB_FOLDER -> MaxClient.folders.getOrNull(tabId - TAB_FOLDER)
+                    ?.let { f -> MaxClient.chats.filter { f.matches(it) }.sumOf { it.unread } } ?: 0
+                else -> 0
+            }
             override fun didSelectTab(tabView: FilterTabsView.TabView, selected: Boolean): Boolean = false
             override fun isTabMenuVisible(): Boolean = false
             override fun onDeletePressed(id: Int) {}
             override fun onPageReorder(fromId: Int, toId: Int) {}
             override fun canPerformActions(): Boolean = true
         })
-        filterTabs.addTab(TAB_CHATS, TAB_CHATS, "Чаты", true, true, false)
-        filterTabs.addTab(TAB_CONTACTS, TAB_CONTACTS, "Контакты", true, false, false)
+        fillTabs()
         // Первая вкладка выбирается сама при добавлении. selectFirstTab() здесь звать нельзя:
         // он сразу дёргает делегат, а списков ещё нет — так падала v2.4.14.
         filterTabs.finishAddingTabs(false)
@@ -167,7 +186,7 @@ class MaxDialogsFragment(
         content.addView(contactsList, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
 
         empty = TextView(context)
-        empty.textSize = 15f
+        empty.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
         empty.gravity = Gravity.CENTER
         empty.setPadding(AndroidUtilities.dp(32f), 0, AndroidUtilities.dp(32f), 0)
         empty.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
@@ -228,7 +247,7 @@ class MaxDialogsFragment(
 
         val title = TextView(context)
         title.text = "MAX в Telegram"
-        title.textSize = 20f
+        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 20f)
         title.typeface = AndroidUtilities.bold()
         title.gravity = Gravity.CENTER
         title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
@@ -238,7 +257,7 @@ class MaxDialogsFragment(
         text.text = "Переписывайтесь в MAX прямо отсюда: чаты, контакты, фото и голосовые. " +
             "Это отдельный аккаунт, Telegram он не затрагивает.\n\n" +
             "Вход неофициальный, поэтому аккаунт MAX могут заблокировать."
-        text.textSize = 15f
+        text.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
         text.gravity = Gravity.CENTER
         text.setLineSpacing(AndroidUtilities.dp(2f).toFloat(), 1f)
         text.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
@@ -246,7 +265,7 @@ class MaxDialogsFragment(
 
         val button = TextView(context)
         button.text = "Войти в MAX"
-        button.textSize = 15f
+        button.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
         button.typeface = AndroidUtilities.bold()
         button.gravity = Gravity.CENTER
         button.setTextColor(Theme.getColor(Theme.key_featuredStickers_buttonText))
@@ -262,6 +281,7 @@ class MaxDialogsFragment(
         loginStub?.visibility = if (loggedIn) View.GONE else View.VISIBLE
         fab?.visibility = if (loggedIn && pick == null) View.VISIBLE else View.GONE
         moreItem?.visibility = if (loggedIn && pick == null) View.VISIBLE else View.GONE
+        searchItem?.visibility = if (loggedIn) View.VISIBLE else View.GONE
         if (loggedIn && !started) {
             started = true
             chatsLoaded = false
@@ -306,7 +326,7 @@ class MaxDialogsFragment(
         val context = parentActivity ?: return
         val input = EditText(context)
         input.hint = "Название группы"
-        input.textSize = 18f
+        input.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 18f)
         input.setTextColor(Theme.getColor(Theme.key_dialogTextBlack))
         input.setHintTextColor(Theme.getColor(Theme.key_dialogTextHint))
         val wrap = FrameLayout(context)
@@ -326,16 +346,53 @@ class MaxDialogsFragment(
         AndroidUtilities.runOnUIThread({ input.requestFocus(); AndroidUtilities.showKeyboard(input) }, 200)
     }
 
+    /**
+     * Вкладки как папки Telegram: «Все чаты», папки MAX с сервера (как у Komet), затем
+     * «Контакты». id: 0 — все, 1 — контакты, 10+i — папка i.
+     */
+    private fun fillTabs() {
+        filterTabs.addTab(TAB_CHATS, TAB_CHATS, "Все чаты", true, true, false)
+        MaxClient.folders.forEachIndexed { i, folder ->
+            val title = if (folder.emoji != null) "${folder.emoji} ${folder.title}" else folder.title
+            filterTabs.addTab(TAB_FOLDER + i, TAB_FOLDER + i, title, true, false, false)
+        }
+        filterTabs.addTab(TAB_CONTACTS, TAB_CONTACTS, "Контакты", true, false, false)
+        shownFolders = MaxClient.folders.map { it.id }
+    }
+
+    /** Папки пришли или поменялись — пересобираем вкладки, сохраняя выбранную. */
+    private fun refreshTabs() {
+        if (!::filterTabs.isInitialized || pick != null) return
+        if (MaxClient.folders.map { it.id } == shownFolders) return
+        val current = filterTabs.getCurrentTabId()
+        filterTabs.removeTabs()
+        fillTabs()
+        filterTabs.finishAddingTabs(false)
+        if (current >= 0 && !filterTabs.selectTabWithStableId(current)) {
+            filterTabs.selectTabWithStableId(TAB_CHATS)
+            selectTab(TAB_CHATS)
+        }
+        filterTabs.invalidate()
+    }
+
+    private fun tabPosition(id: Int): Int = when {
+        id == TAB_CHATS -> 0
+        id >= TAB_FOLDER -> 1 + (id - TAB_FOLDER)
+        else -> 1 + MaxClient.folders.size
+    }
+
     private fun selectTab(which: Int) {
         if (!::chatsList.isInitialized || !::contactsList.isInitialized) return
-        tab = which
         // Переключение из кода (карандаш → «Контакты»): двигаем и полоску переключателя.
         // scrollToTab сам вызовет делегат, тот вернётся сюда уже с совпавшей вкладкой.
-        if (::filterTabs.isInitialized && filterTabs.getCurrentTabId() != which && which < filterTabs.getTabsCount()) {
-            filterTabs.scrollToTab(filterTabs.getTab(which), which)
+        val position = tabPosition(which)
+        if (::filterTabs.isInitialized && filterTabs.getCurrentTabId() != which && position < filterTabs.getTabsCount()) {
+            filterTabs.scrollToTab(filterTabs.getTab(position), position)
             return
         }
-        storiesBar.visibility = if (which == TAB_CHATS && pick == null) View.VISIBLE else View.GONE
+        folderIndex = if (which >= TAB_FOLDER) which - TAB_FOLDER else -1
+        tab = if (which == TAB_CONTACTS) TAB_CONTACTS else TAB_CHATS
+        val which = tab
         chatsList.visibility = if (which == TAB_CHATS) View.VISIBLE else View.GONE
         contactsList.visibility = if (which == TAB_CONTACTS) View.VISIBLE else View.GONE
         if (which == TAB_CONTACTS && MaxClient.contacts.isEmpty()) {
@@ -392,13 +449,73 @@ class MaxDialogsFragment(
 
     override fun onChatsChanged() {
         AndroidUtilities.runOnUIThread {
+            refreshTabs()
             updateUi()
             if (::filterTabs.isInitialized) filterTabs.notifyTabCounterChanged(TAB_CHATS)
         }
     }
 
     override fun onStoriesChanged() {
-        AndroidUtilities.runOnUIThread { if (::storiesBar.isInitialized) storiesBar.update() }
+        AndroidUtilities.runOnUIThread { updateStoriesStack() }
+    }
+
+    /** Шапка вкладки: кружки историй внахлёст и заголовок, как «Telegram» на главном экране. */
+    private fun createTitleRow(context: Context): View {
+        val row = LinearLayout(context)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        val stack = LinearLayout(context)
+        stack.orientation = LinearLayout.HORIZONTAL
+        stack.setOnClickListener { openStories() }
+        row.addView(stack, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, 40, Gravity.CENTER_VERTICAL, 0, 0, 10, 0))
+        storiesStack = stack
+        val title = TextView(context)
+        title.text = "MAX"
+        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 20f)
+        title.typeface = AndroidUtilities.bold()
+        title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+        row.addView(title, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL))
+        updateStoriesStack()
+        return row
+    }
+
+    /** До трёх колец внахлёст: непросмотренные первыми, как в шапке Telegram. */
+    private fun updateStoriesStack() {
+        val stack = storiesStack ?: return
+        val context = stack.context
+        stack.removeAllViews()
+        val shown = MaxStoriesStore.previews.sortedBy { !it.hasUnread }.take(3)
+        stack.visibility = if (shown.isEmpty()) View.GONE else View.VISIBLE
+        shown.forEachIndexed { i, preview ->
+            val frame = FrameLayout(context)
+            val ring = MaxStoriesBar.Ring(context)
+            ring.mode = if (preview.hasUnread) MaxStoriesBar.Ring.UNREAD else MaxStoriesBar.Ring.READ
+            frame.addView(ring, LayoutHelper.createFrame(40, 40f))
+            val avatar = org.telegram.ui.Components.BackupImageView(context)
+            avatar.setRoundRadius(AndroidUtilities.dp(16f))
+            MaxImages.bindAvatar(avatar, preview.owner.id, preview.title, preview.avatarUrl, 32)
+            frame.addView(avatar, LayoutHelper.createFrame(32, 32f, Gravity.CENTER, 0f, 0f, 0f, 0f))
+            stack.addView(frame, LayoutHelper.createLinear(40, 40, Gravity.CENTER_VERTICAL, if (i == 0) 0 else -14, 0, 0, 0))
+            frame.translationZ = (3 - i).toFloat()
+        }
+    }
+
+    private fun openStories() {
+        val first = MaxStoriesStore.previews.firstOrNull { it.hasUnread } ?: MaxStoriesStore.previews.firstOrNull() ?: return
+        presentFragment(MaxStoryViewerFragment(first))
+    }
+
+    private fun toggleSearch() {
+        if (!::searchField.isInitialized) return
+        if (searchField.visibility == View.VISIBLE) {
+            searchField.editText.setText("")
+            AndroidUtilities.hideKeyboard(searchField.editText)
+            searchField.visibility = View.GONE
+        } else {
+            searchField.visibility = View.VISIBLE
+            searchField.editText.requestFocus()
+            AndroidUtilities.showKeyboard(searchField.editText)
+        }
     }
 
     /** Своя история: фото из галереи, как «Добавить историю» у Komet. */
@@ -475,7 +592,10 @@ class MaxDialogsFragment(
     private fun updateUi() {
         if (!::empty.isInitialized) return
         val q = query.lowercase()
-        chatsAdapter.items = MaxClient.chats.filter { q.isEmpty() || it.title.lowercase().contains(q) }
+        val folder = MaxClient.folders.getOrNull(folderIndex)
+        chatsAdapter.items = MaxClient.chats.filter {
+            (folder == null || folder.matches(it)) && (q.isEmpty() || it.title.lowercase().contains(q))
+        }
         contactsAdapter.items = MaxClient.contacts.filter {
             q.isEmpty() || it.name.lowercase().contains(q) || it.phoneText.contains(q)
         }
@@ -507,7 +627,7 @@ class MaxDialogsFragment(
         val input = EditText(context)
         input.inputType = InputType.TYPE_CLASS_PHONE
         input.hint = "+7 999 000 00 00"
-        input.textSize = 18f
+        input.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 18f)
         input.setTextColor(Theme.getColor(Theme.key_dialogTextBlack))
         input.setHintTextColor(Theme.getColor(Theme.key_dialogTextHint))
         val wrap = FrameLayout(context)
@@ -610,8 +730,11 @@ class MaxDialogsFragment(
     companion object {
         private const val TAB_CHATS = 0
         private const val TAB_CONTACTS = 1
+        private const val TAB_FOLDER = 10
 
         private const val REQ_STORY = 7201
+        private const val MENU_SEARCH = 6
+        private const val MENU_ADD_STORY = 7
         private const val MENU_MORE = 2
         private const val MENU_RELOAD = 3
         private const val MENU_LOGOUT = 4

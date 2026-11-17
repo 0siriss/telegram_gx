@@ -85,14 +85,14 @@ class MaxStoriesBar(context: Context, private val onOpen: (MaxStoryPreview) -> U
             avatar.setRoundRadius(AndroidUtilities.dp(27f))
             frame.addView(avatar, LayoutHelper.createFrame(54, 54f, Gravity.CENTER, 0f, 0f, 0f, 0f))
             plus.text = "+"
-            plus.textSize = 15f
+            plus.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
             plus.typeface = AndroidUtilities.bold()
             plus.gravity = Gravity.CENTER
             plus.setTextColor(0xffffffff.toInt())
             plus.background = Theme.createCircleDrawable(AndroidUtilities.dp(20f), Theme.getColor(Theme.key_chats_actionBackground))
             frame.addView(plus, LayoutHelper.createFrame(20, 20f, Gravity.BOTTOM or Gravity.END, 0f, 0f, 2f, 2f))
             addView(frame, LayoutHelper.createLinear(64, 64))
-            name.textSize = 12f
+            name.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 12f)
             name.isSingleLine = true
             name.ellipsize = TextUtils.TruncateAt.END
             name.gravity = Gravity.CENTER

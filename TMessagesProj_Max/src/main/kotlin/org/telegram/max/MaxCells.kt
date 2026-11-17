@@ -36,46 +36,51 @@ class MaxChatCell(context: Context) : FrameLayout(context) {
 
     init {
         setWillNotDraw(false)
-        avatar.setRoundRadius(AndroidUtilities.dp(27f))
-        addView(avatar, LayoutHelper.createFrame(54, 54f, Gravity.START or Gravity.CENTER_VERTICAL, 10f, 0f, 0f, 0f))
+        // Размеры — как в DialogCell Telegram: аватарка 56dp, текст с 78dp, превью в две строки.
+        avatar.setRoundRadius(AndroidUtilities.dp(28f))
+        addView(avatar, LayoutHelper.createFrame(56, 56f, Gravity.START or Gravity.TOP, 10f, 8f, 0f, 0f))
 
-        title.textSize = 16f
+        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 16f)
         title.typeface = AndroidUtilities.bold()
         title.setTextColor(Theme.getColor(Theme.key_chats_name))
         title.isSingleLine = true
         title.ellipsize = TextUtils.TruncateAt.END
-        addView(title, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.START, 76f, 11f, 70f, 0f))
+        title.includeFontPadding = false
+        addView(title, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.START, 78f, 11f, 74f, 0f))
 
-        time.textSize = 13f
+        time.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
         time.setTextColor(Theme.getColor(Theme.key_chats_date))
-        addView(time, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.END, 0f, 13f, 14f, 0f))
+        time.includeFontPadding = false
+        addView(time, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.END, 0f, 13f, 15f, 0f))
 
         // Галочки списка диалогов Telegram: list_check и list_halfcheck в цветах темы.
         check.setImageResource(org.telegram.messenger.R.drawable.list_check)
         half.setImageResource(org.telegram.messenger.R.drawable.list_halfcheck)
-        addView(check, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.END, 0f, 14f, 0f, 0f))
-        addView(half, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.END, 0f, 14f, 0f, 0f))
+        addView(check, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.END, 0f, 12f, 0f, 0f))
+        addView(half, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.END, 0f, 12f, 0f, 0f))
 
-        preview.textSize = 15f
-        preview.setTextColor(Theme.getColor(Theme.key_chats_message))
-        preview.isSingleLine = true
+        preview.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
+        preview.setTextColor(Theme.getColor(Theme.key_chats_message_threeLines))
+        preview.maxLines = 2
         preview.ellipsize = TextUtils.TruncateAt.END
-        addView(preview, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.START, 76f, 38f, 52f, 0f))
+        preview.includeFontPadding = false
+        preview.setLineSpacing(AndroidUtilities.dp(1f).toFloat(), 1f)
+        addView(preview, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.START, 78f, 34f, 50f, 0f))
 
-        counter.textSize = 13f
+        counter.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
         counter.typeface = AndroidUtilities.bold()
         counter.gravity = Gravity.CENTER
         counter.minWidth = AndroidUtilities.dp(23f)
         counter.setPadding(AndroidUtilities.dp(7f), 0, AndroidUtilities.dp(7f), 0)
         counter.setTextColor(Theme.getColor(Theme.key_chats_unreadCounterText))
         counter.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(11.5f), Theme.getColor(Theme.key_chats_unreadCounter))
-        addView(counter, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, 23f, Gravity.TOP or Gravity.END, 0f, 38f, 12f, 0f))
+        addView(counter, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, 23f, Gravity.TOP or Gravity.END, 0f, 40f, 14f, 0f))
     }
 
     fun bind(chat: MaxChat) {
         val name = chat.title
         title.text = name
-        MaxImages.bindAvatar(avatar, chat.avatarKey, name, chat.avatarUrl, 54)
+        MaxImages.bindAvatar(avatar, chat.avatarKey, name, chat.avatarUrl, 56)
         val last = chat.lastMessage
         time.text = if (chat.sortTime > 0) LocaleController.stringForMessageListDate(chat.sortTime / 1000) else ""
         val mine = last != null && last.isOutgoing && !chat.isSaved
@@ -87,13 +92,13 @@ class MaxChatCell(context: Context) : FrameLayout(context) {
         half.colorFilter = android.graphics.PorterDuffColorFilter(checkColor, android.graphics.PorterDuff.Mode.SRC_IN)
         // Галочки стоят слева от времени: сдвигаем их на ширину подписи.
         time.measure(MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED), MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED))
-        val timeRight = AndroidUtilities.dp(14f) + time.measuredWidth + AndroidUtilities.dp(3f)
+        val timeRight = AndroidUtilities.dp(15f) + time.measuredWidth + AndroidUtilities.dp(3f)
         (check.layoutParams as LayoutParams).rightMargin = timeRight + AndroidUtilities.dp(if (read) 4f else 0f)
         (half.layoutParams as LayoutParams).rightMargin = timeRight
         check.requestLayout()
         half.requestLayout()
         val typingUser = MaxClient.typingIn(chat.id)
-        preview.setTextColor(Theme.getColor(if (typingUser != null) Theme.key_chats_actionMessage else Theme.key_chats_message))
+        preview.setTextColor(Theme.getColor(if (typingUser != null) Theme.key_chats_actionMessage else Theme.key_chats_message_threeLines))
         if (typingUser != null) {
             preview.text = MaxText.chatSubtitle(chat)
         } else preview.text = MaxBubbles.emojify(when {
@@ -116,11 +121,11 @@ class MaxChatCell(context: Context) : FrameLayout(context) {
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(AndroidUtilities.dp(72f), MeasureSpec.EXACTLY))
+        super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(AndroidUtilities.dp(72f) + 1, MeasureSpec.EXACTLY))
     }
 
     override fun onDraw(canvas: Canvas) {
-        if (needDivider) drawDivider(canvas, measuredWidth, measuredHeight, 76f)
+        if (needDivider) drawDivider(canvas, measuredWidth, measuredHeight, 78f)
     }
 }
 
@@ -137,13 +142,13 @@ class MaxContactCell(context: Context) : FrameLayout(context) {
         avatar.setRoundRadius(AndroidUtilities.dp(23f))
         addView(avatar, LayoutHelper.createFrame(46, 46f, Gravity.START or Gravity.CENTER_VERTICAL, 14f, 0f, 0f, 0f))
 
-        name.textSize = 16f
+        name.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 16f)
         name.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
         name.isSingleLine = true
         name.ellipsize = TextUtils.TruncateAt.END
         addView(name, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.START, 72f, 10f, 16f, 0f))
 
-        subtitle.textSize = 14f
+        subtitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
         subtitle.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
         subtitle.isSingleLine = true
         addView(subtitle, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.START, 72f, 33f, 16f, 0f))

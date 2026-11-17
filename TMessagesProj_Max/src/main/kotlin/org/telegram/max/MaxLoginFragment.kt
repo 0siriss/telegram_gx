@@ -66,20 +66,20 @@ class MaxLoginFragment(private val fromTab: Boolean = false) : BaseFragment() {
 
         // Подключение: внешний IP со страной и то, кем нас видит сам MAX. Нажатие — проверить заново.
         connection = TextView(context)
-        connection.textSize = 14f
+        connection.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
         connection.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
         connection.text = "Проверяем подключение…"
         connection.setOnClickListener { checkIp() }
         column.addView(connection, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 0f, 0f, 20f))
 
         hint = TextView(context)
-        hint.textSize = 15f
+        hint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
         hint.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
         hint.text = PHONE_HINT
         column.addView(hint, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
 
         input = EditText(context)
-        input.textSize = 18f
+        input.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 18f)
         input.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
         input.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText))
         input.hint = "+7 999 000 00 00"
@@ -88,7 +88,7 @@ class MaxLoginFragment(private val fromTab: Boolean = false) : BaseFragment() {
         column.addView(input, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 16f, 0f, 0f))
 
         lastNameInput = EditText(context)
-        lastNameInput.textSize = 18f
+        lastNameInput.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 18f)
         lastNameInput.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
         lastNameInput.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText))
         lastNameInput.hint = "Фамилия (необязательно)"
@@ -98,7 +98,7 @@ class MaxLoginFragment(private val fromTab: Boolean = false) : BaseFragment() {
         column.addView(lastNameInput, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 12f, 0f, 0f))
 
         button = TextView(context)
-        button.textSize = 15f
+        button.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
         button.typeface = AndroidUtilities.bold()
         button.setTextColor(Theme.getColor(Theme.key_featuredStickers_buttonText))
         button.gravity = Gravity.CENTER
@@ -113,14 +113,14 @@ class MaxLoginFragment(private val fromTab: Boolean = false) : BaseFragment() {
         column.addView(button, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 24f, 0f, 0f))
 
         status = TextView(context)
-        status.textSize = 14f
+        status.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
         status.setTextColor(Theme.getColor(Theme.key_text_RedRegular))
         column.addView(status, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 16f, 0f, 0f))
 
         // Ответ сервера как есть. Пока раздел обкатывается, это единственный способ
         // понять, почему код не дошёл: лог приложения с телефона не достать.
         diag = TextView(context)
-        diag.textSize = 11f
+        diag.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 11f)
         diag.setTextIsSelectable(true)
         diag.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
         diag.setOnLongClickListener {

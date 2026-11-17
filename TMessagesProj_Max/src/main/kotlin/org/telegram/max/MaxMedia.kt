@@ -36,7 +36,7 @@ object MaxMedia {
 
         val save = TextView(activity)
         save.text = "Сохранить"
-        save.textSize = 16f
+        save.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 16f)
         save.setTextColor(Color.WHITE)
         save.setPadding(AndroidUtilities.dp(16f), AndroidUtilities.dp(12f), AndroidUtilities.dp(16f), AndroidUtilities.dp(12f))
         save.setOnClickListener { download(activity, url, "max_" + System.currentTimeMillis() + ".jpg", Environment.DIRECTORY_PICTURES) }

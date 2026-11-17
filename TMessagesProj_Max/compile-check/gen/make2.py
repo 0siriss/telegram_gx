@@ -60,7 +60,7 @@ write("org.telegram.ui.ActionBar","BaseFragment",
     protected ActionBar actionBar;
     protected boolean isPaused = true;
     protected View createView(Context context) { return null; }
-""" + M("org/telegram/ui/ActionBar/BaseFragment.java", ["onFragmentCreate","onFragmentDestroy","onResume","onPause","isPaused","presentFragment","finishFragment","getParentActivity","showDialog","getActionBar","getContext","startActivityForResult","onActivityResultFragment","onRequestPermissionsResultFragment","isLightStatusBar"]) + "\n}", UI)
+""" + M("org/telegram/ui/ActionBar/BaseFragment.java", ["onFragmentCreate","onFragmentDestroy","onResume","onPause","isPaused","presentFragment","finishFragment","getParentActivity","showDialog","getActionBar","getContext","startActivityForResult","onActivityResultFragment","onRequestPermissionsResultFragment","isLightStatusBar","onBackPressed"]) + "\n}", UI)
 
 # --- vendored RecyclerView: только то, что реально используется, с настоящими дженериками ---
 write("androidx.recyclerview.widget","RecyclerView",
@@ -295,4 +295,37 @@ write("org.telegram.ui.Components","FilterTabsView",
     public int getCurrentTabId() { return 0; }
     public void setBlurredBackground(org.telegram.ui.Components.blur3.drawable.BlurredBackgroundDrawable drawable) { }
     public void notifyTabCounterChanged(int id) { }
+    public void removeTabs() { }
+}""", UI)
+
+# Ячейки Telegram для профиля и панель эмодзи — вручную, сверено с Cells/*.java и EmojiView.java.
+write("org.telegram.ui.Cells","TextDetailCell",
+"""public class TextDetailCell extends FrameLayout {
+    public TextDetailCell(Context context) { super(context); }
+    public void setTextAndValue(CharSequence text, CharSequence value, boolean divider) { }
+}""", UI)
+write("org.telegram.ui.Cells","HeaderCell",
+"""public class HeaderCell extends FrameLayout {
+    public HeaderCell(Context context) { super(context); }
+    public void setText(CharSequence text) { }
+}""", UI)
+write("org.telegram.ui.Cells","TextCell",
+"""public class TextCell extends FrameLayout {
+    public TextCell(Context context) { super(context); }
+    public void setTextAndIcon(CharSequence text, int resId, boolean divider) { }
+    public void setColors(int icon, int text) { }
+}""", UI)
+write("org.telegram.ui.Cells","ShadowSectionCell",
+"""public class ShadowSectionCell extends View {
+    public ShadowSectionCell(Context context) { super(context); }
+}""", UI)
+write("org.telegram.tgnet","TLRPC","public class TLRPC {\n    public static class ChatFull {}\n}")
+write("org.telegram.ui.Components","EmojiView",
+"""public class EmojiView extends FrameLayout {
+    public EmojiView(org.telegram.ui.ActionBar.BaseFragment fragment, boolean needAnimatedEmoji, boolean needStickers, boolean needGif, final Context context, boolean needSearch, final org.telegram.tgnet.TLRPC.ChatFull chatFull, ViewGroup parentView, boolean shouldDrawBackground, org.telegram.ui.ActionBar.Theme.ResourcesProvider resourcesProvider, boolean frozenAtStart) { super(context); }
+    public interface EmojiViewDelegate {
+        default boolean onBackspace() { return false; }
+        default void onEmojiSelected(String emoji) { }
+    }
+    public void setDelegate(EmojiViewDelegate emojiViewDelegate) { }
 }""", UI)

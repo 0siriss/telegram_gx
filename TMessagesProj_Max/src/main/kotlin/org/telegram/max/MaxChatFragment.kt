@@ -97,6 +97,58 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     private val headerTicker = Runnable { updateHeader() }
 
     private lateinit var searchItem: ActionBarMenuItem
+    private lateinit var emojiButton: ImageView
+    private lateinit var emojiHolder: FrameLayout
+    private var emojiView: org.telegram.ui.Components.EmojiView? = null
+    private var emojiShown = false
+
+    private fun toggleEmoji() = showEmoji(!emojiShown, openKeyboard = emojiShown)
+
+    /** Панель эмодзи Telegram (EmojiView) вместо клавиатуры и обратно. */
+    private fun showEmoji(show: Boolean, openKeyboard: Boolean) {
+        val context = parentActivity ?: return
+        emojiShown = show
+        if (show) {
+            if (emojiView == null) {
+                val view = org.telegram.ui.Components.EmojiView(null, false, false, false, context, false, null, null, true, null, false)
+                view.setDelegate(object : org.telegram.ui.Components.EmojiView.EmojiViewDelegate {
+                    override fun onBackspace(): Boolean {
+                        input.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_DEL))
+                        return true
+                    }
+
+                    override fun onEmojiSelected(emoji: String) {
+                        var at = input.selectionEnd
+                        if (at < 0) at = 0
+                        val span = org.telegram.messenger.Emoji.replaceEmoji(emoji, input.paint.fontMetricsInt, false)
+                        input.text.insert(at, span)
+                        val end = at + span.length
+                        input.setSelection(end, end)
+                    }
+                })
+                emojiHolder.addView(view, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
+                emojiView = view
+            }
+            AndroidUtilities.hideKeyboard(input)
+            emojiHolder.visibility = View.VISIBLE
+            emojiButton.setImageResource(org.telegram.messenger.R.drawable.input_keyboard)
+        } else {
+            emojiHolder.visibility = View.GONE
+            emojiButton.setImageResource(org.telegram.messenger.R.drawable.input_smile)
+            if (openKeyboard) {
+                input.requestFocus()
+                AndroidUtilities.showKeyboard(input)
+            }
+        }
+    }
+
+    override fun onBackPressed(invoked: Boolean): Boolean {
+        if (emojiShown) {
+            if (invoked) showEmoji(false, openKeyboard = false)
+            return false
+        }
+        return super.onBackPressed(invoked)
+    }
     private var sendGlass: android.graphics.drawable.Drawable? = null
     private lateinit var bottomStack: LinearLayout
 
@@ -205,7 +257,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         listHolder.addView(listView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
 
         emptyView = TextView(context)
-        emptyView.textSize = 14f
+        emptyView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
         emptyView.setTextColor(Theme.getColor(Theme.key_chat_serviceText))
         emptyView.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(14f), Theme.getColor(Theme.key_chat_serviceBackground))
         emptyView.setPadding(AndroidUtilities.dp(14f), AndroidUtilities.dp(8f), AndroidUtilities.dp(14f), AndroidUtilities.dp(8f))
@@ -226,6 +278,9 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         inputPanel = createInput(context)
         bottomStack.addView(inputPanel, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
         bottomStack.addView(createSearchBar(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 46))
+        emojiHolder = FrameLayout(context)
+        emojiHolder.visibility = View.GONE
+        bottomStack.addView(emojiHolder, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 280, 0f, 6f, 0f, 0f))
         bottomStack.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateListInsets() }
         root.addView(bottomStack, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.BOTTOM, 0f, 0f, 0f, 0f))
 
@@ -259,14 +314,14 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         val texts = LinearLayout(context)
         texts.orientation = LinearLayout.VERTICAL
         titleView = TextView(context)
-        titleView.textSize = 16f
+        titleView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 16f)
         titleView.typeface = AndroidUtilities.bold()
         titleView.setTextColor(Theme.getColor(Theme.key_actionBarDefaultTitle))
         titleView.isSingleLine = true
         titleView.ellipsize = TextUtils.TruncateAt.END
         texts.addView(titleView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
         subtitleView = TextView(context)
-        subtitleView.textSize = 13f
+        subtitleView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
         subtitleView.setTextColor(Theme.getColor(Theme.key_actionBarDefaultSubtitle))
         subtitleView.isSingleLine = true
         subtitleView.ellipsize = TextUtils.TruncateAt.END
@@ -312,13 +367,13 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         texts.orientation = LinearLayout.VERTICAL
         val title = TextView(context)
         title.text = "Закреплённое сообщение"
-        title.textSize = 14f
+        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
         title.typeface = AndroidUtilities.bold()
         title.setTextColor(Theme.getColor(Theme.key_chat_topPanelTitle))
         title.isSingleLine = true
         texts.addView(title, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
         pinText = TextView(context)
-        pinText.textSize = 14f
+        pinText.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
         pinText.setTextColor(Theme.getColor(Theme.key_chat_topPanelMessage))
         pinText.isSingleLine = true
         pinText.ellipsize = TextUtils.TruncateAt.END
@@ -432,7 +487,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         searchBar.background = MaxGlass.chatBottom(searchBar, 23f)
         searchBar.visibility = View.GONE
         searchCounter = TextView(context)
-        searchCounter.textSize = 15f
+        searchCounter.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
         searchCounter.typeface = AndroidUtilities.bold()
         searchCounter.setTextColor(Theme.getColor(Theme.key_chat_searchPanelText))
         searchBar.addView(searchCounter, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.CENTER_VERTICAL, 16, 0, 0, 0))
@@ -543,13 +598,13 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         val texts = LinearLayout(context)
         texts.orientation = LinearLayout.VERTICAL
         replyTitle = TextView(context)
-        replyTitle.textSize = 14f
+        replyTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
         replyTitle.typeface = AndroidUtilities.bold()
         replyTitle.setTextColor(Theme.getColor(Theme.key_chat_replyPanelName))
         replyTitle.isSingleLine = true
         texts.addView(replyTitle, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
         replyText = TextView(context)
-        replyText.textSize = 14f
+        replyText.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
         replyText.setTextColor(Theme.getColor(Theme.key_chat_messagePanelText))
         replyText.isSingleLine = true
         replyText.ellipsize = TextUtils.TruncateAt.END
@@ -586,15 +641,15 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         panel.addView(pill, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.BOTTOM, 6, 0, 6, 0))
 
         input = EditText(context)
-        input.textSize = 18f
+        input.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 18f)
         input.setTextColor(Theme.getColor(Theme.key_chat_messagePanelText))
         input.setHintTextColor(Theme.getColor(Theme.key_chat_messagePanelHint))
         input.hint = "Сообщение"
         input.background = null
         input.maxLines = 6
         input.minHeight = AndroidUtilities.dp(46f)
-        input.textSize = 17f
-        input.setPadding(AndroidUtilities.dp(16f), AndroidUtilities.dp(11f), AndroidUtilities.dp(12f), AndroidUtilities.dp(11f))
+        input.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 17f)
+        input.setPadding(AndroidUtilities.dp(10f), AndroidUtilities.dp(11f), AndroidUtilities.dp(12f), AndroidUtilities.dp(11f))
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -603,7 +658,17 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 if (!s.isNullOrBlank() && editing == null) MaxClient.sendTyping(chatId)
             }
         })
-        pill.addView(input, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.CENTER_VERTICAL, 0f, 0f, 0f, 0f))
+        pill.addView(input, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.CENTER_VERTICAL, 34f, 0f, 0f, 0f))
+
+        // Кнопка эмодзи слева в поле, как в Telegram: открывает его же панель EmojiView.
+        emojiButton = ImageView(context)
+        emojiButton.setImageResource(org.telegram.messenger.R.drawable.input_smile)
+        emojiButton.scaleType = ImageView.ScaleType.CENTER
+        emojiButton.colorFilter = android.graphics.PorterDuffColorFilter(Theme.getColor(Theme.key_chat_messagePanelIcons), android.graphics.PorterDuff.Mode.SRC_IN)
+        emojiButton.background = Theme.createSelectorDrawable(Theme.getColor(Theme.key_listSelector), 1)
+        emojiButton.setOnClickListener { toggleEmoji() }
+        pill.addView(emojiButton, LayoutHelper.createFrame(44, 46f, Gravity.START or Gravity.BOTTOM, 2f, 0f, 0f, 0f))
+        input.setOnClickListener { if (emojiShown) showEmoji(false, openKeyboard = true) }
 
         // Полоса записи голосового: занимает место поля ввода, пока идёт запись.
         recordBar = LinearLayout(context)
@@ -611,12 +676,12 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         recordBar.gravity = Gravity.CENTER_VERTICAL
         recordBar.visibility = View.GONE
         recordTime = TextView(context)
-        recordTime.textSize = 16f
+        recordTime.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 16f)
         recordTime.setTextColor(Theme.getColor(Theme.key_chat_messagePanelText))
         recordBar.addView(recordTime, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.CENTER_VERTICAL, 16, 0, 0, 0))
         val cancel = TextView(context)
         cancel.text = "Отмена"
-        cancel.textSize = 15f
+        cancel.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
         cancel.typeface = AndroidUtilities.bold()
         cancel.setTextColor(Theme.getColor(Theme.key_text_RedRegular))
         cancel.setPadding(AndroidUtilities.dp(12f), AndroidUtilities.dp(12f), AndroidUtilities.dp(12f), AndroidUtilities.dp(12f))
@@ -1188,7 +1253,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             row.setPadding(AndroidUtilities.dp(6f), AndroidUtilities.dp(4f), AndroidUtilities.dp(6f), AndroidUtilities.dp(4f))
             for (emoji in MaxReactions.QUICK) {
                 val chip = TextView(context)
-                chip.textSize = 22f
+                chip.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 22f)
                 chip.gravity = Gravity.CENTER
                 chip.text = MaxBubbles.emojify(emoji, chip)
                 val mine = message.reactions?.mine == emoji
@@ -1350,7 +1415,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private val text = TextView(context)
 
         init {
-            text.textSize = 14f
+            text.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
             text.typeface = AndroidUtilities.bold()
             text.setTextColor(Theme.getColor(Theme.key_chat_serviceText))
             text.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(12f), Theme.getColor(Theme.key_chat_serviceBackground))
@@ -1398,12 +1463,12 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         init {
             bubble.orientation = LinearLayout.VERTICAL
 
-            forward.textSize = 13f
+            forward.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
             forward.isSingleLine = true
             forward.ellipsize = TextUtils.TruncateAt.END
             bubble.addView(forward, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 0f, 0f, 2f))
 
-            author.textSize = 14f
+            author.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
             author.typeface = AndroidUtilities.bold()
             author.isSingleLine = true
             author.ellipsize = TextUtils.TruncateAt.END
@@ -1411,11 +1476,11 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
             quote.orientation = LinearLayout.VERTICAL
             quote.setPadding(AndroidUtilities.dp(8f), AndroidUtilities.dp(3f), AndroidUtilities.dp(8f), AndroidUtilities.dp(3f))
-            quoteName.textSize = 13f
+            quoteName.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
             quoteName.typeface = AndroidUtilities.bold()
             quoteName.isSingleLine = true
             quote.addView(quoteName, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
-            quoteText.textSize = 13f
+            quoteText.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
             quoteText.isSingleLine = true
             quoteText.ellipsize = TextUtils.TruncateAt.END
             quote.addView(quoteText, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
@@ -1423,7 +1488,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
             image.setRoundRadius(AndroidUtilities.dp(12f))
             media.addView(image, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
-            mediaBadge.textSize = 13f
+            mediaBadge.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
             mediaBadge.setTextColor(0xffffffff.toInt())
             mediaBadge.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(10f), 0x88000000.toInt())
             mediaBadge.setPadding(AndroidUtilities.dp(8f), AndroidUtilities.dp(3f), AndroidUtilities.dp(8f), AndroidUtilities.dp(3f))
@@ -1433,18 +1498,18 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
             fileRow.orientation = LinearLayout.HORIZONTAL
             fileRow.gravity = Gravity.CENTER_VERTICAL
-            fileIcon.textSize = 18f
+            fileIcon.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 18f)
             fileIcon.gravity = Gravity.CENTER
             fileIcon.setTextColor(0xffffffff.toInt())
             fileRow.addView(fileIcon, LayoutHelper.createLinear(44, 44))
             val fileTexts = LinearLayout(context)
             fileTexts.orientation = LinearLayout.VERTICAL
-            fileName.textSize = 15f
+            fileName.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
             fileName.typeface = AndroidUtilities.bold()
             fileName.maxLines = 2
             fileName.ellipsize = TextUtils.TruncateAt.MIDDLE
             fileTexts.addView(fileName, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
-            fileSize.textSize = 13f
+            fileSize.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
             fileTexts.addView(fileSize, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
             fileRow.addView(fileTexts, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 10f, 0f, 4f, 0f))
             bubble.addView(fileRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 2f))
@@ -1576,14 +1641,14 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             body.maxWidth = maxWidth
             if (bigEmoji > 0) {
                 body.visibility = VISIBLE
-                body.textSize = MaxBubbles.bigEmojiSize(bigEmoji)
+                body.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, MaxBubbles.bigEmojiSize(bigEmoji))
                 body.text = MaxBubbles.emojify(bodyText, body)
                 body.setPadding(0, 0, 0, AndroidUtilities.dp(22f))
             } else if (bodyText.isEmpty()) {
                 body.visibility = GONE
             } else {
                 body.visibility = VISIBLE
-                body.textSize = SharedConfig.fontSize.toFloat()
+                body.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, SharedConfig.fontSize.toFloat())
                 body.setPadding(0, 0, 0, 0)
                 val room = meta.measureWidth() + AndroidUtilities.dp(6f)
                 body.text = MaxBubbles.withTimeRoom(MaxBubbles.emojify(bodyText, body), room)
@@ -1626,7 +1691,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             for ((emoji, count) in r.counters.take(6)) {
                 val mine = r.mine == emoji
                 val chip = TextView(context)
-                chip.textSize = 14f
+                chip.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
                 chip.typeface = AndroidUtilities.bold()
                 chip.gravity = Gravity.CENTER_VERTICAL
                 chip.setPadding(AndroidUtilities.dp(8f), AndroidUtilities.dp(3f), AndroidUtilities.dp(10f), AndroidUtilities.dp(3f))

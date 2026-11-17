@@ -3,7 +3,6 @@ package org.telegram.max
 import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
-import android.net.Uri
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -11,7 +10,10 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.VideoView
+import android.view.Surface
+import android.view.TextureView
+import android.graphics.SurfaceTexture
+import android.media.MediaPlayer
 import org.telegram.messenger.AndroidUtilities
 import org.telegram.ui.ActionBar.BaseFragment
 import org.telegram.ui.Components.BackupImageView
@@ -24,8 +26,12 @@ import org.telegram.ui.Components.LayoutHelper
  */
 class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragment() {
 
-    private lateinit var image: BackupImageView
-    private lateinit var video: VideoView
+    private lateinit var image: ImageView
+    private lateinit var video: TextureView
+    private var player: MediaPlayer? = null
+    private var surface: Surface? = null
+    private var pendingVideo: String? = null
+    private var loadToken = 0
     private lateinit var bars: LinearLayout
     private lateinit var avatar: BackupImageView
     private lateinit var title: TextView
@@ -56,10 +62,27 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
         }
         root.setBackgroundColor(Color.BLACK)
 
-        image = BackupImageView(context)
+        // Обычный ImageView во весь экран и видео на TextureView: SurfaceView видеоплеера
+        // прорезал окно, и поверх видео оставался чёрный квадрат или полосы.
+        image = ImageView(context)
+        image.scaleType = ImageView.ScaleType.FIT_CENTER
         root.addView(image, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat(), Gravity.CENTER, 0f, 0f, 0f, 0f))
-        video = VideoView(context)
+        video = TextureView(context)
         video.visibility = View.GONE
+        video.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+                surface = Surface(texture)
+                pendingVideo?.let { playVideo(it) }
+            }
+            override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {}
+            override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+                releasePlayer()
+                surface?.release()
+                surface = null
+                return true
+            }
+            override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {}
+        }
         root.addView(video, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat(), Gravity.CENTER, 0f, 0f, 0f, 0f))
 
         val shade = View(context)
@@ -81,13 +104,13 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
         val texts = LinearLayout(context)
         texts.orientation = LinearLayout.VERTICAL
         title = TextView(context)
-        title.textSize = 15f
+        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
         title.typeface = AndroidUtilities.bold()
         title.setTextColor(Color.WHITE)
         title.isSingleLine = true
         texts.addView(title)
         time = TextView(context)
-        time.textSize = 13f
+        time.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
         time.setTextColor(0xccffffff.toInt())
         texts.addView(time)
         row.addView(texts, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.CENTER_VERTICAL, 10, 0, 0, 0))
@@ -100,13 +123,11 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
         root.addView(top, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP, 0f, 0f, 0f, 0f))
 
         status = TextView(context)
-        status.textSize = 15f
+        status.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
         status.setTextColor(0xccffffff.toInt())
         status.gravity = Gravity.CENTER
         root.addView(status, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.CENTER, 0f, 0f, 0f, 0f))
 
-        video.setOnCompletionListener { step(1) }
-        video.setOnPreparedListener { startedAt = System.currentTimeMillis() }
 
         fragmentView = root
         loadOwner()
@@ -157,17 +178,21 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
             bars.getChildAt(i).setBackgroundColor(if (i < index) Color.WHITE else 0x55ffffff)
         }
         startedAt = System.currentTimeMillis()
+        releasePlayer()
+        image.setImageDrawable(null)
+        val token = ++loadToken
+        val still = if (story.isVideo) story.thumbnail else story.url
+        if (still != null) {
+            MaxImages.loadFull(still, AndroidUtilities.displaySize.y) { bitmap ->
+                if (token == loadToken && bitmap != null) image.setImageBitmap(bitmap)
+            }
+        }
+        image.visibility = View.VISIBLE
         if (story.isVideo && story.url != null) {
-            image.visibility = View.VISIBLE
-            MaxImages.bindImage(image, story.thumbnail, AndroidUtilities.displaySize.y, Color.BLACK)
             video.visibility = View.VISIBLE
-            video.setVideoURI(Uri.parse(story.url))
-            video.start()
+            if (surface != null) playVideo(story.url) else pendingVideo = story.url
         } else {
-            video.stopPlayback()
             video.visibility = View.GONE
-            image.visibility = View.VISIBLE
-            MaxImages.bindImage(image, story.url, AndroidUtilities.displaySize.y, Color.BLACK)
         }
         MaxClient.markStory(story)
         AndroidUtilities.cancelRunOnUIThread(ticker)
@@ -179,8 +204,10 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
         override fun run() {
             val story = stories.getOrNull(index) ?: return
             if (!paused) {
-                val duration = if (story.isVideo) (if (video.duration > 0) video.duration.toLong() else story.durationMs.coerceAtLeast(1L)) else PHOTO_MS
-                val elapsed = if (story.isVideo) video.currentPosition.toLong() else System.currentTimeMillis() - startedAt
+                val mp = player
+                val playing = story.isVideo && mp != null
+                val duration = if (story.isVideo) (if (playing && safeDuration(mp!!) > 0) safeDuration(mp).toLong() else story.durationMs.coerceAtLeast(1L)) else PHOTO_MS
+                val elapsed = if (story.isVideo) (if (playing) safePosition(mp!!).toLong() else 0L) else System.currentTimeMillis() - startedAt
                 val progress = (elapsed.toFloat() / duration).coerceIn(0f, 1f)
                 bars.getChildAt(index)?.let { bar ->
                     bar.background = progressDrawable(progress)
@@ -196,6 +223,9 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
         }
     }
 
+    private fun safeDuration(mp: MediaPlayer): Int = try { mp.duration } catch (e: Throwable) { 0 }
+    private fun safePosition(mp: MediaPlayer): Int = try { mp.currentPosition } catch (e: Throwable) { 0 }
+
     private fun progressDrawable(progress: Float): android.graphics.drawable.Drawable {
         val done = GradientDrawable()
         done.setColor(Color.WHITE)
@@ -206,10 +236,58 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
         return layers
     }
 
+    private fun playVideo(url: String) {
+        pendingVideo = null
+        val target = surface ?: return
+        releasePlayer()
+        val mp = MediaPlayer()
+        player = mp
+        try {
+            mp.setSurface(target)
+            mp.setDataSource(url)
+            mp.setOnPreparedListener {
+                if (player !== it) return@setOnPreparedListener
+                fitVideo(it.videoWidth, it.videoHeight)
+                startedAt = System.currentTimeMillis()
+                it.start()
+                // Первый кадр уже на экране — превью больше не нужно.
+                image.postDelayed({ if (player === it) image.visibility = View.INVISIBLE }, 150)
+            }
+            mp.setOnCompletionListener { if (player === it) step(1) }
+            mp.setOnErrorListener { _, _, _ -> status.text = "Видео не воспроизводится"; status.visibility = View.VISIBLE; true }
+            mp.prepareAsync()
+        } catch (e: Throwable) {
+            MaxLog.e("видео истории не запустилось", e)
+        }
+    }
+
+    /** Видео по ширине экрана с сохранением пропорций (как FIT_CENTER у картинки). */
+    private fun fitVideo(w: Int, h: Int) {
+        val parent = video.parent as? View ?: return
+        if (w <= 0 || h <= 0 || parent.width <= 0) return
+        val scale = minOf(parent.width.toFloat() / w, parent.height.toFloat() / h)
+        val lp = video.layoutParams
+        lp.width = (w * scale).toInt()
+        lp.height = (h * scale).toInt()
+        video.layoutParams = lp
+    }
+
+    private fun releasePlayer() {
+        val mp = player ?: return
+        player = null
+        try {
+            mp.stop()
+        } catch (ignored: Throwable) {
+        }
+        mp.release()
+    }
+
     private fun pause(value: Boolean) {
         paused = value
-        if (stories.getOrNull(index)?.isVideo == true) {
-            if (value) video.pause() else video.start()
+        val mp = player ?: return
+        try {
+            if (value) mp.pause() else mp.start()
+        } catch (ignored: Throwable) {
         }
     }
 
@@ -235,7 +313,7 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
             return
         }
         preview = next
-        video.stopPlayback()
+        releasePlayer()
         loadOwner()
     }
 
@@ -246,7 +324,7 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
 
     override fun onFragmentDestroy() {
         AndroidUtilities.cancelRunOnUIThread(ticker)
-        if (::video.isInitialized) video.stopPlayback()
+        releasePlayer()
         super.onFragmentDestroy()
     }
 

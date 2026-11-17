@@ -81,6 +81,7 @@ object MaxClient {
     private const val OP_CHAT_MEMBERS_UPDATE = 77
     private const val OP_MSG_REACTION = 178
     private const val OP_STORIES_LIST = 208
+    private const val OP_FOLDERS_GET = 272
     private const val OP_STORIES_GET_BY_OWNER = 210
     private const val OP_STORIES_MARK = 214
     private const val OP_STORIES_SEND = 215
@@ -655,6 +656,7 @@ object MaxClient {
         MaxContacts.clear()
         MaxPresence.clear()
         MaxStoriesStore.clear()
+        folders = emptyList()
         chats = emptyList()
         contacts = emptyList()
         livenessJob?.cancel()
@@ -694,6 +696,7 @@ object MaxClient {
         resolveMissing(chats.map { it.peerId }.filter { it != 0L })
         io { fetchContacts() }
         loadStories()
+        loadFolders()
     }
 
     // ---- люди ----
@@ -1070,6 +1073,26 @@ object MaxClient {
             } catch (e: Throwable) {
                 MaxLog.e("searchMessages failed", e)
                 onResult(null, e)
+            }
+        }
+    }
+
+    // ---- папки ----
+
+    /** Папки чатов, как у Komet: «Личные», «Новые» и т. п. Без входа — пусто. */
+    @Volatile
+    var folders: List<MaxFolder> = emptyList()
+
+    /** Опкод 272 `{folderSync: 0}` → `folders`, `foldersOrder` (Komet syncFromServer). */
+    fun loadFolders() {
+        io {
+            try {
+                val answer = JSONObject(request(OP_FOLDERS_GET, JSONObject().put("folderSync", 0)))
+                folders = MaxFolder.parseList(answer.optJSONArray("folders"), answer.optJSONArray("foldersOrder"))
+                    .filter { !it.isAllChats }
+                chatsChanged()
+            } catch (e: Throwable) {
+                MaxLog.e("loadFolders failed", e)
             }
         }
     }

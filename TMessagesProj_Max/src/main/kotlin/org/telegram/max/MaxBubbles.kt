@@ -116,10 +116,10 @@ object MaxBubbles {
         init {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            edited.textSize = 12f
+            edited.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 12f)
             edited.text = "изм."
             addView(edited, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 0f, 4f, 0f))
-            time.textSize = 12f
+            time.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 12f)
             addView(time, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
             check.setImageResource(org.telegram.messenger.R.drawable.msg_check_s)
             half.setImageResource(org.telegram.messenger.R.drawable.msg_halfcheck_s)
