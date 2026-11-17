@@ -43,6 +43,10 @@ object MaxClient {
     private fun hex(value: String): ByteArray =
         ByteArray(value.length / 2) { value.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 
+    private const val OP_CONTACTS_GET = 8
+    private const val OP_CONTACT_INFO = 32
+    private const val OP_CHAT_INFO = 48
+    private const val OP_CHAT_MARK = 50
     private const val OP_AUTH_REQUEST = 17
     private const val OP_AUTH = 18
     private const val OP_LOGIN = 19
@@ -65,6 +69,15 @@ object MaxClient {
     @Volatile
     var chats: List<MaxChat> = emptyList()
         private set
+
+    /** Адресная книга MAX (опкод 8), по имени. */
+    @Volatile
+    var contacts: List<MaxContact> = emptyList()
+        private set
+
+    /** Открытый сейчас чат: входящие в него не увеличивают счётчик непрочитанных. */
+    @Volatile
+    var openChatId: Long? = null
 
     /**
      * Последние ответы сервера как есть. Нужны на экране входа: когда код не приходит,
@@ -94,6 +107,7 @@ object MaxClient {
 
     interface Listener {
         fun onChatsChanged() {}
+        fun onContactsChanged() {}
         fun onNewMessage(chatId: Long, message: MaxMessage) {}
         fun onStateChanged() {}
     }
@@ -450,12 +464,17 @@ object MaxClient {
         pendingRegisterToken = null
         pendingTrackId = null
         MaxStore.clear()
+        MaxContacts.clear()
         chats = emptyList()
+        contacts = emptyList()
         stop()
         forEachListener { it.onChatsChanged() }
     }
 
-    /** Вход по сохранённому токену: сервер в ответе сразу присылает чаты и контакты. */
+    /**
+     * Вход по сохранённому токену: в ответе сразу чаты, профиль и люди из этих чатов.
+     * Адресную книгу и недостающие имена дозапрашиваем следом, не задерживая список.
+     */
     private fun login(token: String) {
         val payload = JSONObject()
             .put("token", token)
@@ -467,11 +486,111 @@ object MaxClient {
         fingerprint()?.let { payload.put("chatCacheFingerprint", it) }
         val answer = JSONObject(request(OP_LOGIN, payload))
         answer.optString("token", "").takeIf { it.isNotEmpty() }?.let { MaxStore.token = it }
-        val profileId = answer.optJSONObject("profile")?.optLong("id", 0L) ?: 0L
-        if (profileId != 0L) MaxStore.accountId = profileId
+        extractAccountId(answer)?.let { MaxStore.accountId = it }
+        answer.optJSONObject("profile")?.let { profile ->
+            MaxContact.parse(profile.optJSONObject("contact") ?: profile)?.let { MaxContacts.put(it) }
+        }
+        MaxContacts.putAll(MaxContact.parseList(answer.optJSONArray("contacts")))
         chats = MaxChat.parseList(answer.optJSONArray("chats"))
         MaxLog.i("вход выполнен, чатов: " + chats.size)
         forEachListener { it.onChatsChanged() }
+        resolveMissing(chats.map { it.peerId }.filter { it != 0L })
+        ensureScope().launch {
+            try {
+                fetchContacts()
+            } catch (e: Throwable) {
+                MaxLog.e("контакты не загрузились", e)
+            }
+        }
+    }
+
+    /** Адресная книга: опкод 8, как у Komet (ContactsModule.syncFromServer). */
+    private fun fetchContacts() {
+        val answer = JSONObject(request(OP_CONTACTS_GET, JSONObject().put("contactsSync", 0)))
+        val list = MaxContact.parseList(answer.optJSONArray("contacts"))
+        MaxContacts.putAll(list)
+        contacts = list.filter { it.id != MaxStore.accountId }.sortedBy { it.name.lowercase() }
+        forEachListener { it.onContactsChanged() }
+        forEachListener { it.onChatsChanged() }
+    }
+
+    fun loadContacts(onDone: (Throwable?) -> Unit) {
+        ensureScope().launch {
+            try {
+                fetchContacts()
+                onDone(null)
+            } catch (e: Throwable) {
+                MaxLog.e("loadContacts failed", e)
+                onDone(e)
+            }
+        }
+    }
+
+    /**
+     * Дозапрос людей, которых ещё не знаем (собеседники диалогов, авторы в группах):
+     * опкод 32 с contactIds. Без него у диалогов не было бы имён.
+     */
+    fun resolveMissing(ids: Collection<Long>) {
+        val missing = ids.filter { it != 0L && !MaxContacts.has(it) }.distinct()
+        if (missing.isEmpty()) return
+        ensureScope().launch {
+            try {
+                missing.chunked(100).forEach { part ->
+                    val payload = JSONObject().put("contactIds", JSONArray(part))
+                    val answer = JSONObject(request(OP_CONTACT_INFO, payload))
+                    MaxContacts.putAll(MaxContact.parseList(answer.optJSONArray("contacts")))
+                }
+                forEachListener { it.onChatsChanged() }
+                forEachListener { it.onContactsChanged() }
+            } catch (e: Throwable) {
+                MaxLog.e("resolveMissing failed", e)
+            }
+        }
+    }
+
+    /** Чат с человеком: существующий диалог или пустой новый (id = мой XOR его). */
+    fun chatForContact(contactId: Long): MaxChat {
+        val me = MaxStore.accountId
+        return chats.firstOrNull { it.isDialog && (it.peerId == contactId || it.id == (me xor contactId)) }
+            ?: MaxChat.dialogWith(contactId)
+    }
+
+    fun chatById(chatId: Long): MaxChat? = chats.firstOrNull { it.id == chatId }
+
+    /** Отметка прочитанным, как у Komet: опкод 50, READ_MESSAGE, mark — время сообщения. */
+    fun markRead(chatId: Long, message: MaxMessage) {
+        if (message.id == 0L) return
+        chatById(chatId)?.let {
+            if (it.unread != 0) {
+                it.unread = 0
+                forEachListener { l -> l.onChatsChanged() }
+            }
+        }
+        ensureScope().launch {
+            try {
+                val payload = JSONObject()
+                    .put("type", "READ_MESSAGE")
+                    .put("chatId", chatId)
+                    .put("messageId", message.id)
+                    .put("mark", message.time)
+                request(OP_CHAT_MARK, payload)
+            } catch (e: Throwable) {
+                MaxLog.e("markRead failed", e)
+            }
+        }
+    }
+
+    /** Новый чат из пуша: дозапрашиваем его опкодом 48 и ставим наверх. */
+    private fun fetchChat(chatId: Long) {
+        try {
+            val answer = JSONObject(request(OP_CHAT_INFO, JSONObject().put("chatIds", JSONArray(listOf(chatId)))))
+            val fresh = MaxChat.parseList(answer.optJSONArray("chats")).firstOrNull() ?: return
+            chats = (listOf(fresh) + chats.filter { it.id != chatId }).sortedByDescending { it.sortTime }
+            forEachListener { it.onChatsChanged() }
+            resolveMissing(listOf(fresh.peerId))
+        } catch (e: Throwable) {
+            MaxLog.e("fetchChat failed", e)
+        }
     }
 
     /** Перезапрашивает список чатов по уже сохранённому токену. */
@@ -492,17 +611,23 @@ object MaxClient {
         }
     }
 
-    fun loadHistory(chatId: Long, count: Int, onResult: (List<MaxMessage>?, Throwable?) -> Unit) {
+    /**
+     * История: [before] — время самого старого показанного сообщения, null — с конца.
+     * Сервер отдаёт сообщения до этого времени включительно, дубли отсекает экран.
+     */
+    fun loadHistory(chatId: Long, before: Long?, count: Int, onResult: (List<MaxMessage>?, Throwable?) -> Unit) {
         ensureScope().launch {
             try {
                 val payload = JSONObject()
                     .put("chatId", chatId)
-                    .put("from", System.currentTimeMillis() + 86_400_000L)
+                    .put("from", before ?: (System.currentTimeMillis() + 86_400_000L))
                     .put("forward", 0)
                     .put("backward", count)
                     .put("getMessages", true)
                 val answer = JSONObject(request(OP_CHAT_HISTORY, payload))
-                onResult(MaxMessage.parseList(answer.optJSONArray("messages")), null)
+                val list = MaxMessage.parseList(answer.optJSONArray("messages"))
+                resolveMissing(list.map { it.senderId })
+                onResult(list, null)
             } catch (e: Throwable) {
                 MaxLog.e("loadHistory failed", e)
                 onResult(null, e)
@@ -510,23 +635,43 @@ object MaxClient {
         }
     }
 
-    fun sendMessage(chatId: Long, text: String, onResult: (Throwable?) -> Unit) {
+    /**
+     * Отправка текста. [local] — уже показанное на экране сообщение с тем же cid: в ответ
+     * приходит подтверждённое сервером, его и отдаём, чтобы экран заменил локальное.
+     */
+    fun sendMessage(chatId: Long, local: MaxMessage, onResult: (MaxMessage?, Throwable?) -> Unit) {
         ensureScope().launch {
             try {
                 val message = JSONObject()
-                    .put("cid", -System.currentTimeMillis())
-                    .put("text", text)
+                    .put("cid", local.cid)
+                    .put("text", local.text)
+                    .put("elements", JSONArray())
+                    .put("attaches", JSONArray())
                 val payload = JSONObject()
                     .put("chatId", chatId)
                     .put("message", message)
                     .put("notify", true)
-                request(OP_MSG_SEND, payload)
-                onResult(null)
+                val answer = JSONObject(request(OP_MSG_SEND, payload))
+                val sent = MaxMessage.parse(answer.optJSONObject("message"))
+                if (sent != null) onSent(chatId, sent)
+                onResult(sent, null)
             } catch (e: Throwable) {
                 MaxLog.e("sendMessage failed", e)
-                onResult(e)
+                onResult(null, e)
             }
         }
+    }
+
+    /** Своё отправленное сообщение поднимает чат наверх, как входящее. */
+    private fun onSent(chatId: Long, message: MaxMessage) {
+        val existing = chatById(chatId)
+        if (existing == null) {
+            fetchChat(chatId)
+            return
+        }
+        existing.lastMessage = message
+        chats = (listOf(existing) + chats.filter { it.id != chatId })
+        forEachListener { it.onChatsChanged() }
     }
 
     /** Поиск человека по точному номеру телефона. */
@@ -535,7 +680,9 @@ object MaxClient {
             try {
                 val payload = JSONObject().put("phone", normalizePhone(phone))
                 val answer = JSONObject(request(OP_CONTACT_INFO_BY_PHONE, payload))
-                onResult(MaxContact.parse(answer.optJSONObject("contact")), null)
+                val found = MaxContact.parse(answer.optJSONObject("contact"))
+                found?.let { MaxContacts.put(it) }
+                onResult(found, null)
             } catch (e: Throwable) {
                 MaxLog.e("findByPhone failed", e)
                 onResult(null, e)
@@ -560,6 +707,24 @@ object MaxClient {
         }
     }
 
+    /**
+     * Входящее сообщение: обновляет превью и счётчик чата, поднимает его наверх и
+     * раздаёт экранам. Незнакомый чат дозапрашивается, незнакомый автор — тоже.
+     */
+    private fun onIncoming(chatId: Long, message: MaxMessage) {
+        val existing = chatById(chatId)
+        if (existing == null) {
+            ensureScope().launch { fetchChat(chatId) }
+        } else {
+            existing.lastMessage = message
+            if (!message.isOutgoing && openChatId != chatId) existing.unread += 1
+            chats = (listOf(existing) + chats.filter { it.id != chatId })
+            forEachListener { it.onChatsChanged() }
+        }
+        resolveMissing(listOf(message.senderId))
+        forEachListener { it.onNewMessage(chatId, message) }
+    }
+
     private fun startPushLoop() {
         if (pushJob != null) return
         pushJob = ensureScope().launch {
@@ -571,9 +736,7 @@ object MaxClient {
                         val body = JSONObject(push.json)
                         val chatId = body.optLong("chatId", 0L)
                         val message = MaxMessage.parse(body.optJSONObject("message"))
-                        if (chatId != 0L && message != null) {
-                            forEachListener { it.onNewMessage(chatId, message) }
-                        }
+                        if (message != null) onIncoming(chatId, message)
                     } catch (e: Throwable) {
                         MaxLog.e("push parse failed", e)
                     }
@@ -623,109 +786,3 @@ class RegistrationRequired : Exception("нужна регистрация")
 class PasswordRequired(val hint: String?) : Exception("нужен облачный пароль")
 
 class WrongPassword : Exception("неверный пароль")
-
-/** Чат MAX: ровно то, что нужно списку и экрану переписки. */
-class MaxChat(
-    val id: Long,
-    val title: String,
-    val lastMessage: String,
-    val lastTime: Long,
-    val unread: Int,
-) {
-    companion object {
-        fun parse(json: JSONObject?): MaxChat? {
-            if (json == null) return null
-            val id = json.optLong("id", 0L)
-            if (id == 0L) return null
-            val last = json.optJSONObject("lastMessage")
-            return MaxChat(
-                id = id,
-                title = title(json),
-                lastMessage = last?.optString("text", "") ?: "",
-                lastTime = last?.optLong("time", 0L) ?: json.optLong("modified", 0L),
-                unread = json.optInt("newMessages", 0),
-            )
-        }
-
-        fun parseList(array: JSONArray?): List<MaxChat> {
-            if (array == null) return emptyList()
-            val out = ArrayList<MaxChat>(array.length())
-            for (i in 0 until array.length()) {
-                parse(array.optJSONObject(i))?.let { out.add(it) }
-            }
-            out.sortByDescending { it.lastTime }
-            return out
-        }
-
-        /**
-         * У групп заголовок лежит в title, у диалогов один на один его нет — там имя
-         * собеседника приходит в участниках или в контактах.
-         */
-        private fun title(json: JSONObject): String {
-            val direct = json.optString("title", "")
-            if (direct.isNotEmpty()) return direct
-            val names = json.optJSONArray("names")
-            if (names != null && names.length() > 0) {
-                val first = names.optJSONObject(0)
-                val name = first?.optString("name", "") ?: ""
-                if (name.isNotEmpty()) return name
-            }
-            return "Чат " + json.optLong("id", 0L)
-        }
-    }
-}
-
-/** Сообщение MAX. Для первой версии только текст. */
-class MaxMessage(
-    val id: String,
-    val senderId: Long,
-    val text: String,
-    val time: Long,
-) {
-    val isOutgoing: Boolean
-        get() = senderId != 0L && senderId == MaxStore.accountId
-
-    companion object {
-        fun parse(json: JSONObject?): MaxMessage? {
-            if (json == null) return null
-            val text = json.optString("text", "")
-            val id = json.optString("id", "")
-            return MaxMessage(
-                id = if (id.isNotEmpty()) id else json.optLong("cid", 0L).toString(),
-                senderId = json.optLong("sender", 0L),
-                text = text,
-                time = json.optLong("time", 0L),
-            )
-        }
-
-        fun parseList(array: JSONArray?): List<MaxMessage> {
-            if (array == null) return emptyList()
-            val out = ArrayList<MaxMessage>(array.length())
-            for (i in 0 until array.length()) {
-                parse(array.optJSONObject(i))?.let { out.add(it) }
-            }
-            out.sortBy { it.time }
-            return out
-        }
-    }
-}
-
-/** Найденный по номеру человек. */
-class MaxContact(val id: Long, val name: String, val phone: String) {
-    companion object {
-        fun parse(json: JSONObject?): MaxContact? {
-            if (json == null) return null
-            val id = json.optLong("id", 0L)
-            if (id == 0L) return null
-            var name = ""
-            val names = json.optJSONArray("names")
-            if (names != null && names.length() > 0) {
-                val entry = names.optJSONObject(0)
-                val first = entry?.optString("firstName", "") ?: ""
-                val last = entry?.optString("lastName", "") ?: ""
-                name = (first + " " + last).trim()
-            }
-            return MaxContact(id, name, json.optString("phone", ""))
-        }
-    }
-}
