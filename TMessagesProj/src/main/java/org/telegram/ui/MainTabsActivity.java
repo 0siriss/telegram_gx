@@ -39,6 +39,7 @@ import androidx.core.view.WindowInsetsCompat;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.BuildConfig;
+import org.telegram.messenger.MaxSection;
 import org.telegram.messenger.ContactsController;
 import org.telegram.messenger.DialogObject;
 import org.telegram.messenger.Emoji;
@@ -94,15 +95,21 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
     private static final int POSITION_CHATS = 0;
     private static final int POSITION_CONTACTS = 1;
     private static final int POSITION_CALLS_OR_SETTINGS = 2;
-    private static final int POSITION_PROFILE = 3;
+    // GramBas: с вкладкой MAX профиль сдвигается на одну позицию вправо.
+    private final boolean hasMaxTab = MaxSection.isTabEnabled();
+    private final int POSITION_MAX = 3;
+    private final int POSITION_PROFILE = hasMaxTab ? 4 : 3;
 
     private static final int INDEX_CHATS = 0;
     private static final int INDEX_CONTACTS = 1;
     private static final int INDEX_SETTINGS = 2;
     private static final int INDEX_CALLS = 3;
     private static final int INDEX_PROFILE = 4;
+    private static final int INDEX_MAX = 5;
 
-    private static int indexToPosition(int index) {
+    private int indexToPosition(int index) {
+        if (index == INDEX_MAX) return POSITION_MAX;
+        if (index == INDEX_PROFILE) return POSITION_PROFILE;
         return index > 2 ? index - 1 : index;
     }
 
@@ -309,14 +316,18 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
         tabsView = new MainTabsLayout(context, resourceProvider);
         tabsView.setClipChildren(false);
         tabsView.setPadding(dp(DialogsActivity.MAIN_TABS_MARGIN + 4), dp(DialogsActivity.MAIN_TABS_MARGIN + 4), dp(DialogsActivity.MAIN_TABS_MARGIN + 4), dp(DialogsActivity.MAIN_TABS_MARGIN + 4));
-        tabsView.setMaxWidth(dp(328 + DialogsActivity.MAIN_TABS_MARGIN * 2));
+        tabsView.setMaxWidth(dp((hasMaxTab ? 410 : 328) + DialogsActivity.MAIN_TABS_MARGIN * 2));
 
-        tabs = new GlassTabView[5];
+        tabs = new GlassTabView[hasMaxTab ? 6 : 5];
         tabs[INDEX_CHATS] = GlassTabView.createMainTab(context, resourceProvider, GlassTabView.TabAnimation.CHATS, R.string.MainTabsChats);
         tabs[INDEX_CONTACTS] = GlassTabView.createMainTab(context, resourceProvider, GlassTabView.TabAnimation.CONTACTS, R.string.MainTabsContacts);
         tabs[INDEX_SETTINGS] = GlassTabView.createMainTab(context, resourceProvider, GlassTabView.TabAnimation.SETTINGS, R.string.Settings);
         tabs[INDEX_CALLS] = GlassTabView.createMainTab(context, resourceProvider, GlassTabView.TabAnimation.CALLS, R.string.MainTabsCalls);
         tabs[INDEX_PROFILE] = GlassTabView.createAvatar(context, resourceProvider, currentAccount, R.string.MainTabsProfile);
+        if (hasMaxTab) {
+            tabs[INDEX_MAX] = GlassTabView.createMainTab(context, resourceProvider, GlassTabView.TabAnimation.MAX, R.string.GramBasMaxTab);
+            tabsView.addTabToIgnoreClick(tabs[INDEX_MAX]);
+        }
         tabs[INDEX_CHATS].setOnLongClickListener(this::openFoldersSelector);
         tabs[INDEX_CONTACTS].setOnLongClickListener(this::openContactsSelector);
         tabs[INDEX_CALLS].setOnLongClickListener(this::openCallsSelector);
@@ -327,7 +338,10 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
         tabsView.addTabToIgnoreClick(tabs[INDEX_PROFILE]);
         tabsView.addTabToIgnoreClick(tabs[INDEX_CALLS]);
 
-        for (int index = 0; index < tabs.length; index++) {
+        final int[] tabsOrder = hasMaxTab
+            ? new int[] {INDEX_CHATS, INDEX_CONTACTS, INDEX_SETTINGS, INDEX_CALLS, INDEX_MAX, INDEX_PROFILE}
+            : new int[] {INDEX_CHATS, INDEX_CONTACTS, INDEX_SETTINGS, INDEX_CALLS, INDEX_PROFILE};
+        for (int index : tabsOrder) {
             final GlassTabView view = tabs[index];
 
             final int position = indexToPosition(index);
@@ -409,6 +423,17 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
         } else {
             tabs[INDEX_CHATS].setCounter(null, false, animated);
         }
+        checkMaxUnreadCount(animated);
+    }
+
+    private final Runnable maxUnreadListener = () -> checkMaxUnreadCount(true);
+
+    private void checkMaxUnreadCount(boolean animated) {
+        if (!hasMaxTab || tabs == null || tabs[INDEX_MAX] == null) {
+            return;
+        }
+        final int count = MaxSection.getUnreadCount();
+        tabs[INDEX_MAX].setCounter(count > 0 ? LocaleController.formatNumber(count, ',') : null, false, animated);
     }
 
     public boolean openContactsSelector(View anchor) {
@@ -768,7 +793,7 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
 
     @Override
     protected int getFragmentsCount() {
-        return TABS_COUNT;
+        return hasMaxTab ? TABS_COUNT + 1 : TABS_COUNT;
     }
 
     @Override
@@ -829,6 +854,8 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
             dialogsActivity = new DialogsActivity(args);
             dialogsActivity.setMainTabsActivityController(new MainTabsActivityControllerImpl());
             return dialogsActivity;
+        } else if (hasMaxTab && position == POSITION_MAX) {
+            return MaxSection.createTabFragment();
         } else if (position == POSITION_PROFILE) {
             Bundle args = new Bundle();
             args.putLong("user_id", UserConfig.getInstance(currentAccount).getClientUserId());
@@ -1027,6 +1054,9 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
             .addGlobal(NotificationCenter.appUpdateAvailable)
             .addGlobal(NotificationCenter.appUpdateLoading)
             .addGlobal(NotificationCenter.needSetDayNightTheme);
+        if (hasMaxTab) {
+            MaxSection.addUnreadListener(maxUnreadListener);
+        }
 
         return super.onFragmentCreate();
     }
@@ -1035,6 +1065,7 @@ public class MainTabsActivity extends ViewPagerActivity implements NotificationC
     public void onFragmentDestroy() {
         Bulletin.removeDelegate(this);
         Bulletin.removeDelegate(contentView);
+        MaxSection.removeUnreadListener(maxUnreadListener);
 
         if (observersGroup != null) {
             observersGroup.removeAllObservers();

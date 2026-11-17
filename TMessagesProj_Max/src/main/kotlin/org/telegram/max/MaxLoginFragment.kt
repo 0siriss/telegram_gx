@@ -11,6 +11,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import org.telegram.messenger.AndroidUtilities
+import org.telegram.messenger.MaxSection
 import org.telegram.ui.ActionBar.ActionBar
 import org.telegram.ui.ActionBar.BaseFragment
 import org.telegram.ui.ActionBar.Theme
@@ -20,7 +21,7 @@ import org.telegram.ui.Components.LayoutHelper
  * Вход в MAX: номер телефона, затем код из сообщения. Если аккаунта на номере ещё нет,
  * сервер вместо входа отдаёт токен регистрации, и экран просит имя — это третий шаг.
  */
-class MaxLoginFragment : BaseFragment() {
+class MaxLoginFragment(private val fromTab: Boolean = false) : BaseFragment() {
 
     private lateinit var input: EditText
     private lateinit var lastNameInput: EditText
@@ -39,6 +40,12 @@ class MaxLoginFragment : BaseFragment() {
 
     /** Шаг: номер -> код -> пароль (если стоит) или имя (если номер новый). */
     private var step = STEP_PHONE
+
+    /** Из вкладки главного экрана — просто возвращаемся: вкладка сама покажет чаты. */
+    private fun onLoggedIn() {
+        MaxSection.notifyUnreadChanged()
+        if (fromTab) finishFragment() else presentFragment(MaxDialogsFragment(), true)
+    }
 
     override fun createView(context: Context): View {
         actionBar.setBackButtonImage(org.telegram.messenger.R.drawable.ic_ab_back)
@@ -211,7 +218,7 @@ class MaxLoginFragment : BaseFragment() {
                         fail(error)
                         return@runOnUIThread
                     }
-                    presentFragment(MaxDialogsFragment(), true)
+                    onLoggedIn()
                     }
                 }
             }
@@ -228,7 +235,7 @@ class MaxLoginFragment : BaseFragment() {
                         fail(error)
                         return@runOnUIThread
                     }
-                    presentFragment(MaxDialogsFragment(), true)
+                    onLoggedIn()
                 }
             }
 
@@ -239,7 +246,7 @@ class MaxLoginFragment : BaseFragment() {
                         fail(error)
                         return@runOnUIThread
                     }
-                    presentFragment(MaxDialogsFragment(), true)
+                    onLoggedIn()
                 }
             }
         }

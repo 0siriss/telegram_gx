@@ -17,14 +17,24 @@ import org.telegram.ui.ActionBar.ActionBarMenuItem
 import org.telegram.ui.ActionBar.AlertDialog
 import org.telegram.ui.ActionBar.BaseFragment
 import org.telegram.ui.ActionBar.Theme
+import org.telegram.ui.Components.FragmentFloatingButton
 import org.telegram.ui.Components.LayoutHelper
+import org.telegram.ui.DialogsActivity
 import org.telegram.ui.Components.RecyclerListView
 
 /**
  * Главный экран MAX: вкладки «Чаты» и «Контакты», поиск по обеим. Свои модели и свои
  * списки — телеграмных диалогов не касается.
  */
-class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
+class MaxDialogsFragment(private val inTab: Boolean = false) : BaseFragment(), MaxClient.Listener {
+
+    private var root: FrameLayout? = null
+    private var mainContent: View? = null
+    private var loginStub: View? = null
+    private var fab: FragmentFloatingButton? = null
+    private var searchItem: ActionBarMenuItem? = null
+    private var moreItem: ActionBarMenuItem? = null
+    private var started = false
 
     private lateinit var chatsList: RecyclerListView
     private lateinit var contactsList: RecyclerListView
@@ -41,7 +51,7 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
     private var chatsLoaded = false
 
     override fun createView(context: Context): View {
-        actionBar.setBackButtonImage(org.telegram.messenger.R.drawable.ic_ab_back)
+        if (!inTab) actionBar.setBackButtonImage(org.telegram.messenger.R.drawable.ic_ab_back)
         actionBar.setAllowOverlayTitle(true)
         actionBar.setTitle("MAX")
         actionBar.setActionBarMenuOnItemClick(object : ActionBar.ActionBarMenuOnItemClick() {
@@ -69,14 +79,16 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
                 }
             })
         search.setSearchFieldHint("Поиск")
+        searchItem = search
         val more = menu.addItem(MENU_MORE, org.telegram.messenger.R.drawable.ic_ab_other)
         more.addSubItem(MENU_FIND_PHONE, org.telegram.messenger.R.drawable.msg_search, "Найти по номеру")
         more.addSubItem(MENU_RELOAD, org.telegram.messenger.R.drawable.msg_retry, "Обновить")
         more.addSubItem(MENU_LOGOUT, org.telegram.messenger.R.drawable.msg_leave, "Выйти из MAX")
+        moreItem = more
 
-        val root = LinearLayout(context)
-        root.orientation = LinearLayout.VERTICAL
-        root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite))
+        val column = LinearLayout(context)
+        column.orientation = LinearLayout.VERTICAL
+        val root = column
 
         root.addView(createTabs(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 44))
 
@@ -114,10 +126,107 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
         empty.text = "Загружаем чаты…"
         content.addView(empty, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.CENTER, 0f, 0f, 0f, 0f))
 
-        fragmentView = root
+        // Вёрстку собираем сами: шапка поверх, под ней колонка, внизу кнопка «новое сообщение».
+        // Во вкладке главного экрана ActionBarLayout шапку не раскладывает, поэтому так в обоих режимах.
+        actionBar.setAddToContainer(false)
+        val frame = FrameLayout(context)
+        frame.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite))
+        val top = ActionBar.getCurrentActionBarHeight() + (if (actionBar.getOccupyStatusBar()) AndroidUtilities.statusBarHeight else 0)
+        val columnParams = LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat())
+        columnParams.topMargin = top
+        frame.addView(column, columnParams)
+        mainContent = column
+
+        val bottom = if (inTab) AndroidUtilities.dp(DialogsActivity.MAIN_TABS_HEIGHT_WITH_MARGINS.toFloat()) + AndroidUtilities.navigationBarHeight else 0
+        for (list in arrayOf(chatsList, contactsList)) {
+            list.clipToPadding = false
+            list.setPadding(0, 0, 0, bottom + AndroidUtilities.dp(80f))
+        }
+
+        val button = FragmentFloatingButton(context, null)
+        button.setImageResource(org.telegram.messenger.R.drawable.filled_fab_compose_32)
+        button.contentDescription = "Новое сообщение"
+        button.setOnClickListener { newMessage() }
+        val fabParams = FragmentFloatingButton.createDefaultLayoutParams()
+        fabParams.bottomMargin += bottom
+        frame.addView(button, fabParams)
+        fab = button
+
+        loginStub = createLoginStub(context, top, bottom)
+        frame.addView(loginStub, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
+
+        frame.addView(actionBar, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat()))
+        this.root = frame
+
+        fragmentView = frame
         selectTab(TAB_CHATS)
-        loadChats()
-        return root
+        checkLoginState()
+        return frame
+    }
+
+    /** Вход не выполнен: вкладка приглашает войти, сам раздел ничего не грузит. */
+    private fun createLoginStub(context: Context, top: Int, bottom: Int): View {
+        val stub = LinearLayout(context)
+        stub.orientation = LinearLayout.VERTICAL
+        stub.gravity = Gravity.CENTER
+        stub.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite))
+        stub.setPadding(AndroidUtilities.dp(32f), top, AndroidUtilities.dp(32f), bottom)
+        stub.isClickable = true
+
+        val icon = android.widget.ImageView(context)
+        icon.setImageResource(org.telegram.messenger.R.drawable.grambas_tab_max)
+        icon.setColorFilter(Theme.getColor(Theme.key_featuredStickers_addButton))
+        stub.addView(icon, LayoutHelper.createLinear(96, 96, Gravity.CENTER_HORIZONTAL, 0, 0, 0, 20))
+
+        val title = TextView(context)
+        title.text = "MAX в Telegram"
+        title.textSize = 20f
+        title.typeface = AndroidUtilities.bold()
+        title.gravity = Gravity.CENTER
+        title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+        stub.addView(title, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL, 0, 0, 0, 10))
+
+        val text = TextView(context)
+        text.text = "Переписывайтесь в MAX прямо отсюда: чаты, контакты, фото и голосовые. " +
+            "Это отдельный аккаунт, Telegram он не затрагивает.\n\n" +
+            "Вход неофициальный, поэтому аккаунт MAX могут заблокировать."
+        text.textSize = 15f
+        text.gravity = Gravity.CENTER
+        text.setLineSpacing(AndroidUtilities.dp(2f).toFloat(), 1f)
+        text.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
+        stub.addView(text, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL, 0, 0, 0, 28))
+
+        val button = TextView(context)
+        button.text = "Войти в MAX"
+        button.textSize = 15f
+        button.typeface = AndroidUtilities.bold()
+        button.gravity = Gravity.CENTER
+        button.setTextColor(Theme.getColor(Theme.key_featuredStickers_buttonText))
+        button.background = Theme.AdaptiveRipple.filledRectByKey(Theme.key_featuredStickers_addButton, 8f)
+        button.setOnClickListener { presentFragment(MaxLoginFragment(fromTab = inTab)) }
+        stub.addView(button, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48, Gravity.CENTER_HORIZONTAL))
+        return stub
+    }
+
+    /** Показывает либо приглашение войти, либо чаты; при первом показе чатов поднимает связь. */
+    private fun checkLoginState() {
+        val loggedIn = MaxClient.isLoggedIn
+        loginStub?.visibility = if (loggedIn) View.GONE else View.VISIBLE
+        fab?.visibility = if (loggedIn) View.VISIBLE else View.GONE
+        searchItem?.visibility = if (loggedIn) View.VISIBLE else View.GONE
+        moreItem?.visibility = if (loggedIn) View.VISIBLE else View.GONE
+        if (loggedIn && !started) {
+            started = true
+            chatsLoaded = false
+            loadChats()
+        } else if (!loggedIn) {
+            started = false
+        }
+    }
+
+    /** Как карандаш в Telegram: открывает контакты, откуда пишут новому человеку. */
+    private fun newMessage() {
+        selectTab(TAB_CONTACTS)
     }
 
     private fun createTabs(context: Context): View {
@@ -191,6 +300,7 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
 
     override fun onResume() {
         super.onResume()
+        checkLoginState()
         updateUi()
     }
 
@@ -325,7 +435,7 @@ class MaxDialogsFragment : BaseFragment(), MaxClient.Listener {
                 .setMessage("Аккаунт MAX будет отключён на этом устройстве. Telegram это не затронет.")
                 .setPositiveButton("Выйти") { _, _ ->
                     MaxClient.logout()
-                    finishFragment()
+                    if (inTab) checkLoginState() else finishFragment()
                 }
                 .setNegativeButton("Отмена", null)
                 .create()

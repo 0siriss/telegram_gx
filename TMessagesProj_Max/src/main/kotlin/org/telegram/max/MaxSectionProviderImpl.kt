@@ -11,5 +11,15 @@ class MaxSectionProviderImpl : MaxSection.Provider {
     override fun createFragment(): BaseFragment =
         if (MaxClient.isLoggedIn) MaxDialogsFragment() else MaxLoginFragment()
 
-    override fun getUnreadCount(): Int = MaxClient.chats.sumOf { it.unread }
+    override fun createTabFragment(): BaseFragment = MaxDialogsFragment(inTab = true)
+
+    override fun createChatFragment(chatId: Long): BaseFragment? {
+        if (!MaxClient.isLoggedIn) return null
+        // После перезапуска процесса уведомление ещё может висеть: поднимаем кеш и связь.
+        MaxClient.restoreFromCache()
+        MaxClient.start { }
+        return MaxChatFragment(chatId)
+    }
+
+    override fun getUnreadCount(): Int = if (MaxClient.isLoggedIn) MaxClient.chats.sumOf { it.unread } else 0
 }

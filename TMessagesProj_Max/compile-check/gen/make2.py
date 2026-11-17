@@ -14,7 +14,7 @@ write("org.telegram.ui.ActionBar","ActionBar",
         public void onItemClick(int id) {}
         public boolean canOpenMenu() { return true; }
     }
-""" + M("org/telegram/ui/ActionBar/ActionBar.java", ["getCurrentActionBarHeight","getOccupyStatusBar","setOccupyStatusBar","setTitle","setSubtitle","setBackButtonImage","setAllowOverlayTitle","setActionBarMenuOnItemClick","createMenu","setTitleColor","setSubtitleColor"]) + "\n}", UI)
+""" + M("org/telegram/ui/ActionBar/ActionBar.java", ["getCurrentActionBarHeight","getOccupyStatusBar","setOccupyStatusBar","setTitle","setSubtitle","setBackButtonImage","setAllowOverlayTitle","setActionBarMenuOnItemClick","createMenu","setTitleColor","setSubtitleColor","setAddToContainer"]) + "\n}", UI)
 
 write("org.telegram.ui.ActionBar","ActionBarMenu",
 "public class ActionBarMenu extends LinearLayout {\n    public ActionBarMenu(Context context) { super(context); }\n" + M("org/telegram/ui/ActionBar/ActionBarMenu.java", ["addItem"]) + "\n}", UI)
@@ -192,3 +192,20 @@ write("org.telegram.messenger","MediaController",
 """public class MediaController {
 """ + M("org/telegram/messenger/MediaController.java", ["getInstance"]) + "\n}", UI)
 
+
+# Сверено с DialogsActivity.java: MAIN_TABS_HEIGHT 56 + MAIN_TABS_MARGIN 8 * 2.
+write("org.telegram.ui","DialogsActivity","""public class DialogsActivity {
+    public static final int MAIN_TABS_HEIGHT = 56;
+    public static final int MAIN_TABS_MARGIN = 8;
+    public static final int MAIN_TABS_HEIGHT_WITH_MARGINS = MAIN_TABS_HEIGHT + MAIN_TABS_MARGIN * 2;
+}""", UI)
+
+# Вручную, сверено с FragmentFloatingButton.java: конструкторы с @NonNull и setImageResource с @DrawableRes фильтр не пропускает.
+write("org.telegram.ui.Components","FragmentFloatingButton",
+"""public class FragmentFloatingButton extends FrameLayout {
+    public FragmentFloatingButton(Context context, Theme.ResourcesProvider resourcesProvider) { super(context); }
+    public FragmentFloatingButton(Context context, Theme.ResourcesProvider resourcesProvider, boolean isSubButton) { super(context); }
+    public void setImageResource(int drawable) { }
+    public void setButtonVisible(boolean visible, boolean animated) { }
+    public static FrameLayout.LayoutParams createDefaultLayoutParams() { return null; }
+}""", UI + ["org.telegram.ui.ActionBar.Theme"])

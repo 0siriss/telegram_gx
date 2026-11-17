@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import org.telegram.messenger.ApplicationLoader
+import org.telegram.messenger.MaxSection
 
 /**
  * Уведомления о входящих MAX. Настоящий push для нашей сборки невозможен (сервер шлёт
@@ -29,8 +30,10 @@ object MaxNotifier {
             val author = MaxContacts.get(message.senderId)?.name
             val text = if (chat != null && !chat.isDialog && author != null) "$author: ${message.displayText}" else message.displayText
 
-            val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
-                ?: Intent().setPackage(context.packageName)
+            // Нажатие открывает сразу эту переписку: LaunchActivity читает id чата из extra.
+            val launch = Intent("org.telegram.max.OPEN_CHAT")
+                .setClassName(context, "org.telegram.ui.LaunchActivity")
+                .putExtra(MaxSection.EXTRA_CHAT_ID, chatId)
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
             val pending = PendingIntent.getActivity(context, chatId.toInt(), launch, flags)

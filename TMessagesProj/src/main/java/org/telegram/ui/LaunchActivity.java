@@ -119,6 +119,7 @@ import org.telegram.messenger.GiftAuctionController;
 import org.telegram.messenger.LiteMode;
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.LocationController;
+import org.telegram.messenger.MaxSection;
 import org.telegram.messenger.MediaController;
 import org.telegram.messenger.MediaDataController;
 import org.telegram.messenger.MessageObject;
@@ -3332,6 +3333,18 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                     rightActionBarLayout.rebuildFragments(INavigationLayout.REBUILD_FLAG_REBUILD_LAST);
                 }
             }
+        }
+        // GramBas: уведомление MAX открывает сразу переписку, поверх уже собранного главного экрана.
+        final long maxChatId = MaxSection.chatIdFromIntent(intent);
+        if (maxChatId != 0) {
+            intent.removeExtra(MaxSection.EXTRA_CHAT_ID);
+            AndroidUtilities.runOnUIThread(() -> {
+                final BaseFragment maxChat = MaxSection.createChatFragment(maxChatId);
+                if (maxChat != null) {
+                    presentFragment(maxChat, false, true);
+                }
+            });
+            pushOpened = true;
         }
         if (isVoipAnswerIntent) {
             if (intent != null && intent.hasExtra("group_call_invite_msg_id")) {

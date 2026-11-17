@@ -37,7 +37,7 @@ ANDROID = ["android.content.Context","android.view.View","android.view.ViewGroup
 
 # --- messenger ---
 au = keep(methods("org/telegram/messenger/AndroidUtilities.java", ["dp","bold","runOnUIThread","cancelRunOnUIThread","addToClipboard","showKeyboard","hideKeyboard"]))
-write("org.telegram.messenger","AndroidUtilities","public class AndroidUtilities {\n    public static int statusBarHeight;\n    public static float density;\n    public static Point displaySize = new Point();\n"+"\n".join(au)+"\n}", ANDROID)
+write("org.telegram.messenger","AndroidUtilities","public class AndroidUtilities {\n    public static int statusBarHeight;\n    public static int navigationBarHeight;\n    public static float density;\n    public static Point displaySize = new Point();\n"+"\n".join(au)+"\n}", ANDROID)
 fl = keep(methods("org/telegram/messenger/FileLog.java", ["d","e"]))
 write("org.telegram.messenger","FileLog","public class FileLog {\n"+"\n".join(fl)+"\n}", ANDROID)
 write("org.telegram.messenger","ApplicationLoader","public class ApplicationLoader {\n    public static volatile Context applicationContext;\n}", ANDROID)
@@ -45,6 +45,7 @@ lc = keep(methods("org/telegram/messenger/LocaleController.java", ["getInstance"
 write("org.telegram.messenger","LocaleController","public class LocaleController {\n"+"\n".join(lc)+"\n}", ANDROID+["org.telegram.messenger.time.FastDateFormat"])
 fd = keep(methods("org/telegram/messenger/time/FastDateFormat.java", ["format"]))
 write("org.telegram.messenger.time","FastDateFormat","public class FastDateFormat {\n"+"\n".join(fd)+"\n}", ANDROID)
+write("org.telegram.messenger","MessagesController","public class MessagesController {\n    public static android.content.SharedPreferences getGlobalMainSettings() { return null; }\n}")
 write("org.telegram.messenger","MaxSection", open(SRC+"org/telegram/messenger/MaxSection.java").read().split("package org.telegram.messenger;",1)[1].replace("import org.telegram.ui.ActionBar.BaseFragment;",""), ["org.telegram.ui.ActionBar.BaseFragment"])
 
 # R.drawable из реального использования в модуле
@@ -61,7 +62,9 @@ write("org.telegram.messenger","R","public final class R {\n    public static fi
 # --- Theme ---
 th = keep(methods("org/telegram/ui/ActionBar/Theme.java", ["getColor","createRoundRectDrawable","createSelectorDrawable","createSimpleSelectorRoundRectDrawable","createCircleDrawableWithIcon","getCachedWallpaper","isWallpaperMotion"]))
 keys = int_fields("org/telegram/ui/ActionBar/Theme.java", r'key_\w+')
-write("org.telegram.ui.ActionBar","Theme","public class Theme {\n"+"\n".join(keys)+"\n"+"\n".join(th)+"\n}", ANDROID+["org.telegram.ui.Components.CombinedDrawable"])
+# Вложенные вручную: сверено с Theme.java (ResourcesProvider — интерфейс, AdaptiveRipple.filledRectByKey(int, float...)).
+theme_nested = "    public interface ResourcesProvider {}\n    public static class AdaptiveRipple {\n        public static Drawable filledRectByKey(int backgroundColorKey, float... radii) { return null; }\n    }\n"
+write("org.telegram.ui.ActionBar","Theme","public class Theme {\n"+theme_nested+"\n".join(keys)+"\n"+"\n".join(th)+"\n}", ANDROID+["org.telegram.ui.Components.CombinedDrawable"])
 write("org.telegram.ui.Components","CombinedDrawable","public class CombinedDrawable extends Drawable {\n    public void draw(Canvas c) {}\n    public void setAlpha(int a) {}\n    public void setColorFilter(ColorFilter f) {}\n    public int getOpacity() { return 0; }\n}", ANDROID)
 
 # --- LayoutHelper ---

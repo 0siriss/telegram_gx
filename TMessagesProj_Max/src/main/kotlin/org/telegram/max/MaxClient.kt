@@ -10,6 +10,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import org.telegram.messenger.MaxSection
 import ru.kolibri.Auth
 import ru.kolibri.Config
 import ru.kolibri.Kolibri
@@ -155,6 +156,12 @@ object MaxClient {
 
     fun removeListener(listener: Listener) {
         synchronized(listeners) { listeners.remove(listener) }
+    }
+
+    /** Список чатов изменился: экраны раздела и счётчик вкладки на главном экране. */
+    private fun chatsChanged() {
+        forEachListener { it.onChatsChanged() }
+        MaxSection.notifyUnreadChanged()
     }
 
     private fun forEachListener(body: (Listener) -> Unit) {
@@ -415,7 +422,7 @@ object MaxClient {
             if (contacts.isEmpty()) contacts = book.filter { it.id != MaxStore.accountId }.sortedBy { it.name.lowercase() }
             if (chats.isEmpty()) chats = MaxChat.parseList(MaxCache.loadChats())
             if (chats.isNotEmpty()) {
-                forEachListener { it.onChatsChanged() }
+                chatsChanged()
                 forEachListener { it.onContactsChanged() }
             }
         } catch (e: Throwable) {
@@ -635,7 +642,7 @@ object MaxClient {
         livenessJob?.cancel()
         livenessJob = null
         dropSession()
-        forEachListener { it.onChatsChanged() }
+        chatsChanged()
     }
 
     /**
@@ -665,7 +672,7 @@ object MaxClient {
         MaxCache.saveChats(answer.optJSONArray("chats"))
         MaxCache.savePeople(answer.optJSONArray("contacts"))
         MaxLog.i("вход выполнен, чатов: " + chats.size)
-        forEachListener { it.onChatsChanged() }
+        chatsChanged()
         resolveMissing(chats.map { it.peerId }.filter { it != 0L })
         io { fetchContacts() }
     }
@@ -681,7 +688,7 @@ object MaxClient {
         MaxCache.saveBook(answer.optJSONArray("contacts"))
         contacts = list.filter { it.id != MaxStore.accountId }.sortedBy { it.name.lowercase() }
         forEachListener { it.onContactsChanged() }
-        forEachListener { it.onChatsChanged() }
+        chatsChanged()
     }
 
     fun loadContacts(onDone: (Throwable?) -> Unit) {
@@ -709,7 +716,7 @@ object MaxClient {
                 val answer = JSONObject(request(OP_CONTACT_INFO, payload))
                 MaxContacts.putAll(MaxContact.parseList(answer.optJSONArray("contacts")))
             }
-            forEachListener { it.onChatsChanged() }
+            chatsChanged()
             forEachListener { it.onContactsChanged() }
         }
     }
@@ -810,7 +817,7 @@ object MaxClient {
         chatById(chatId)?.let {
             if (it.unread != 0) {
                 it.unread = 0
-                forEachListener { l -> l.onChatsChanged() }
+                chatsChanged()
             }
         }
         io {
@@ -828,7 +835,7 @@ object MaxClient {
         val answer = JSONObject(request(OP_CHAT_INFO, JSONObject().put("chatIds", JSONArray(listOf(chatId)))))
         val fresh = MaxChat.parseList(answer.optJSONArray("chats")).firstOrNull() ?: return
         chats = (listOf(fresh) + chats.filter { it.id != chatId }).sortedByDescending { it.sortTime }
-        forEachListener { it.onChatsChanged() }
+        chatsChanged()
         resolveMissing(listOf(fresh.peerId))
     }
 
@@ -912,7 +919,7 @@ object MaxClient {
         }
         existing.lastMessage = message
         chats = (listOf(existing) + chats.filter { it.id != chatId })
-        forEachListener { it.onChatsChanged() }
+        chatsChanged()
     }
 
     /** Правка своего сообщения (опкод 67), как у Komet. */
@@ -1143,7 +1150,7 @@ object MaxClient {
             existing.lastMessage = message
             if (isNew && !message.isOutgoing && openChatId != chatId) existing.unread += 1
             chats = (listOf(existing) + chats.filter { it.id != chatId })
-            forEachListener { it.onChatsChanged() }
+            chatsChanged()
         }
         typing.remove(chatId)
         resolveMissing(listOf(message.senderId, message.forwardSenderId))
@@ -1184,7 +1191,7 @@ object MaxClient {
                         if (userId == MaxStore.accountId) chat.unread = 0
                     }
                     forEachListener { it.onReadMarkChanged(chatId) }
-                    forEachListener { it.onChatsChanged() }
+                    chatsChanged()
                 }
                 PUSH_PRESENCE -> {
                     val userId = body.optLong("userId", 0L)

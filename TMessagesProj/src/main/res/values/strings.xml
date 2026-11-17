@@ -2631,6 +2631,7 @@
     <string name="LargeEmoji">Large Emoji</string>
     <string name="TelegramVersion">Telegram for Android %1$s</string>
     <string name="GramBasVersion">GramBas %1$s</string>
+    <string name="GramBasMaxTab">MAX</string>
     <string name="DebugMenu">Debug Menu</string>
     <string name="DebugMenuLongPress">Long press again for debug menu</string>
     <string name="DebugSendLogs">Send Logs</string>

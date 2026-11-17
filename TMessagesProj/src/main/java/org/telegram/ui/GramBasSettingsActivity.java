@@ -19,6 +19,7 @@ import org.telegram.ui.ActionBar.ActionBar;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.Cells.TextCheckCell;
+import org.telegram.ui.Components.BulletinFactory;
 import org.telegram.ui.Components.LayoutHelper;
 import org.telegram.ui.Components.UItem;
 import org.telegram.ui.Components.UniversalAdapter;
@@ -43,6 +44,7 @@ public class GramBasSettingsActivity extends BaseFragment {
     private static final int ID_VOICE_PRELOAD = 6;
     private static final int ID_HIDE_SPONSORED = 7;
     private static final int ID_MAX_SECTION = 8;
+    private static final int ID_MAX_TAB = 9;
 
     @Override
     public View createView(Context context) {
@@ -88,7 +90,8 @@ public class GramBasSettingsActivity extends BaseFragment {
         if (MaxSection.isAvailable()) {
             items.add(UItem.asHeader("MAX"));
             items.add(UItem.asButton(ID_MAX_SECTION, "Открыть MAX"));
-            items.add(UItem.asShadow("Отдельный аккаунт мессенджера MAX. Работает сам по себе: свой вход, свои чаты, своё соединение. Неофициальный доступ, аккаунт может быть заблокирован."));
+            items.add(UItem.asCheck(ID_MAX_TAB, "Вкладка MAX на главном экране").setChecked(MessagesController.getGlobalMainSettings().getBoolean("grambas_max_tab", true)));
+            items.add(UItem.asShadow("Отдельный аккаунт мессенджера MAX рядом с Telegram. Работает сам по себе: свой вход, свои чаты, своё соединение. Неофициальный доступ, аккаунт может быть заблокирован."));
         }
 
         items.add(UItem.asHeader("Соединение"));
@@ -102,6 +105,13 @@ public class GramBasSettingsActivity extends BaseFragment {
             if (fragment != null) {
                 presentFragment(fragment);
             }
+        } else if (item.id == ID_MAX_TAB) {
+            boolean enabled = !MessagesController.getGlobalMainSettings().getBoolean("grambas_max_tab", true);
+            MaxSection.setTabEnabled(enabled);
+            if (view instanceof TextCheckCell) {
+                ((TextCheckCell) view).setChecked(enabled);
+            }
+            BulletinFactory.of(this).createSimpleBulletin(R.raw.info, "Вкладка появится или скроется после перезапуска приложения").show();
         } else if (item.id == ID_ANTI_RECALL) {
             boolean enabled = !MessagesController.isAntiRecallEnabledGlobally();
             MessagesController.setAntiRecallEnabledGlobally(enabled);
