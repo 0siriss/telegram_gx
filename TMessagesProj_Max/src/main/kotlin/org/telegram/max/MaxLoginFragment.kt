@@ -37,7 +37,7 @@ class MaxLoginFragment : BaseFragment() {
     private var tempToken: String? = null
     private var busy = false
 
-    /** Шаг: номер -> код -> имя (последний только для нового номера). */
+    /** Шаг: номер -> код -> пароль (если стоит) или имя (если номер новый). */
     private var step = STEP_PHONE
 
     override fun createView(context: Context): View {
@@ -154,7 +154,8 @@ class MaxLoginFragment : BaseFragment() {
 
     private fun onButtonClick() {
         if (busy) return
-        val value = input.text.toString().trim()
+        // Пароль берём как есть: пробелы по краям могут быть его частью.
+        val value = if (step == STEP_PASSWORD) input.text.toString() else input.text.toString().trim()
         if (value.isEmpty()) return
         busy = true
         status.text = ""
@@ -190,6 +191,11 @@ class MaxLoginFragment : BaseFragment() {
                 MaxClient.verifyCode(value, pending) { error ->
                 AndroidUtilities.runOnUIThread {
                     busy = false
+                    if (error is PasswordRequired) {
+                        // На аккаунте облачный пароль: код верный, остаётся ввести пароль.
+                        showPasswordStep(error.hint)
+                        return@runOnUIThread
+                    }
                     if (error is RegistrationRequired) {
                         // Номера ещё нет в MAX: остаётся представиться и завершить регистрацию.
                         step = STEP_NAME
@@ -207,6 +213,22 @@ class MaxLoginFragment : BaseFragment() {
                     }
                     presentFragment(MaxDialogsFragment(), true)
                     }
+                }
+            }
+
+            STEP_PASSWORD -> MaxClient.checkPassword(value) { error ->
+                AndroidUtilities.runOnUIThread {
+                    busy = false
+                    if (error is WrongPassword) {
+                        input.setText("")
+                        fail(IllegalStateException("Неверный пароль, попробуйте ещё раз"))
+                        return@runOnUIThread
+                    }
+                    if (error != null) {
+                        fail(error)
+                        return@runOnUIThread
+                    }
+                    presentFragment(MaxDialogsFragment(), true)
                 }
             }
 
@@ -257,6 +279,19 @@ class MaxLoginFragment : BaseFragment() {
         connection.text = lines.joinToString("\n")
     }
 
+    private fun showPasswordStep(passwordHint: String?) {
+        step = STEP_PASSWORD
+        hint.text = if (passwordHint.isNullOrEmpty()) "На аккаунте стоит облачный пароль. Введите его"
+        else "На аккаунте стоит облачный пароль. Введите его\nПодсказка: $passwordHint"
+        input.setText("")
+        input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        input.transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
+        input.hint = "Пароль"
+        status.text = ""
+        button.text = "Продолжить"
+        showDiagnostics()
+    }
+
     /** Подтягивает ответы сервера на экран после каждого шага. */
     private fun showDiagnostics() {
         if (!::diag.isInitialized) return
@@ -269,6 +304,7 @@ class MaxLoginFragment : BaseFragment() {
         button.text = when (step) {
             STEP_PHONE -> "Получить код"
             STEP_CODE -> "Войти"
+            STEP_PASSWORD -> "Продолжить"
             else -> "Зарегистрироваться"
         }
     }
@@ -281,5 +317,6 @@ class MaxLoginFragment : BaseFragment() {
         private const val STEP_PHONE = 0
         private const val STEP_CODE = 1
         private const val STEP_NAME = 2
+        private const val STEP_PASSWORD = 3
     }
 }

@@ -47,6 +47,7 @@ object MaxClient {
     private const val OP_AUTH = 18
     private const val OP_LOGIN = 19
     private const val OP_AUTH_CONFIRM = 23
+    private const val OP_AUTH_CHECK_PASSWORD = 115
     private const val OP_CHAT_HISTORY = 49
     private const val OP_MSG_SEND = 64
     private const val OP_CONTACT_INFO_BY_PHONE = 46
@@ -308,7 +309,23 @@ object MaxClient {
                     .put("token", tempToken)
                     .put("verifyCode", code)
                     .put("authTokenType", "CHECK_CODE")
-                val answer = JSONObject(request(OP_AUTH, payload))
+                val raw = request(OP_AUTH, payload)
+                val answer = JSONObject(raw)
+                // Только имена полей: в ответе может быть постоянный токен, а панель
+                // диагностики видна на экране и попадает на скриншоты.
+                note("проверка кода, поля: " + answer.keys().asSequence().joinToString(", "))
+                // Порядок как у Komet: сначала облачный пароль, потом регистрация, потом вход.
+                val challenge = answer.optJSONObject("passwordChallenge")
+                if (challenge != null) {
+                    val trackId = challenge.optString("trackId", "")
+                    if (trackId.isEmpty()) {
+                        onResult(IllegalStateException("сервер просит пароль, но не прислал trackId"))
+                        return@launch
+                    }
+                    pendingTrackId = trackId
+                    onResult(PasswordRequired(challenge.optString("hint", "").ifEmpty { null }))
+                    return@launch
+                }
                 val attrs = answer.optJSONObject("tokenAttrs")
                 val loginToken = attrs?.optJSONObject("LOGIN")?.optString("token", "")
                 if (loginToken.isNullOrEmpty()) {
@@ -325,9 +342,7 @@ object MaxClient {
                 }
                 pendingRegisterToken = null
                 MaxStore.token = loginToken
-                answer.optJSONObject("profile")?.optLong("id", 0L)?.let {
-                    if (it != 0L) MaxStore.accountId = it
-                }
+                extractAccountId(answer)?.let { MaxStore.accountId = it }
                 login(loginToken)
                 onResult(null)
             } catch (e: Throwable) {
@@ -335,6 +350,58 @@ object MaxClient {
                 onResult(e)
             }
         }
+    }
+
+    /** trackId облачного пароля: живёт между вводом кода и вводом пароля. */
+    @Volatile
+    private var pendingTrackId: String? = null
+
+    /**
+     * Вход с облачным паролем (двухфакторный). После кода сервер вместо токена входа
+     * присылает passwordChallenge с trackId; пароль уходит опкодом 115, в ответ приходит
+     * обычный токен входа. Схема сверена с Komet (AccountModule.checkPassword).
+     */
+    fun checkPassword(password: String, onResult: (Throwable?) -> Unit) {
+        val trackId = pendingTrackId
+        if (trackId == null) {
+            onResult(IllegalStateException("сессия входа устарела, запросите код заново"))
+            return
+        }
+        ensureScope().launch {
+            try {
+                val payload = JSONObject()
+                    .put("trackId", trackId)
+                    .put("password", password)
+                val answer = JSONObject(request(OP_AUTH_CHECK_PASSWORD, payload))
+                if (answer.has("error") && !answer.isNull("error")) {
+                    onResult(WrongPassword())
+                    return@launch
+                }
+                val loginToken = answer.optJSONObject("tokenAttrs")
+                    ?.optJSONObject("LOGIN")?.optString("token", "")
+                if (loginToken.isNullOrEmpty()) {
+                    onResult(IllegalStateException("сервер не вернул токен входа"))
+                    return@launch
+                }
+                pendingTrackId = null
+                MaxStore.token = loginToken
+                extractAccountId(answer)?.let { MaxStore.accountId = it }
+                login(loginToken)
+                onResult(null)
+            } catch (e: Throwable) {
+                MaxLog.e("checkPassword failed", e)
+                onResult(e)
+            }
+        }
+    }
+
+    /** Номер аккаунта из ответа: profile.contact.id, иначе profile.id — как у Komet. */
+    private fun extractAccountId(answer: JSONObject): Long? {
+        val profile = answer.optJSONObject("profile") ?: return null
+        val contactId = profile.optJSONObject("contact")?.optLong("id", 0L) ?: 0L
+        if (contactId != 0L) return contactId
+        val profileId = profile.optLong("id", 0L)
+        return if (profileId != 0L) profileId else null
     }
 
     /** Токен регистрации, если номер оказался новым. Живёт до завершения регистрации. */
@@ -381,6 +448,7 @@ object MaxClient {
 
     fun logout() {
         pendingRegisterToken = null
+        pendingTrackId = null
         MaxStore.clear()
         chats = emptyList()
         stop()
@@ -550,6 +618,11 @@ object MaxClient {
 
 /** Номер не зарегистрирован: вместо входа нужно завершить регистрацию. */
 class RegistrationRequired : Exception("нужна регистрация")
+
+/** На аккаунте облачный пароль: после кода нужно ввести его. [hint] — подсказка владельца. */
+class PasswordRequired(val hint: String?) : Exception("нужен облачный пароль")
+
+class WrongPassword : Exception("неверный пароль")
 
 /** Чат MAX: ровно то, что нужно списку и экрану переписки. */
 class MaxChat(
