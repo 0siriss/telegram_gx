@@ -76,6 +76,17 @@ object MaxClient {
     private const val OP_FILE_DOWNLOAD = 88
     private const val OP_AUTH_CHECK_PASSWORD = 115
     private const val OP_CHAT_UPDATE = 55
+    private const val OP_PROFILE = 16
+    private const val OP_CONFIG = 22
+    private const val OP_CONTACT_UPDATE = 34
+    private const val OP_CONTACT_LIST = 36
+    private const val OP_CONTACT_ADD_BY_PHONE = 41
+    private const val OP_CHAT_DELETE = 52
+    private const val OP_CHAT_CLEAR = 54
+    private const val OP_CHAT_JOIN = 57
+    private const val OP_LINK_INFO = 89
+    private const val OP_SESSIONS_INFO = 96
+    private const val OP_SESSIONS_CLOSE = 97
     private const val OP_CHAT_LEAVE = 58
     private const val OP_MSG_SEARCH = 73
     private const val OP_CHAT_MEMBERS_UPDATE = 77
@@ -688,6 +699,12 @@ object MaxClient {
         }
         MaxContacts.putAll(MaxContact.parseList(answer.optJSONArray("contacts")))
         MaxPresence.putAll(answer.optJSONObject("presence"))
+        answer.optJSONObject("config")?.optJSONObject("chats")?.let { cfg ->
+            cfg.keys().forEach { k ->
+                val id = k.toLongOrNull() ?: return@forEach
+                mutes[id] = cfg.optJSONObject(k)?.optLong("dontDisturbUntil", 0L) ?: 0L
+            }
+        }
         chats = MaxChat.parseList(answer.optJSONArray("chats"))
         MaxCache.saveChats(answer.optJSONArray("chats"))
         MaxCache.savePeople(answer.optJSONArray("contacts"))
@@ -808,7 +825,14 @@ object MaxClient {
                     .put("count", 20)
                     .put("query", query)
                 val answer = JSONObject(request(OP_PUBLIC_SEARCH, payload))
-                onResult(MaxChat.parseList(answer.optJSONArray("chats")), null)
+                // Как у Komet (parseSearchResult): result [{chat}], а не chats.
+                val raw = answer.optJSONArray("result")
+                val found = ArrayList<MaxChat>()
+                if (raw != null) for (i in 0 until raw.length()) {
+                    MaxChat.parse(raw.optJSONObject(i)?.optJSONObject("chat"))?.let { found.add(it) }
+                }
+                found.forEach { foreign[it.id] = it }
+                onResult(found, null)
             } catch (e: Throwable) {
                 MaxLog.e("searchPublic failed", e)
                 onResult(null, e)
@@ -825,7 +849,18 @@ object MaxClient {
             ?: MaxChat.dialogWith(contactId)
     }
 
-    fun chatById(chatId: Long): MaxChat? = chats.firstOrNull { it.id == chatId }
+    fun chatById(chatId: Long): MaxChat? = chats.firstOrNull { it.id == chatId } ?: foreign[chatId]
+
+    /** Чаты, которых нет в списке: найденные поиском каналы, открытые по ссылке. */
+    private val foreign = java.util.concurrent.ConcurrentHashMap<Long, MaxChat>()
+
+    /** «Не беспокоить» по чатам: id -> dontDisturbUntil (−1 навсегда, 0 выкл.), из config.chats. */
+    private val mutes = java.util.concurrent.ConcurrentHashMap<Long, Long>()
+
+    fun isMuted(chatId: Long): Boolean {
+        val until = mutes[chatId] ?: return false
+        return until < 0 || until > System.currentTimeMillis()
+    }
 
     /** Кто печатает в чате прямо сейчас (последние 6 секунд), или null. */
     fun typingIn(chatId: Long): Long? {
@@ -1073,6 +1108,194 @@ object MaxClient {
             } catch (e: Throwable) {
                 MaxLog.e("searchMessages failed", e)
                 onResult(null, e)
+            }
+        }
+    }
+
+    // ---- действия с чатами, аккаунт, контакты (сверено с Komet) ----
+
+    /** Без звука навсегда или включить: опкод 22 `{settings: {chats: {id: {dontDisturbUntil}}}}`. */
+    fun setMuted(chatId: Long, muted: Boolean, onResult: (Throwable?) -> Unit) = call(onResult) {
+        val until = if (muted) -1L else 0L
+        val chatsCfg = JSONObject().put(chatId.toString(), JSONObject().put("dontDisturbUntil", until))
+        request(OP_CONFIG, JSONObject().put("settings", JSONObject().put("chats", chatsCfg)))
+        mutes[chatId] = until
+        chatsChanged()
+    }
+
+    /** Очистить историю: опкод 54 `{chatId, lastEventTime, forAll}`. */
+    fun clearHistory(chatId: Long, forAll: Boolean, onResult: (Throwable?) -> Unit) = call(onResult) {
+        val chat = chatById(chatId)
+        request(OP_CHAT_CLEAR, JSONObject().put("chatId", chatId).put("lastEventTime", chat?.sortTime ?: System.currentTimeMillis()).put("forAll", forAll))
+        chat?.lastMessage = null
+        chat?.unread = 0
+        MaxCache.saveHistory(chatId, JSONArray())
+        chatsChanged()
+    }
+
+    /** Удалить чат: опкод 52 `{chatId, lastEventTime, forAll}`. */
+    fun deleteChat(chatId: Long, forAll: Boolean, onResult: (Throwable?) -> Unit) = call(onResult) {
+        val chat = chatById(chatId)
+        request(OP_CHAT_DELETE, JSONObject().put("chatId", chatId).put("lastEventTime", chat?.sortTime ?: System.currentTimeMillis()).put("forAll", forAll))
+        chats = chats.filter { it.id != chatId }
+        leftChats.add(chatId)
+        chatsChanged()
+    }
+
+    /** Отметить чат прочитанным до последнего сообщения. */
+    fun markChatRead(chatId: Long) {
+        val chat = chatById(chatId) ?: return
+        val last = chat.lastMessage ?: return
+        markRead(chatId, last)
+    }
+
+    /** Своё имя: опкод 16 `{firstName, lastName}`, в ответе profile.contact. */
+    fun updateProfileName(firstName: String, lastName: String, onResult: (Throwable?) -> Unit) = call(onResult) {
+        val answer = JSONObject(request(OP_PROFILE, JSONObject().put("firstName", firstName).put("lastName", lastName)))
+        applyProfile(answer)
+    }
+
+    /** Своя аватарка: адрес опкодом 80 `{count: 1, profile: true}`, загрузка, опкод 16 `{photoToken, avatarType}`. */
+    fun updateProfilePhoto(data: ByteArray, onResult: (Throwable?) -> Unit) = call(onResult) {
+        val urlAnswer = JSONObject(request(OP_PHOTO_UPLOAD, JSONObject().put("count", 1).put("profile", true)))
+        val url = urlAnswer.optString("url", "").ifEmpty { throw IllegalStateException("сервер не выдал адрес загрузки") }
+        val live = session ?: throw IllegalStateException("нет соединения с MAX")
+        val result = live.blocking.uploadPhoto(url, data, "avatar.jpg")
+        if (result.status != 200) throw IllegalStateException("фото не загрузилось: ${result.status}")
+        val token = photoToken(String(result.body, Charsets.UTF_8)) ?: throw IllegalStateException("сервер не вернул токен фото")
+        val answer = JSONObject(request(OP_PROFILE, JSONObject().put("photoToken", token).put("avatarType", "USER_AVATAR")))
+        applyProfile(answer)
+    }
+
+    private fun applyProfile(answer: JSONObject) {
+        val profile = answer.optJSONObject("profile") ?: return
+        MaxContact.parse(profile.optJSONObject("contact") ?: profile)?.let {
+            MaxContacts.put(it)
+            MaxImages.forget(it.avatarUrl)
+        }
+        forEachListener { it.onContactsChanged() }
+    }
+
+    class SessionInfo(val client: String, val location: String, val current: Boolean, val time: Long, val info: String)
+
+    /** Активные сеансы: опкод 96 → `sessions [{client, location, current, time, info}]`. */
+    fun sessions(onResult: (List<SessionInfo>?, Throwable?) -> Unit) {
+        io {
+            try {
+                val raw = JSONObject(request(OP_SESSIONS_INFO, JSONObject())).optJSONArray("sessions")
+                val list = ArrayList<SessionInfo>()
+                if (raw != null) for (i in 0 until raw.length()) {
+                    val o = raw.optJSONObject(i) ?: continue
+                    list.add(SessionInfo(o.optString("client", ""), o.optString("location", ""), o.optBoolean("current", false), o.optLong("time", 0L), o.optString("info", "")))
+                }
+                onResult(list.sortedByDescending { it.current }, null)
+            } catch (e: Throwable) {
+                MaxLog.e("sessions failed", e)
+                onResult(null, e)
+            }
+        }
+    }
+
+    /** Завершить все сеансы, кроме этого: опкод 97. */
+    fun closeOtherSessions(onResult: (Throwable?) -> Unit) = call(onResult) { request(OP_SESSIONS_CLOSE, JSONObject()) }
+
+    /** Чёрный список: опкод 36 `{status: BLOCKED, count, from}` → contacts. */
+    fun blocked(onResult: (List<MaxContact>?, Throwable?) -> Unit) {
+        io {
+            try {
+                val answer = JSONObject(request(OP_CONTACT_LIST, JSONObject().put("status", "BLOCKED").put("count", 100).put("from", 0)))
+                val list = MaxContact.parseList(answer.optJSONArray("contacts"))
+                MaxContacts.putAll(list)
+                onResult(list, null)
+            } catch (e: Throwable) {
+                MaxLog.e("blocked failed", e)
+                onResult(null, e)
+            }
+        }
+    }
+
+    /** Заблокировать или разблокировать: опкод 34 `{contactId, action: BLOCK|UNBLOCK}`. */
+    fun setBlocked(contactId: Long, blocked: Boolean, onResult: (Throwable?) -> Unit) = call(onResult) {
+        request(OP_CONTACT_UPDATE, JSONObject().put("contactId", contactId).put("action", if (blocked) "BLOCK" else "UNBLOCK"))
+    }
+
+    /** Новый контакт по номеру: опкод 41 `{phone: +цифры, firstName, lastName}` → contact. */
+    fun addContactByPhone(phone: String, firstName: String, lastName: String, onResult: (MaxContact?, Throwable?) -> Unit) {
+        io {
+            try {
+                val digits = phone.filter { it.isDigit() }
+                if (digits.length < 5) throw IllegalStateException("неверный номер")
+                val answer = JSONObject(request(OP_CONTACT_ADD_BY_PHONE, JSONObject().put("phone", "+$digits").put("firstName", firstName).put("lastName", lastName)))
+                val contact = MaxContact.parse(answer.optJSONObject("contact")) ?: throw IllegalStateException("пользователь не найден")
+                MaxContacts.put(contact)
+                contacts = (contacts.filter { it.id != contact.id } + contact).sortedBy { it.name.lowercase() }
+                forEachListener { it.onContactsChanged() }
+                onResult(contact, null)
+            } catch (e: Throwable) {
+                MaxLog.e("addContactByPhone failed", e)
+                onResult(null, e)
+            }
+        }
+    }
+
+    /** Добавить, переименовать, удалить контакт: опкод 34, action ADD / UPDATE / REMOVE. */
+    fun updateContact(contactId: Long, action: String, firstName: String = "", lastName: String = "", onResult: (Throwable?) -> Unit) = call(onResult) {
+        val payload = JSONObject().put("contactId", contactId).put("action", action)
+        if (action != "REMOVE") payload.put("firstName", firstName).put("lastName", lastName)
+        val answer = JSONObject(request(OP_CONTACT_UPDATE, payload))
+        MaxContact.parse(answer.optJSONObject("contact"))?.let { MaxContacts.put(it) }
+        contacts = when (action) {
+            "REMOVE" -> contacts.filter { it.id != contactId }
+            else -> {
+                val fresh = MaxContacts.get(contactId)
+                if (fresh == null) contacts else (contacts.filter { it.id != contactId } + fresh).sortedBy { it.name.lowercase() }
+            }
+        }
+        forEachListener { it.onContactsChanged() }
+        chatsChanged()
+    }
+
+    /** Что за ссылка: опкод 89 `{link}` → chat (группа, канал) или user.contact. */
+    fun resolveLink(link: String, onResult: (MaxChat?, MaxContact?, Throwable?) -> Unit) {
+        io {
+            try {
+                val answer = JSONObject(request(OP_LINK_INFO, JSONObject().put("link", link)))
+                val chat = MaxChat.parse(answer.optJSONObject("chat"))?.also { foreign[it.id] = it }
+                val user = MaxContact.parse(answer.optJSONObject("user")?.optJSONObject("contact"))?.also { MaxContacts.put(it) }
+                if (chat == null && user == null) throw IllegalStateException("по ссылке ничего не найдено")
+                onResult(chat, user, null)
+            } catch (e: Throwable) {
+                MaxLog.e("resolveLink failed", e)
+                onResult(null, null, e)
+            }
+        }
+    }
+
+    /** Вступить в группу или канал по ссылке: опкод 57 `{link}` → chat. */
+    fun joinByLink(link: String, onResult: (MaxChat?, Throwable?) -> Unit) {
+        io {
+            try {
+                val answer = JSONObject(request(OP_CHAT_JOIN, JSONObject().put("link", link)))
+                val json = answer.optJSONObject("chat") ?: throw IllegalStateException("не удалось вступить")
+                applyChat(json)
+                leftChats.remove(json.optLong("id", 0L))
+                onResult(chatById(json.optLong("id", 0L)), null)
+            } catch (e: Throwable) {
+                MaxLog.e("joinByLink failed", e)
+                onResult(null, e)
+            }
+        }
+    }
+
+    /** Запрос в фоне с результатом-ошибкой. */
+    private fun call(onResult: (Throwable?) -> Unit, body: () -> Unit) {
+        io {
+            try {
+                body()
+                onResult(null)
+            } catch (e: Throwable) {
+                MaxLog.e("запрос не выполнен", e)
+                onResult(e)
             }
         }
     }
@@ -1495,7 +1718,7 @@ object MaxClient {
         typing.remove(chatId)
         resolveMissing(listOf(message.senderId, message.forwardSenderId))
         forEachListener { it.onNewMessage(chatId, message) }
-        if (isNew && !message.isOutgoing && openChatId != chatId) MaxNotifier.show(chatId, message)
+        if (isNew && !message.isOutgoing && openChatId != chatId && !isMuted(chatId)) MaxNotifier.show(chatId, message)
     }
 
     private fun startPushLoop(live: Session) {

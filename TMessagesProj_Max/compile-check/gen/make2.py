@@ -20,7 +20,7 @@ write("org.telegram.ui.ActionBar","ActionBarMenu",
 "public class ActionBarMenu extends LinearLayout {\n    public ActionBarMenu(Context context) { super(context); }\n" + M("org/telegram/ui/ActionBar/ActionBarMenu.java", ["addItem"]) + "\n}", UI)
 
 write("org.telegram.ui.ActionBar","ActionBarMenuSubItem",
-"public class ActionBarMenuSubItem extends FrameLayout {\n    public ActionBarMenuSubItem(Context context) { super(context); }\n}", UI)
+"public class ActionBarMenuSubItem extends FrameLayout {\n    public ActionBarMenuSubItem(Context context) { super(context); }\n    public void setTextAndIcon(CharSequence text, int icon) { }\n}", UI)
 
 write("org.telegram.ui.ActionBar","ActionBarMenuItem",
 """public class ActionBarMenuItem extends FrameLayout {
@@ -328,4 +328,15 @@ write("org.telegram.ui.Components","EmojiView",
         default void onEmojiSelected(String emoji) { }
     }
     public void setDelegate(EmojiViewDelegate emojiViewDelegate) { }
+}""", UI)
+
+write("org.telegram.ui.Cells","GraySectionCell",
+"""public class GraySectionCell extends FrameLayout {
+    public GraySectionCell(Context context) { super(context); }
+    public void setText(CharSequence text) { }
+}""", UI)
+write("org.telegram.ui.Cells","TextInfoPrivacyCell",
+"""public class TextInfoPrivacyCell extends FrameLayout {
+    public TextInfoPrivacyCell(Context context) { super(context); }
+    public void setText(CharSequence text) { }
 }""", UI)

@@ -77,6 +77,9 @@ class MaxDialogsFragment(
                 when (id) {
                     -1 -> finishFragment()
                     MENU_RELOAD -> reload()
+                    MENU_ACCOUNT -> presentFragment(MaxAccountFragment())
+                    MENU_NEW_CONTACT -> askNewContact()
+                    MENU_JOIN_LINK -> askLink()
                     MENU_FIND_PHONE -> askPhone()
                     MENU_LOGOUT -> confirmLogout()
                     MENU_SEARCH -> toggleSearch()
@@ -89,6 +92,9 @@ class MaxDialogsFragment(
         searchItem = menu.addItem(MENU_SEARCH, org.telegram.messenger.R.drawable.outline_header_search)
         val more = menu.addItem(MENU_MORE, org.telegram.messenger.R.drawable.ic_ab_other)
         if (pick == null) more.addSubItem(MENU_ADD_STORY, org.telegram.messenger.R.drawable.msg_camera, "Добавить историю")
+        more.addSubItem(MENU_ACCOUNT, org.telegram.messenger.R.drawable.msg_openprofile, "Мой аккаунт MAX")
+        more.addSubItem(MENU_NEW_CONTACT, org.telegram.messenger.R.drawable.msg_contact_add, "Новый контакт")
+        more.addSubItem(MENU_JOIN_LINK, org.telegram.messenger.R.drawable.msg_link, "Вступить по ссылке")
         more.addSubItem(MENU_FIND_PHONE, org.telegram.messenger.R.drawable.msg_search, "Найти по номеру")
         more.addSubItem(MENU_RELOAD, org.telegram.messenger.R.drawable.msg_retry, "Обновить")
         more.addSubItem(MENU_LOGOUT, org.telegram.messenger.R.drawable.msg_leave, "Выйти из MAX")
@@ -169,8 +175,14 @@ class MaxDialogsFragment(
         chatsList = RecyclerListView(context)
         chatsList.layoutManager = LinearLayoutManager(context)
         chatsList.adapter = chatsAdapter
+        chatsList.setOnItemLongClickListener(RecyclerListView.OnItemLongClickListener { view, position ->
+            val chat = chatsAdapter.items.getOrNull(position) as? MaxChat ?: return@OnItemLongClickListener false
+            if (pick != null || MaxClient.chats.none { it.id == chat.id }) return@OnItemLongClickListener false
+            showChatActions(chat, view)
+            true
+        })
         chatsList.setOnItemClickListener(RecyclerListView.OnItemClickListener { _, position ->
-            val chat = chatsAdapter.items.getOrNull(position) ?: return@OnItemClickListener
+            val chat = chatsAdapter.items.getOrNull(position) as? MaxChat ?: return@OnItemClickListener
             if (pick != null) {
                 finishFragment()
                 pick.invoke(chat)
@@ -184,6 +196,11 @@ class MaxDialogsFragment(
         contactsList = RecyclerListView(context)
         contactsList.layoutManager = LinearLayoutManager(context)
         contactsList.adapter = contactsAdapter
+        contactsList.setOnItemLongClickListener(RecyclerListView.OnItemLongClickListener { view, position ->
+            val contact = contactsAdapter.items.getOrNull(position - 1) ?: return@OnItemLongClickListener false
+            showContactActions(contact, view)
+            true
+        })
         attachPullToReveal(contactsList)
         contactsList.visibility = View.GONE
         contactsList.setOnItemClickListener(RecyclerListView.OnItemClickListener { _, position ->
@@ -631,6 +648,188 @@ class MaxDialogsFragment(
         AndroidUtilities.runOnUIThread { updateUi() }
     }
 
+    private var globalResults: List<MaxChat> = emptyList()
+    private var globalQuery = ""
+    private val globalSearch = Runnable {
+        val q = globalQuery
+        MaxClient.searchPublic(q) { list, _ ->
+            AndroidUtilities.runOnUIThread {
+                if (q != globalQuery) return@runOnUIThread
+                globalResults = list ?: emptyList()
+                updateUi()
+            }
+        }
+    }
+
+    /** Глобальный поиск — через 400 мс после последней буквы, от 3 символов. */
+    private fun scheduleGlobalSearch(q: String) {
+        if (q == globalQuery) return
+        globalQuery = q
+        globalResults = emptyList()
+        AndroidUtilities.cancelRunOnUIThread(globalSearch)
+        if (q.length >= 3 && pick == null) AndroidUtilities.runOnUIThread(globalSearch, 400)
+    }
+
+    /** Поле ввода для диалогов: подпись и текст, как в формах Telegram. */
+    private fun dialogInput(context: Context, hint: String, value: String = "", type: Int = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS): EditText {
+        val input = EditText(context)
+        input.inputType = type
+        input.hint = hint
+        input.setText(value)
+        input.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 18f)
+        input.setTextColor(Theme.getColor(Theme.key_dialogTextBlack))
+        input.setHintTextColor(Theme.getColor(Theme.key_dialogTextHint))
+        return input
+    }
+
+    private fun formOf(context: Context, vararg fields: EditText): View {
+        val box = LinearLayout(context)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(AndroidUtilities.dp(24f), 0, AndroidUtilities.dp(24f), 0)
+        fields.forEach { box.addView(it, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT)) }
+        return box
+    }
+
+    /** Новый контакт по номеру, как «Добавить контакт» у Komet (опкод 41). */
+    private fun askNewContact() {
+        val context = parentActivity ?: return
+        val first = dialogInput(context, "Имя")
+        val last = dialogInput(context, "Фамилия (необязательно)")
+        val phone = dialogInput(context, "Номер телефона", "+7", InputType.TYPE_CLASS_PHONE)
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle("Новый контакт")
+                .setView(formOf(context, first, last, phone))
+                .setPositiveButton("Добавить") { _, _ ->
+                    MaxClient.addContactByPhone(phone.text.toString(), first.text.toString().trim(), last.text.toString().trim()) { contact, e ->
+                        if (contact != null) toast("${contact.name} добавлен в контакты")
+                        else toast("Не добавлен: " + MaxLog.describe(e))
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+        AndroidUtilities.runOnUIThread({ first.requestFocus(); AndroidUtilities.showKeyboard(first) }, 200)
+    }
+
+    /** Вступить в группу или канал по ссылке max.ru (опкоды 89 и 57, как у Komet). */
+    private fun askLink() {
+        val context = parentActivity ?: return
+        val link = dialogInput(context, "https://max.ru/…", "", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI)
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle("Вступить по ссылке")
+                .setView(formOf(context, link))
+                .setPositiveButton("Открыть") { _, _ -> openLink(link.text.toString().trim()) }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+        AndroidUtilities.runOnUIThread({ link.requestFocus(); AndroidUtilities.showKeyboard(link) }, 200)
+    }
+
+    private fun openLink(link: String) {
+        if (link.isEmpty()) return
+        MaxClient.resolveLink(link) { chat, user, e ->
+            AndroidUtilities.runOnUIThread {
+                val context = parentActivity ?: return@runOnUIThread
+                when {
+                    user != null -> openContact(user)
+                    chat != null && MaxClient.chats.any { it.id == chat.id } -> presentFragment(MaxChatFragment(chat.id))
+                    chat != null -> showDialog(
+                        AlertDialog.Builder(context)
+                            .setTitle(chat.title)
+                            .setMessage(if (chat.isChannel) "Подписаться на канал?" else "Вступить в группу?")
+                            .setPositiveButton(if (chat.isChannel) "Подписаться" else "Вступить") { _, _ ->
+                                MaxClient.joinByLink(link) { joined, err ->
+                                    AndroidUtilities.runOnUIThread {
+                                        if (joined != null) presentFragment(MaxChatFragment(joined.id))
+                                        else toast("Не получилось: " + MaxLog.describe(err))
+                                    }
+                                }
+                            }
+                            .setNeutralButton("Посмотреть") { _, _ -> presentFragment(MaxChatFragment(chat.id)) }
+                            .setNegativeButton("Отмена", null)
+                            .create()
+                    )
+                    else -> toast("Ссылка не открылась: " + MaxLog.describe(e))
+                }
+            }
+        }
+    }
+
+    /** Долгое нажатие на контакт: переименовать, удалить, заблокировать (опкод 34). */
+    private fun showContactActions(contact: MaxContact, anchor: View) {
+        ItemOptions.makeOptions(this, anchor)
+            .add(org.telegram.messenger.R.drawable.msg_edit, "Изменить имя") { renameContact(contact) }
+            .add(org.telegram.messenger.R.drawable.msg_block, "Заблокировать") {
+                MaxClient.setBlocked(contact.id, true) { e -> toast(if (e == null) "${contact.name} заблокирован" else "Не получилось: " + MaxLog.describe(e)) }
+            }
+            .add(org.telegram.messenger.R.drawable.msg_delete, "Удалить контакт", true) {
+                MaxClient.updateContact(contact.id, "REMOVE") { e -> if (e != null) toast("Не получилось: " + MaxLog.describe(e)) }
+            }
+            .show()
+    }
+
+    private fun renameContact(contact: MaxContact) {
+        val context = parentActivity ?: return
+        val first = dialogInput(context, "Имя", contact.firstName)
+        val last = dialogInput(context, "Фамилия", contact.lastName)
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle("Изменить контакт")
+                .setView(formOf(context, first, last))
+                .setPositiveButton("Сохранить") { _, _ ->
+                    MaxClient.updateContact(contact.id, "UPDATE", first.text.toString().trim(), last.text.toString().trim()) { e ->
+                        if (e != null) toast("Не получилось: " + MaxLog.describe(e))
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+    }
+
+    /** Долгое нажатие на чат — меню Telegram: прочитать, звук, очистить, удалить. */
+    private fun showChatActions(chat: MaxChat, anchor: View) {
+        val muted = MaxClient.isMuted(chat.id)
+        ItemOptions.makeOptions(this, anchor)
+            .addIf(chat.unread > 0, org.telegram.messenger.R.drawable.msg_markread, "Отметить прочитанным") { MaxClient.markChatRead(chat.id) }
+            .add(if (muted) org.telegram.messenger.R.drawable.msg_unmute else org.telegram.messenger.R.drawable.msg_mute, if (muted) "Включить звук" else "Без звука") {
+                MaxClient.setMuted(chat.id, !muted) { e -> if (e != null) toast("Не получилось: " + MaxLog.describe(e)) }
+            }
+            .add(org.telegram.messenger.R.drawable.msg_clear, "Очистить историю") { confirmClear(chat) }
+            .add(org.telegram.messenger.R.drawable.msg_delete, if (chat.isDialog) "Удалить чат" else "Удалить и покинуть", true) { confirmDeleteChat(chat) }
+            .show()
+    }
+
+    private fun confirmClear(chat: MaxChat) {
+        val context = parentActivity ?: return
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle("Очистить историю")
+                .setMessage("Удалить все сообщения в чате «${chat.title}» у вас?")
+                .setPositiveButton("Очистить") { _, _ ->
+                    MaxClient.clearHistory(chat.id, false) { e -> if (e != null) toast("Не получилось: " + MaxLog.describe(e)) }
+                }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+    }
+
+    private fun confirmDeleteChat(chat: MaxChat) {
+        val context = parentActivity ?: return
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle(if (chat.isDialog) "Удалить чат" else "Покинуть и удалить")
+                .setMessage("Чат «${chat.title}» пропадёт из списка.")
+                .setPositiveButton("Удалить") { _, _ ->
+                    val done: (Throwable?) -> Unit = { e -> if (e != null) toast("Не получилось: " + MaxLog.describe(e)) }
+                    if (chat.isDialog || chat.isSaved) MaxClient.deleteChat(chat.id, false, done) else MaxClient.leaveChat(chat.id, done)
+                }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+    }
+
     private fun reload() {
         showEmpty("Обновляем…")
         MaxClient.reloadChats { error ->
@@ -645,9 +844,13 @@ class MaxDialogsFragment(
         if (!::empty.isInitialized) return
         val q = query.lowercase()
         val folder = MaxClient.folders.getOrNull(folderIndex)
-        chatsAdapter.items = MaxClient.chats.filter {
+        val local = MaxClient.chats.filter {
             (folder == null || folder.matches(it)) && (q.isEmpty() || it.title.lowercase().contains(q))
         }
+        // При поиске — ниже своих чатов «Глобальный поиск»: люди и каналы MAX, как у Komet.
+        val global = if (q.isEmpty() || pick != null) emptyList() else globalResults.filter { g -> local.none { it.id == g.id } }
+        chatsAdapter.items = if (global.isEmpty()) local else local + GLOBAL_HEADER + global
+        scheduleGlobalSearch(q)
         contactsAdapter.items = MaxClient.contacts.filter {
             q.isEmpty() || it.name.lowercase().contains(q) || it.phoneText.contains(q)
         }
@@ -655,7 +858,7 @@ class MaxDialogsFragment(
         contactsAdapter.notifyDataSetChanged()
         val text = when {
             tab == TAB_CHATS && !chatsLoaded -> "Загружаем чаты…"
-            tab == TAB_CHATS && chatsAdapter.items.isEmpty() -> if (q.isEmpty()) "Пока нет чатов" else "Ничего не нашлось"
+            tab == TAB_CHATS && chatsAdapter.items.isEmpty() -> if (q.isEmpty()) "Пока нет чатов" else "Ищем…"
             tab == TAB_CONTACTS && contactsAdapter.items.isEmpty() && q.isNotEmpty() -> "Ничего не нашлось"
             else -> null
         }
@@ -731,21 +934,32 @@ class MaxDialogsFragment(
     }
 
     private inner class ChatsAdapter : RecyclerListView.SelectionAdapter() {
-        var items: List<MaxChat> = emptyList()
+        var items: List<Any> = emptyList()
 
-        override fun isEnabled(holder: RecyclerView.ViewHolder): Boolean = true
+        override fun isEnabled(holder: RecyclerView.ViewHolder): Boolean = holder.itemViewType == 0
+
+        override fun getItemViewType(position: Int): Int = if (items[position] is MaxChat) 0 else 1
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+            if (viewType == 1) {
+                val header = org.telegram.ui.Cells.GraySectionCell(parent.context)
+                header.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                return RecyclerListView.Holder(header)
+            }
             val cell = MaxChatCell(parent.context)
             cell.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             return RecyclerListView.Holder(cell)
         }
 
         override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
-            val chat = items.getOrNull(position) ?: return
+            val item = items.getOrNull(position) ?: return
+            if (item !is MaxChat) {
+                (holder.itemView as org.telegram.ui.Cells.GraySectionCell).setText(item.toString())
+                return
+            }
             val cell = holder.itemView as MaxChatCell
-            cell.needDivider = position != items.size - 1
-            cell.bind(chat)
+            cell.needDivider = items.getOrNull(position + 1) is MaxChat
+            cell.bind(item)
         }
 
         override fun getItemCount(): Int = items.size
@@ -785,11 +999,15 @@ class MaxDialogsFragment(
         private const val TAB_FOLDER = 10
 
         private const val REQ_STORY = 7201
+        private const val GLOBAL_HEADER = "Глобальный поиск"
         private const val MENU_SEARCH = 6
         private const val MENU_ADD_STORY = 7
         private const val MENU_MORE = 2
         private const val MENU_RELOAD = 3
         private const val MENU_LOGOUT = 4
         private const val MENU_FIND_PHONE = 5
+        private const val MENU_ACCOUNT = 8
+        private const val MENU_NEW_CONTACT = 9
+        private const val MENU_JOIN_LINK = 10
     }
 }

@@ -365,6 +365,8 @@ class MaxChat(
     @Volatile var pinned: MaxMessage? = null,
     val ownerId: Long = 0L,
     val participantsCount: Int = 0,
+    /** Публичная ссылка канала или группы (без «https://max.ru/»), если есть. */
+    val link: String? = null,
 ) {
     val isGroup: Boolean
         get() = type == "CHAT" || type == "GROUP"
@@ -428,6 +430,7 @@ class MaxChat(
                 pinned = MaxMessage.parse(json.optJSONObject("pinnedMessage")),
                 ownerId = json.optLong("owner", 0L),
                 participantsCount = json.optInt("participantsCount", 0),
+                link = json.optString("link", "").ifEmpty { null },
             )
         }
 

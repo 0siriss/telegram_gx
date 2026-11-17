@@ -79,6 +79,15 @@ object MaxImages {
         }
     }
 
+    /** Забыть закешированные картинки адреса (например, после смены своей аватарки). */
+    fun forget(url: String?) {
+        if (url == null) return
+        synchronized(cache) {
+            cache.snapshot().keys.filter { it.startsWith(url) }.forEach { cache.remove(it) }
+        }
+        synchronized(failed) { failed.remove(url) }
+    }
+
     /** Картинка целиком для просмотра на весь экран; колбэк на главном потоке. */
     fun loadFull(url: String, maxPx: Int, onDone: (Bitmap?) -> Unit) {
         pool.execute {

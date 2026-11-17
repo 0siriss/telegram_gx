@@ -46,7 +46,8 @@ class MaxChatCell(context: Context) : FrameLayout(context) {
         title.isSingleLine = true
         title.ellipsize = TextUtils.TruncateAt.END
         title.includeFontPadding = false
-        addView(title, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.START, 78f, 11f, 74f, 0f))
+        // По ширине текста, чтобы значок «без звука» стоял сразу за именем.
+        addView(title, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.START, 78f, 11f, 74f, 0f))
 
         time.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
         time.setTextColor(Theme.getColor(Theme.key_chats_date))
@@ -112,6 +113,19 @@ class MaxChatCell(context: Context) : FrameLayout(context) {
             else -> last.displayText
         }, preview)
         title.text = MaxBubbles.emojify(name, title)
+        // Без звука — значок у имени и серый счётчик, как в списке Telegram.
+        val muted = MaxClient.isMuted(chat.id)
+        if (muted) {
+            val icon = context.resources.getDrawable(org.telegram.messenger.R.drawable.list_mute).mutate()
+            icon.colorFilter = android.graphics.PorterDuffColorFilter(Theme.getColor(Theme.key_chats_muteIcon), android.graphics.PorterDuff.Mode.SRC_IN)
+            title.setCompoundDrawablesWithIntrinsicBounds(null, null, icon, null)
+            title.compoundDrawablePadding = AndroidUtilities.dp(4f)
+        } else {
+            title.setCompoundDrawablesWithIntrinsicBounds(null, null, null, null)
+        }
+        counter.background = Theme.createRoundRectDrawable(
+            AndroidUtilities.dp(11.5f), Theme.getColor(if (muted) Theme.key_chats_unreadCounterMuted else Theme.key_chats_unreadCounter)
+        )
         if (chat.unread > 0) {
             counter.visibility = VISIBLE
             counter.text = if (chat.unread > 999) "999+" else chat.unread.toString()

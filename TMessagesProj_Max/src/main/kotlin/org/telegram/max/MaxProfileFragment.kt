@@ -172,9 +172,44 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
         )
     }
 
-    private fun toast(text: String) {
+    /** Добавить в контакты или переименовать: опкод 34 ADD / UPDATE (Komet addContact, updateContact). */
+    private fun editContact(inBook: Boolean) {
         val context = parentActivity ?: return
-        Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
+        val person = MaxContacts.get(userId)
+        fun field(hint: String, value: String) = EditText(context).apply {
+            this.hint = hint
+            setText(value)
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 18f)
+            setTextColor(Theme.getColor(Theme.key_dialogTextBlack))
+            setHintTextColor(Theme.getColor(Theme.key_dialogTextHint))
+        }
+        val first = field("Имя", person?.firstName ?: "")
+        val last = field("Фамилия", person?.lastName ?: "")
+        val box = LinearLayout(context)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(AndroidUtilities.dp(24f), 0, AndroidUtilities.dp(24f), 0)
+        box.addView(first)
+        box.addView(last)
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle(if (inBook) "Изменить контакт" else "Добавить в контакты")
+                .setView(box)
+                .setPositiveButton("Сохранить") { _, _ ->
+                    MaxClient.updateContact(userId, if (inBook) "UPDATE" else "ADD", first.text.toString().trim(), last.text.toString().trim()) { e ->
+                        AndroidUtilities.runOnUIThread { if (e != null) toast("Не получилось: " + MaxLog.describe(e)) else rebuild() }
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .create()
+        )
+    }
+
+    /** Ответы сервера приходят в фоне — показываем всегда на главном потоке. */
+    private fun toast(text: String) {
+        AndroidUtilities.runOnUIThread {
+            val context = parentActivity ?: return@runOnUIThread
+            Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onFragmentCreate(): Boolean {
@@ -214,12 +249,33 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
                 })
             }
             val phone = person?.phoneText.orEmpty()
+            val dialogId = MaxClient.chatForContact(userId).id
+            if (userId != MaxStore.accountId) {
+                val muted = MaxClient.isMuted(dialogId)
+                actions.add(HeaderAction(
+                    if (muted) org.telegram.messenger.R.drawable.filled_profile_unmute_24 else org.telegram.messenger.R.drawable.filled_profile_mute_24,
+                    if (muted) "Включить" else "Без звука",
+                ) {
+                    MaxClient.setMuted(dialogId, !muted) { e -> AndroidUtilities.runOnUIThread { if (e != null) toast("Не получилось: " + MaxLog.describe(e)) else rebuild() } }
+                })
+            }
             if (phone.isNotEmpty()) actions.add(HeaderAction(org.telegram.messenger.R.drawable.filled_profile_call_24, "Номер") { copy(phone, "Номер") })
             rows.add(Row.Header(userId, name, person?.avatarUrl, MaxText.presence(userId), actions))
             // Как в Telegram: телефон с подписью «Мобильный», ниже идентификатор.
             if (phone.isNotEmpty()) rows.add(Row.Info(phone, "Мобильный") { copy(phone, "Номер") })
             rows.add(Row.Info(userId.toString(), "ID в MAX") { copy(userId.toString(), "ID") })
             rows.add(Row.Shadow)
+            if (userId != MaxStore.accountId) {
+                val inBook = MaxClient.contacts.any { it.id == userId }
+                rows.add(Row.Action(org.telegram.messenger.R.drawable.msg_edit, if (inBook) "Изменить контакт" else "Добавить в контакты") { editContact(inBook) })
+                if (inBook) rows.add(Row.Action(org.telegram.messenger.R.drawable.msg_delete, "Удалить контакт", red = true) {
+                    MaxClient.updateContact(userId, "REMOVE") { e -> AndroidUtilities.runOnUIThread { if (e != null) toast("Не получилось: " + MaxLog.describe(e)) else rebuild() } }
+                })
+                rows.add(Row.Action(org.telegram.messenger.R.drawable.msg_block, "Заблокировать", red = true) {
+                    MaxClient.setBlocked(userId, true) { e -> toast(if (e == null) "Пользователь заблокирован" else "Не получилось: " + MaxLog.describe(e)) }
+                })
+                rows.add(Row.Shadow)
+            }
         } else {
             val current = chat
             val title = current?.title ?: "Чат"

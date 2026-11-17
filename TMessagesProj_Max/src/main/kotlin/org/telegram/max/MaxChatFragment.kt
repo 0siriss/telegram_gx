@@ -97,6 +97,76 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     private val headerTicker = Runnable { updateHeader() }
 
     private lateinit var searchItem: ActionBarMenuItem
+    private var muteItem: org.telegram.ui.ActionBar.ActionBarMenuSubItem? = null
+    private var joinBar: View? = null
+
+    private fun updateMuteItem() {
+        val muted = MaxClient.isMuted(chatId)
+        muteItem?.setTextAndIcon(if (muted) "Включить звук" else "Без звука", if (muted) org.telegram.messenger.R.drawable.msg_unmute else org.telegram.messenger.R.drawable.msg_mute)
+    }
+
+    private fun confirmClearHistory() {
+        val context = parentActivity ?: return
+        val builder = AlertDialog.Builder(context).setTitle("Очистить историю")
+        if (chat.isDialog && !chat.isSaved) {
+            builder.setItems(arrayOf<CharSequence>("Очистить у всех", "Очистить только у меня")) { _, which -> clearHistory(which == 0) }
+        } else {
+            builder.setMessage("Удалить все сообщения в этом чате у вас?")
+            builder.setPositiveButton("Очистить") { _, _ -> clearHistory(false) }
+            builder.setNegativeButton("Отмена", null)
+        }
+        showDialog(builder.create())
+    }
+
+    private fun clearHistory(forAll: Boolean) {
+        MaxClient.clearHistory(chatId, forAll) { e ->
+            AndroidUtilities.runOnUIThread {
+                if (e != null) toast("Не получилось: " + MaxLog.describe(e))
+                else {
+                    messages.clear()
+                    rebuild(scrollToEnd = true)
+                }
+            }
+        }
+    }
+
+    private fun confirmDeleteChat() {
+        val context = parentActivity ?: return
+        showDialog(
+            AlertDialog.Builder(context)
+                .setTitle("Удалить чат")
+                .setItems(arrayOf<CharSequence>("Удалить у всех", "Удалить только у меня")) { _, which ->
+                    MaxClient.deleteChat(chatId, which == 0) { e ->
+                        AndroidUtilities.runOnUIThread { if (e != null) toast("Не получилось: " + MaxLog.describe(e)) else finishFragment() }
+                    }
+                }
+                .create()
+        )
+    }
+
+    /** Канал или группа не из списка (найдены поиском): вместо поля ввода — «Подписаться». */
+    private fun createJoinBar(context: Context): View {
+        val button = TextView(context)
+        button.text = if (chat.isChannel) "Подписаться" else "Вступить"
+        button.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 16f)
+        button.typeface = AndroidUtilities.bold()
+        button.gravity = Gravity.CENTER
+        button.setTextColor(Theme.getColor(Theme.key_chat_fieldOverlayText))
+        button.background = MaxGlass.chatBottom(button, 23f)
+        button.setOnClickListener {
+            val link = chat.link ?: return@setOnClickListener toast("У этого чата нет публичной ссылки")
+            MaxClient.joinByLink(link) { joined, e ->
+                AndroidUtilities.runOnUIThread {
+                    if (joined == null) toast("Не получилось: " + MaxLog.describe(e))
+                    else {
+                        joinBar?.visibility = View.GONE
+                        inputPanel.visibility = View.VISIBLE
+                    }
+                }
+            }
+        }
+        return button
+    }
     private lateinit var emojiButton: ImageView
     private lateinit var emojiHolder: FrameLayout
     private var emojiView: org.telegram.ui.Components.EmojiView? = null
@@ -178,6 +248,12 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                     -1 -> finishFragment()
                     MENU_INFO -> openProfile()
                     MENU_LEAVE -> confirmLeave()
+                    MENU_MUTE -> MaxClient.setMuted(chatId, !MaxClient.isMuted(chatId)) { e ->
+                        if (e != null) toast("Не получилось: " + MaxLog.describe(e))
+                        else AndroidUtilities.runOnUIThread { updateMuteItem() }
+                    }
+                    MENU_CLEAR -> confirmClearHistory()
+                    MENU_DELETE_CHAT -> confirmDeleteChat()
                     MENU_OPEN_SEARCH -> {
                         searchItem.visibility = View.VISIBLE
                         searchItem.openSearch(true)
@@ -209,6 +285,9 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         // Как в Telegram: в шапке только круглое «⋮», поиск — пунктом меню.
         val more = menu.addItem(MENU_MORE, org.telegram.messenger.R.drawable.ic_ab_other)
         more.addSubItem(MENU_OPEN_SEARCH, org.telegram.messenger.R.drawable.msg_search, "Поиск")
+        muteItem = more.addSubItem(MENU_MUTE, org.telegram.messenger.R.drawable.msg_mute, "Без звука")
+        more.addSubItem(MENU_CLEAR, org.telegram.messenger.R.drawable.msg_clear, "Очистить историю")
+        if (chat.isDialog) more.addSubItem(MENU_DELETE_CHAT, org.telegram.messenger.R.drawable.msg_delete, "Удалить чат")
         if (!chat.isSaved) {
             more.addSubItem(MENU_INFO, org.telegram.messenger.R.drawable.msg_info, if (chat.isDialog) "Профиль" else "Информация")
             if (!chat.isDialog) more.addSubItem(MENU_LEAVE, org.telegram.messenger.R.drawable.msg_leave, if (chat.isChannel) "Покинуть канал" else "Покинуть группу")
@@ -278,6 +357,15 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         inputPanel = createInput(context)
         bottomStack.addView(inputPanel, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT))
         bottomStack.addView(createSearchBar(context), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 46))
+        if (MaxClient.chats.none { it.id == chatId } && !chat.isDialog) {
+            val bar = createJoinBar(context)
+            joinBar = bar
+            inputPanel.visibility = View.GONE
+            bottomStack.addView(bar, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 46))
+        } else if (chat.isChannel && chat.ownerId != MaxStore.accountId) {
+            // В канал пишет только владелец: поле ввода не показываем, как в Telegram.
+            inputPanel.visibility = View.GONE
+        }
         emojiHolder = FrameLayout(context)
         emojiHolder.visibility = View.GONE
         bottomStack.addView(emojiHolder, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 280, 0f, 6f, 0f, 0f))
@@ -288,6 +376,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
         fragmentView = root
         updateHeader()
+        updateMuteItem()
         loadHistory()
         if (chat.isDialog && !chat.isSaved) MaxClient.refreshPresence(listOf(chat.peerId))
         MaxAudio.onChanged = { AndroidUtilities.runOnUIThread { adapter.notifyDataSetChanged() } }
@@ -1735,6 +1824,9 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private const val MENU_INFO = 3
         private const val MENU_LEAVE = 4
         private const val MENU_OPEN_SEARCH = 5
+        private const val MENU_MUTE = 6
+        private const val MENU_CLEAR = 7
+        private const val MENU_DELETE_CHAT = 8
         private const val MAX_FILE = 100L * 1024 * 1024
 
         private val NAME_COLORS = intArrayOf(
