@@ -29,6 +29,13 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
     private lateinit var image: ImageView
     private lateinit var video: TextureView
     private var player: MediaPlayer? = null
+
+    /**
+     * Плеер подготовлен. До этого нельзя звать duration/currentPosition/start/pause:
+     * MediaPlayer отвечает ошибкой -38 через onError, и поверх идущего видео появлялась
+     * надпись «Видео не воспроизводится».
+     */
+    private var playerReady = false
     private var surface: Surface? = null
     private var pendingVideo: String? = null
     private var loadToken = 0
@@ -205,7 +212,7 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
             val story = stories.getOrNull(index) ?: return
             if (!paused) {
                 val mp = player
-                val playing = story.isVideo && mp != null
+                val playing = story.isVideo && mp != null && playerReady
                 val duration = if (story.isVideo) (if (playing && safeDuration(mp!!) > 0) safeDuration(mp).toLong() else story.durationMs.coerceAtLeast(1L)) else PHOTO_MS
                 val elapsed = if (story.isVideo) (if (playing) safePosition(mp!!).toLong() else 0L) else System.currentTimeMillis() - startedAt
                 val progress = (elapsed.toFloat() / duration).coerceIn(0f, 1f)
@@ -247,14 +254,25 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
             mp.setDataSource(url)
             mp.setOnPreparedListener {
                 if (player !== it) return@setOnPreparedListener
+                playerReady = true
+                status.visibility = View.GONE
                 fitVideo(it.videoWidth, it.videoHeight)
                 startedAt = System.currentTimeMillis()
                 it.start()
+                if (paused) it.pause()
                 // Первый кадр уже на экране — превью больше не нужно.
                 image.postDelayed({ if (player === it) image.visibility = View.INVISIBLE }, 150)
             }
             mp.setOnCompletionListener { if (player === it) step(1) }
-            mp.setOnErrorListener { _, _, _ -> status.text = "Видео не воспроизводится"; status.visibility = View.VISIBLE; true }
+            mp.setOnErrorListener { failed, what, extra ->
+                MaxLog.e("видео истории: ошибка $what/$extra", null)
+                // Ошибку показываем, только если это текущий плеер и видео так и не пошло.
+                if (player === failed && !playerReady) {
+                    status.text = "Видео не воспроизводится"
+                    status.visibility = View.VISIBLE
+                }
+                true
+            }
             mp.prepareAsync()
         } catch (e: Throwable) {
             MaxLog.e("видео истории не запустилось", e)
@@ -275,8 +293,10 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
     private fun releasePlayer() {
         val mp = player ?: return
         player = null
+        val wasReady = playerReady
+        playerReady = false
         try {
-            mp.stop()
+            if (wasReady) mp.stop()
         } catch (ignored: Throwable) {
         }
         mp.release()
@@ -285,6 +305,7 @@ class MaxStoryViewerFragment(private var preview: MaxStoryPreview) : BaseFragmen
     private fun pause(value: Boolean) {
         paused = value
         val mp = player ?: return
+        if (!playerReady) return
         try {
             if (value) mp.pause() else mp.start()
         } catch (ignored: Throwable) {

@@ -58,6 +58,8 @@ object MaxClient {
     private const val OP_LOGIN = 19
     private const val OP_AUTH_CONFIRM = 23
     private const val OP_CONTACT_INFO = 32
+    private const val OP_CONTACT_PHOTOS = 39
+    private const val OP_CHAT_MEDIA = 51
     private const val OP_CONTACT_PRESENCE = 35
     private const val OP_CONTACT_INFO_BY_PHONE = 46
     private const val OP_CHAT_INFO = 48
@@ -760,6 +762,85 @@ object MaxClient {
             }
             chatsChanged()
             forEachListener { it.onContactsChanged() }
+        }
+    }
+
+    /**
+     * Полные сведения о человеке (опкод 32), как ContactInfoFetch у Komet: сырой объект
+     * контакта — там описание, ссылка, дата регистрации, страна и прочее.
+     */
+    fun contactInfo(id: Long, onResult: (JSONObject?, Throwable?) -> Unit) {
+        io {
+            try {
+                val answer = JSONObject(request(OP_CONTACT_INFO, JSONObject().put("contactIds", JSONArray(listOf(id)))))
+                val raw = answer.optJSONArray("contacts")?.optJSONObject(0)
+                MaxContact.parse(raw)?.let { fresh ->
+                    // Своё имя из адресной книги не затираем: в ответе может быть только имя в MAX.
+                    if (!MaxContacts.has(fresh.id) || contacts.none { it.id == fresh.id }) MaxContacts.put(fresh)
+                }
+                onResult(raw, null)
+            } catch (e: Throwable) {
+                MaxLog.e("contactInfo failed", e)
+                onResult(null, e)
+            }
+        }
+    }
+
+    /** Фото профиля человека (опкод 39 `{contactId, from, count}` → `urls`, `total`), как у Komet. */
+    fun contactPhotos(id: Long, onResult: (List<String>, Throwable?) -> Unit) {
+        io {
+            try {
+                val payload = JSONObject().put("contactId", id).put("from", 0).put("count", 25)
+                val answer = JSONObject(request(OP_CONTACT_PHOTOS, payload))
+                val urls = ArrayList<String>()
+                answer.optJSONArray("urls")?.let { arr -> for (i in 0 until arr.length()) arr.optString(i, "").takeIf { it.isNotEmpty() }?.let { urls.add(it) } }
+                onResult(urls, null)
+            } catch (e: Throwable) {
+                MaxLog.e("contactPhotos failed", e)
+                onResult(emptyList(), e)
+            }
+        }
+    }
+
+    /**
+     * Фото и видео чата (опкод 51), как SharedContent.fetchMedia у Komet: от сообщения
+     * [anchorId] назад на [count] штук. Возвращает сообщения, новые сверху.
+     */
+    fun chatMedia(chatId: Long, anchorId: Long, count: Int, onResult: (List<MaxMessage>, Throwable?) -> Unit) {
+        io {
+            try {
+                val payload = JSONObject()
+                    .put("chatId", chatId)
+                    .put("messageId", anchorId)
+                    .put("attachTypes", JSONArray(listOf("PHOTO", "VIDEO")))
+                    .put("forward", 0)
+                    .put("backward", count)
+                val answer = JSONObject(request(OP_CHAT_MEDIA, payload))
+                val out = ArrayList<MaxMessage>()
+                answer.optJSONArray("messages")?.let { arr ->
+                    for (i in 0 until arr.length()) MaxMessage.parse(arr.optJSONObject(i))?.let { m ->
+                        if (m.attaches.any { it.isPhoto || it.isVideo }) out.add(m)
+                    }
+                }
+                out.sortByDescending { it.time }
+                onResult(out, null)
+            } catch (e: Throwable) {
+                MaxLog.e("chatMedia failed", e)
+                onResult(emptyList(), e)
+            }
+        }
+    }
+
+    /** Свежие сведения о чате (опкод 48): описание, ссылка, число участников. */
+    fun chatInfo(chatId: Long, onResult: (JSONObject?, Throwable?) -> Unit) {
+        io {
+            try {
+                val answer = JSONObject(request(OP_CHAT_INFO, JSONObject().put("chatIds", JSONArray(listOf(chatId)))))
+                onResult(answer.optJSONArray("chats")?.optJSONObject(0), null)
+            } catch (e: Throwable) {
+                MaxLog.e("chatInfo failed", e)
+                onResult(null, e)
+            }
         }
     }
 

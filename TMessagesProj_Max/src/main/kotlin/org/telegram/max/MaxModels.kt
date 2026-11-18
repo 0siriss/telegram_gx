@@ -91,6 +91,32 @@ object MaxContacts {
 }
 
 /**
+ * Присланный контакт (вложение CONTACT). Поля как у Komet (ContactAttachment):
+ * contactId или userId, name или firstName + lastName, phoneNumber, photoUrl или baseUrl.
+ * Чего нет во вложении, берём из уже известных людей.
+ */
+class MaxSharedContact(val id: Long, val name: String, val phone: String, val photoUrl: String?) {
+    companion object {
+        fun parse(raw: JSONObject): MaxSharedContact {
+            val id = raw.optLong("contactId", 0L).takeIf { it != 0L } ?: raw.optLong("userId", 0L)
+            val known = if (id != 0L) MaxContacts.get(id) else null
+            val full = "${raw.optString("firstName", "")} ${raw.optString("lastName", "")}".trim()
+            val name = raw.optString("name", "").trim().ifEmpty { full }.ifEmpty { known?.name ?: "" }.ifEmpty { "Контакт" }
+            val rawPhone = raw.opt("phoneNumber")?.toString()?.takeIf { it.isNotBlank() && it != "null" }
+                ?: raw.opt("phone")?.toString()?.takeIf { it.isNotBlank() && it != "null" && it != "0" }
+            val phone = when {
+                rawPhone == null -> known?.phoneText ?: ""
+                rawPhone.startsWith("+") -> rawPhone
+                rawPhone.all { it.isDigit() } -> "+$rawPhone"
+                else -> rawPhone
+            }
+            val photo = raw.optString("photoUrl", "").ifEmpty { raw.optString("baseUrl", "") }.ifEmpty { known?.avatarUrl ?: "" }
+            return MaxSharedContact(id, name, phone, photo.ifEmpty { null })
+        }
+    }
+}
+
+/**
  * Вложение сообщения. Поля сверены с Komet (lib/models/attachment.dart): у фото ссылка
  * в baseUrl или url, у файла — fileId (ссылку на скачивание выдаёт опкод 88), у видео —
  * videoId и token (ссылку выдаёт опкод 83), у голосового — прямая ссылка в url.
@@ -267,7 +293,7 @@ class MaxMessage(
             "SHARE" -> attach.optString("title", "").ifEmpty { "Ссылка" }
             "POLL" -> "Опрос"
             "LOCATION" -> "Геопозиция"
-            "CONTACT" -> "Контакт"
+            "CONTACT" -> MaxSharedContact.parse(attach).name.let { if (it == "Контакт") it else "Контакт: $it" }
             "CALL" -> "Звонок"
             "CONTROL" -> controlLabel(attach.optString("event", ""))
             else -> "Вложение"
@@ -367,6 +393,8 @@ class MaxChat(
     val participantsCount: Int = 0,
     /** Публичная ссылка канала или группы (без «https://max.ru/»), если есть. */
     val link: String? = null,
+    /** Описание группы или канала. */
+    val description: String? = null,
 ) {
     val isGroup: Boolean
         get() = type == "CHAT" || type == "GROUP"
@@ -431,6 +459,7 @@ class MaxChat(
                 ownerId = json.optLong("owner", 0L),
                 participantsCount = json.optInt("participantsCount", 0),
                 link = json.optString("link", "").ifEmpty { null },
+                description = json.optString("description", "").trim().ifEmpty { null },
             )
         }
 

@@ -75,6 +75,14 @@ write("androidx.recyclerview.widget","RecyclerView",
     public void scrollToPosition(int position) {}
     public void smoothScrollToPosition(int position) {}
     public void setClipToPadding(boolean clipToPadding) {}
+    public void addOnItemTouchListener(OnItemTouchListener listener) {}
+    public View findChildViewUnder(float x, float y) { return null; }
+    public int getChildAdapterPosition(View child) { return 0; }
+    public interface OnItemTouchListener {
+        boolean onInterceptTouchEvent(RecyclerView rv, android.view.MotionEvent e);
+        void onTouchEvent(RecyclerView rv, android.view.MotionEvent e);
+        void onRequestDisallowInterceptTouchEvent(boolean disallowIntercept);
+    }
     public static abstract class LayoutManager {}
     public abstract static class OnScrollListener {
         public void onScrollStateChanged(RecyclerView recyclerView, int newState) {}
@@ -136,6 +144,7 @@ write("org.telegram.ui.Components","RecyclerListView",
     public void setOnItemLongClickListener(OnItemLongClickListener listener, long duration) {}
     public void setOnItemLongClickListener(OnItemLongClickListenerExtended listener) {}
     public void setOnItemLongClickListener(OnItemLongClickListenerExtended listener, long duration) {}
+    public void cancelClickRunnables(boolean uncheck) {}
 }""", UI)
 
 write("org.telegram.ui.Components","BackupImageView",
@@ -302,6 +311,7 @@ write("org.telegram.ui.Components","FilterTabsView",
 write("org.telegram.ui.Cells","TextDetailCell",
 """public class TextDetailCell extends FrameLayout {
     public TextDetailCell(Context context) { super(context); }
+    public TextDetailCell(Context context, org.telegram.ui.ActionBar.Theme.ResourcesProvider resourcesProvider, boolean textMultiline, boolean valueMultiline) { super(context); }
     public void setTextAndValue(CharSequence text, CharSequence value, boolean divider) { }
 }""", UI)
 write("org.telegram.ui.Cells","HeaderCell",

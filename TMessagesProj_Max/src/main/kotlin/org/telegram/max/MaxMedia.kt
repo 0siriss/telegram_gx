@@ -22,7 +22,14 @@ import org.telegram.ui.Components.LayoutHelper
 object MaxMedia {
 
     /** Фото на весь экран; касание закрывает, «Сохранить» кладёт в Галерею. */
-    fun showPhoto(activity: Activity, url: String) {
+    fun showPhoto(activity: Activity, url: String) = showPhotos(activity, listOf(url), 0)
+
+    /**
+     * Несколько фото на весь экран (аватарки профиля): листаются свайпом влево-вправо,
+     * сверху «N из M». Касание закрывает, «Сохранить» кладёт текущее в Галерею.
+     */
+    fun showPhotos(activity: Activity, urls: List<String>, start: Int) {
+        if (urls.isEmpty()) return
         val dialog = Dialog(activity, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
         val root = FrameLayout(activity)
         root.setBackgroundColor(Color.BLACK)
@@ -34,25 +41,62 @@ object MaxMedia {
         val progress = ProgressBar(activity)
         root.addView(progress, LayoutHelper.createFrame(48, 48f, Gravity.CENTER, 0f, 0f, 0f, 0f))
 
+        val counter = TextView(activity)
+        counter.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
+        counter.setTextColor(Color.WHITE)
+        counter.typeface = AndroidUtilities.bold()
+        root.addView(counter, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.TOP or Gravity.CENTER_HORIZONTAL, 0f, 32f, 0f, 0f))
+
+        var index = start.coerceIn(0, urls.size - 1)
+        val size = maxOf(AndroidUtilities.displaySize.x, AndroidUtilities.displaySize.y).coerceAtLeast(1080)
+        fun load() {
+            val url = urls[index]
+            counter.visibility = if (urls.size > 1) android.view.View.VISIBLE else android.view.View.GONE
+            counter.text = "${index + 1} из ${urls.size}"
+            progress.visibility = android.view.View.VISIBLE
+            image.setImageDrawable(null)
+            MaxImages.loadFull(url, size) { bitmap ->
+                if (urls[index] != url) return@loadFull
+                progress.visibility = android.view.View.GONE
+                if (bitmap != null) image.setImageBitmap(bitmap)
+                else Toast.makeText(activity, "Фото не загрузилось", Toast.LENGTH_SHORT).show()
+            }
+        }
+
         val save = TextView(activity)
         save.text = "Сохранить"
         save.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 16f)
         save.setTextColor(Color.WHITE)
         save.setPadding(AndroidUtilities.dp(16f), AndroidUtilities.dp(12f), AndroidUtilities.dp(16f), AndroidUtilities.dp(12f))
-        save.setOnClickListener { download(activity, url, "max_" + System.currentTimeMillis() + ".jpg", Environment.DIRECTORY_PICTURES) }
+        save.setOnClickListener { download(activity, urls[index], "max_" + System.currentTimeMillis() + ".jpg", Environment.DIRECTORY_PICTURES) }
         root.addView(save, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.BOTTOM or Gravity.END, 0f, 0f, 8f, 24f))
 
-        root.setOnClickListener { dialog.dismiss() }
-        image.setOnClickListener { dialog.dismiss() }
+        val gestures = android.view.GestureDetector(activity, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: android.view.MotionEvent): Boolean = true
+            override fun onSingleTapUp(e: android.view.MotionEvent): Boolean {
+                dialog.dismiss()
+                return true
+            }
+            override fun onFling(e1: android.view.MotionEvent?, e2: android.view.MotionEvent, velocityX: Float, velocityY: Float): Boolean {
+                val dx = e2.x - (e1?.x ?: e2.x)
+                val dy = e2.y - (e1?.y ?: e2.y)
+                if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > AndroidUtilities.dp(80f)) {
+                    dialog.dismiss()
+                    return true
+                }
+                if (Math.abs(dx) < AndroidUtilities.dp(40f)) return false
+                val next = if (dx < 0) index + 1 else index - 1
+                if (next in urls.indices) {
+                    index = next
+                    load()
+                }
+                return true
+            }
+        })
+        image.setOnTouchListener { _, event -> gestures.onTouchEvent(event) }
         dialog.setContentView(root)
         dialog.show()
-
-        val size = maxOf(AndroidUtilities.displaySize.x, AndroidUtilities.displaySize.y).coerceAtLeast(1080)
-        MaxImages.loadFull(url, size) { bitmap ->
-            progress.visibility = android.view.View.GONE
-            if (bitmap != null) image.setImageBitmap(bitmap)
-            else Toast.makeText(activity, "Фото не загрузилось", Toast.LENGTH_SHORT).show()
-        }
+        load()
     }
 
     /** Скачивание через системный менеджер загрузок: прогресс в шторке, файл в «Загрузках». */

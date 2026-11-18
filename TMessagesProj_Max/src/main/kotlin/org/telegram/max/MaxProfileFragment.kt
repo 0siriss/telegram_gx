@@ -31,6 +31,18 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
     private val rows = ArrayList<Row>()
     private val adapter = Adapter()
     private var members: List<MaxContact> = emptyList()
+
+    /** Сырой объект контакта из опкода 32: описание, ссылка, регистрация, страна. */
+    private var info: org.json.JSONObject? = null
+
+    /** Свежие сведения о группе или канале из опкода 48. */
+    private var chatRaw: org.json.JSONObject? = null
+
+    /** Фото профиля человека (опкод 39), первым — текущее. */
+    private var photos: List<String> = emptyList()
+
+    /** Последние фото и видео переписки (опкод 51). */
+    private var media: List<MaxMessage> = emptyList()
     private lateinit var listView: RecyclerListView
 
     private val chat: MaxChat?
@@ -76,8 +88,85 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
         rebuild()
         if (userId != 0L) MaxClient.refreshPresence(listOf(userId))
         reloadMembers()
+        loadDetails()
         return listView
     }
+
+    /** Подробности как в Komet: сведения о человеке или чате, фото профиля, медиа переписки. */
+    private fun loadDetails() {
+        if (userId != 0L) {
+            MaxClient.contactInfo(userId) { raw, _ ->
+                AndroidUtilities.runOnUIThread {
+                    if (raw != null) {
+                        info = raw
+                        rebuild()
+                    }
+                }
+            }
+            MaxClient.contactPhotos(userId) { urls, _ ->
+                AndroidUtilities.runOnUIThread {
+                    if (urls.isNotEmpty()) {
+                        photos = urls
+                        rebuild()
+                    }
+                }
+            }
+        } else if (chatId != 0L) {
+            MaxClient.chatInfo(chatId) { raw, _ ->
+                AndroidUtilities.runOnUIThread {
+                    if (raw != null) {
+                        chatRaw = raw
+                        rebuild()
+                    }
+                }
+            }
+        }
+        val mediaChat = if (userId != 0L) MaxClient.chatForContact(userId) else chat
+        val anchor = mediaChat?.lastMessage?.id ?: 0L
+        if (mediaChat != null && anchor != 0L) {
+            MaxClient.chatMedia(mediaChat.id, anchor, 30) { list, _ ->
+                AndroidUtilities.runOnUIThread {
+                    if (list.isNotEmpty()) {
+                        media = list
+                        rebuild()
+                    }
+                }
+            }
+        }
+    }
+
+    /** Аватарка на весь экран; у человека листаются все его фото профиля. */
+    private fun openAvatar(current: String?) {
+        val activity = parentActivity ?: return
+        val list = if (photos.isNotEmpty()) photos else listOfNotNull(current)
+        if (list.isEmpty()) return
+        MaxMedia.showPhotos(activity, list, 0)
+    }
+
+    private fun openMedia(message: MaxMessage) {
+        val activity = parentActivity ?: return
+        val attach = message.attaches.firstOrNull { it.isPhoto || it.isVideo } ?: return
+        if (attach.isPhoto) {
+            val urls = media.mapNotNull { m -> m.attaches.firstOrNull { it.isPhoto }?.url }
+            val start = urls.indexOf(attach.url).coerceAtLeast(0)
+            MaxMedia.showPhotos(activity, urls, start)
+        } else {
+            val mediaChatId = if (userId != 0L) MaxClient.chatForContact(userId).id else chatId
+            toast("Открываем видео…")
+            MaxClient.videoUrl(mediaChatId, message.id, attach.videoId, attach.token ?: "") { url, error ->
+                AndroidUtilities.runOnUIThread {
+                    if (url != null) MaxMedia.openExternal(activity, url, "video/*")
+                    else toast("Видео недоступно: " + MaxLog.describe(error))
+                }
+            }
+        }
+    }
+
+    private fun dateText(ms: Long): String =
+        java.text.SimpleDateFormat("d MMMM yyyy", java.util.Locale("ru")).format(java.util.Date(ms))
+
+    private fun linkText(link: String): String =
+        if (link.startsWith("http")) link else "https://max.ru/" + link.trimStart('@', '/')
 
     private fun reloadMembers() {
         val current = chat
@@ -260,11 +349,25 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
                 })
             }
             if (phone.isNotEmpty()) actions.add(HeaderAction(org.telegram.messenger.R.drawable.filled_profile_call_24, "Номер") { copy(phone, "Номер") })
-            rows.add(Row.Header(userId, name, person?.avatarUrl, MaxText.presence(userId), actions))
-            // Как в Telegram: телефон с подписью «Мобильный», ниже идентификатор.
+            rows.add(Row.Header(userId, name, photos.firstOrNull() ?: person?.avatarUrl, MaxText.presence(userId), actions))
+            // Как в Telegram: телефон «Мобильный», ссылка, «О себе»; дальше сведения как в Komet.
+            val raw = info
             if (phone.isNotEmpty()) rows.add(Row.Info(phone, "Мобильный") { copy(phone, "Номер") })
+            raw?.optString("link", "")?.takeIf { it.isNotEmpty() }?.let { link ->
+                val full = linkText(link)
+                rows.add(Row.Info(full, "Ссылка") { copy(full, "Адрес") })
+            }
+            val bio = raw?.optString("description", "")?.trim()?.ifEmpty { raw.optString("about", "").trim() }.orEmpty()
+            if (bio.isNotEmpty()) rows.add(Row.Info(bio, "О себе", multiline = true) { copy(bio, "Текст") })
+            raw?.optLong("registrationTime", 0L)?.takeIf { it > 0 }?.let { rows.add(Row.Info(dateText(it), "В MAX с")) }
+            raw?.optString("country", "")?.takeIf { it.isNotEmpty() }?.let { rows.add(Row.Info(it, "Страна")) }
+            when (raw?.optInt("gender", 0)) {
+                1 -> rows.add(Row.Info("Мужской", "Пол"))
+                2 -> rows.add(Row.Info("Женский", "Пол"))
+            }
             rows.add(Row.Info(userId.toString(), "ID в MAX") { copy(userId.toString(), "ID") })
             rows.add(Row.Shadow)
+            addMediaRows()
             if (userId != MaxStore.accountId) {
                 val inBook = MaxClient.contacts.any { it.id == userId }
                 rows.add(Row.Action(org.telegram.messenger.R.drawable.msg_edit, if (inBook) "Изменить контакт" else "Добавить в контакты") { editContact(inBook) })
@@ -287,8 +390,16 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
                 actions.add(HeaderAction(org.telegram.messenger.R.drawable.leave, "Выйти") { leave() })
             }
             rows.add(Row.Header(current?.avatarKey ?: chatId, title, current?.avatarUrl, subtitle, actions))
+            val description = chatRaw?.optString("description", "")?.trim()?.ifEmpty { null } ?: current?.description
+            if (!description.isNullOrEmpty()) rows.add(Row.Info(description, "Описание", multiline = true) { copy(description, "Текст") })
+            val link = chatRaw?.optString("link", "")?.ifEmpty { null } ?: current?.link
+            if (!link.isNullOrEmpty()) {
+                val full = linkText(link)
+                rows.add(Row.Info(full, "Ссылка") { copy(full, "Адрес") })
+            }
             rows.add(Row.Info(chatId.toString(), "ID чата") { copy(chatId.toString(), "ID") })
             rows.add(Row.Shadow)
+            addMediaRows()
             if (current != null && current.isGroup || members.isNotEmpty()) {
                 rows.add(Row.Section(if (members.isNotEmpty()) MaxText.members(members.size) else "Участники"))
                 if (current != null && current.isGroup) {
@@ -305,11 +416,20 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
         adapter.notifyDataSetChanged()
     }
 
+    /** Раздел «Медиа» как в Telegram: последние фото и видео сеткой по три. */
+    private fun addMediaRows() {
+        if (media.isEmpty()) return
+        rows.add(Row.Section("Медиа"))
+        media.take(MEDIA_LIMIT).chunked(3).forEach { rows.add(Row.MediaRow(it)) }
+        rows.add(Row.Shadow)
+    }
+
     private class HeaderAction(val icon: Int, val title: String, val onClick: () -> Unit)
 
     private sealed class Row {
         class Header(val key: Long, val name: String, val avatar: String?, val status: String, val actions: List<HeaderAction>) : Row()
-        class Info(val value: String, val label: String?, val onClick: (() -> Unit)? = null) : Row()
+        class Info(val value: String, val label: String?, val multiline: Boolean = false, val onClick: (() -> Unit)? = null) : Row()
+        class MediaRow(val items: List<MaxMessage>) : Row()
         class Action(val icon: Int, val title: String, val red: Boolean = false, val onClick: () -> Unit) : Row()
         class Section(val title: String) : Row()
         class Member(val contact: MaxContact) : Row()
@@ -325,11 +445,12 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
 
         override fun getItemViewType(position: Int): Int = when (rows[position]) {
             is Row.Header -> 0
-            is Row.Info -> 1
+            is Row.Info -> if ((rows[position] as Row.Info).multiline) 7 else 1
             is Row.Section -> 2
             is Row.Member -> 3
             is Row.Action -> 4
             Row.Shadow -> 5
+            is Row.MediaRow -> 6
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
@@ -341,6 +462,8 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
                 2 -> org.telegram.ui.Cells.HeaderCell(context).also { it.setBackgroundColor(white) }
                 3 -> MaxContactCell(context).also { it.setBackgroundColor(white) }
                 4 -> org.telegram.ui.Cells.TextCell(context).also { it.setBackgroundColor(white) }
+                6 -> MediaRowCell(context).also { it.setBackgroundColor(white) }
+                7 -> org.telegram.ui.Cells.TextDetailCell(context, null, true, false).also { it.setBackgroundColor(white) }
                 else -> org.telegram.ui.Cells.ShadowSectionCell(context)
             }
             view.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -350,7 +473,7 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
         override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
             val next = rows.getOrNull(position + 1)
             when (val row = rows[position]) {
-                is Row.Header -> (holder.itemView as HeaderCell).bind(row)
+                is Row.Header -> (holder.itemView as HeaderCell).bind(row) { openAvatar(row.avatar) }
                 is Row.Info -> (holder.itemView as org.telegram.ui.Cells.TextDetailCell)
                     .setTextAndValue(row.value, row.label ?: "", next is Row.Info)
                 is Row.Section -> (holder.itemView as org.telegram.ui.Cells.HeaderCell).setText(row.title)
@@ -366,6 +489,7 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
                     cell.needDivider = next is Row.Member
                     cell.bind(row.contact)
                 }
+                is Row.MediaRow -> (holder.itemView as MediaRowCell).bind(row.items)
                 Row.Shadow -> {}
             }
         }
@@ -405,7 +529,8 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
             addView(buttons, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 58, 0f, 16f, 0f, 0f))
         }
 
-        fun bind(row: Row.Header) {
+        fun bind(row: Row.Header, onAvatar: () -> Unit) {
+            avatar.setOnClickListener { onAvatar() }
             name.text = MaxBubbles.emojify(row.name, name)
             status.text = row.status
             MaxImages.bindAvatar(avatar, row.key, row.name, row.avatar, 90)
@@ -431,5 +556,45 @@ class MaxProfileFragment(private val chatId: Long, private val userId: Long) :
                 buttons.addView(tile, LayoutHelper.createLinear(0, LayoutHelper.MATCH_PARENT, 1f, if (i == 0) 0 else 8, 0, 0, 0))
             }
         }
+    }
+
+    /** Строка сетки медиа: три квадратные превью, у видео — длительность. */
+    private inner class MediaRowCell(context: Context) : LinearLayout(context) {
+        init {
+            orientation = HORIZONTAL
+            setPadding(AndroidUtilities.dp(2f), 0, AndroidUtilities.dp(2f), 0)
+        }
+
+        fun bind(items: List<MaxMessage>) {
+            removeAllViews()
+            val side = (AndroidUtilities.displaySize.x - AndroidUtilities.dp(4f)) / 3
+            for (i in 0 until 3) {
+                val message = items.getOrNull(i)
+                val tile = FrameLayout(context)
+                if (message != null) {
+                    val attach = message.attaches.first { it.isPhoto || it.isVideo }
+                    val image = BackupImageView(context)
+                    tile.addView(image, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
+                    MaxImages.bindImage(image, attach.url, side, Theme.getColor(Theme.key_windowBackgroundGray))
+                    if (attach.isVideo) {
+                        val badge = TextView(context)
+                        badge.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 12f)
+                        badge.setTextColor(0xffffffff.toInt())
+                        badge.text = "▶ " + MaxMedia.durationText(attach.duration)
+                        badge.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(8f), 0x88000000.toInt())
+                        badge.setPadding(AndroidUtilities.dp(5f), AndroidUtilities.dp(1f), AndroidUtilities.dp(5f), AndroidUtilities.dp(1f))
+                        tile.addView(badge, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.BOTTOM or Gravity.START, 4f, 0f, 0f, 4f))
+                    }
+                    tile.setOnClickListener { openMedia(message) }
+                }
+                val params = LinearLayout.LayoutParams(side, side)
+                params.setMargins(AndroidUtilities.dp(1f), AndroidUtilities.dp(1f), AndroidUtilities.dp(1f), AndroidUtilities.dp(1f))
+                addView(tile, params)
+            }
+        }
+    }
+
+    companion object {
+        private const val MEDIA_LIMIT = 30
     }
 }

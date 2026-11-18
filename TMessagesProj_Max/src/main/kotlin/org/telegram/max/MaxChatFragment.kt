@@ -333,6 +333,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             showActions(message, view)
             true
         })
+        listView.addOnItemTouchListener(SwipeToReply(context))
         listHolder.addView(listView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
 
         emptyView = TextView(context)
@@ -1413,14 +1414,128 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 MaxMedia.openExternal(context, "geo:$lat,$lon?q=$lat,$lon")
             }
             attach.type == "CONTACT" -> {
-                val id = attach.raw.optLong("contactId", 0L)
-                if (id != 0L) presentFragment(MaxProfileFragment(0L, id))
+                val shared = MaxSharedContact.parse(attach.raw)
+                when {
+                    shared.id != 0L -> presentFragment(MaxProfileFragment(0L, shared.id))
+                    shared.phone.isNotEmpty() -> findShared(shared)
+                }
             }
             attach.type == "SHARE" -> attach.raw.optString("url", "").takeIf { it.isNotEmpty() }?.let {
                 MaxMedia.openExternal(context, it)
             }
         }
     }
+
+    /** Присланный контакт без id MAX: ищем его номер (опкод 46), как «Найти по номеру». */
+    private fun findShared(shared: MaxSharedContact) {
+        MaxClient.findByPhone(shared.phone) { found, error ->
+            AndroidUtilities.runOnUIThread {
+                when {
+                    found != null -> presentFragment(MaxProfileFragment(0L, found.id))
+                    error != null -> toast("Не нашли: " + MaxLog.describe(error))
+                    else -> toast("Этого номера нет в MAX")
+                }
+            }
+        }
+    }
+
+    /** «Добавить» на карточке контакта: опкод 34 ADD с именем из карточки. */
+    private fun addSharedContact(shared: MaxSharedContact) {
+        val parts = shared.name.split(" ", limit = 2)
+        MaxClient.updateContact(shared.id, "ADD", parts.getOrElse(0) { "" }, parts.getOrElse(1) { "" }) { error ->
+            AndroidUtilities.runOnUIThread {
+                if (error != null) toast("Не удалось добавить: " + MaxLog.describe(error))
+                else {
+                    toast("Контакт добавлен")
+                    MaxClient.loadContacts { AndroidUtilities.runOnUIThread { adapter.notifyDataSetChanged() } }
+                }
+            }
+        }
+    }
+
+    /**
+     * Ответ свайпом влево, как в Telegram: пузырь уезжает за пальцем, справа проявляется
+     * круглая кнопка «ответить»; отпустили дальше порога — ответ на это сообщение.
+     */
+    private inner class SwipeToReply(context: Context) : RecyclerView.OnItemTouchListener {
+        private val slop = android.view.ViewConfiguration.get(context).scaledTouchSlop
+        private val threshold = AndroidUtilities.dp(64f).toFloat()
+        private val maxShift = AndroidUtilities.dp(96f).toFloat()
+        private var startX = 0f
+        private var startY = 0f
+        private var cell: MessageCell? = null
+        private var message: MaxMessage? = null
+        private var swiping = false
+        private var armed = false
+
+        override fun onInterceptTouchEvent(rv: RecyclerView, e: android.view.MotionEvent): Boolean {
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    startX = e.x
+                    startY = e.y
+                    swiping = false
+                    armed = false
+                    val view = rv.findChildViewUnder(e.x, e.y) as? MessageCell
+                    val row = view?.let { rows.getOrNull(rv.getChildAdapterPosition(it)) } as? MaxMessage
+                    if (view != null && row != null && canSwipeReply(row)) {
+                        cell = view
+                        message = row
+                    } else {
+                        cell = null
+                        message = null
+                    }
+                }
+                android.view.MotionEvent.ACTION_MOVE -> if (!swiping && cell != null) {
+                    val dx = e.x - startX
+                    val dy = e.y - startY
+                    if (dx < -slop && Math.abs(dx) > Math.abs(dy) * 1.5f) {
+                        swiping = true
+                        startX = e.x
+                        rv.parent?.requestDisallowInterceptTouchEvent(true)
+                        listView.cancelClickRunnables(true)
+                    } else if (Math.abs(dy) > slop) {
+                        cell = null
+                    }
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> cell = null
+            }
+            return swiping
+        }
+
+        override fun onTouchEvent(rv: RecyclerView, e: android.view.MotionEvent) {
+            val target = cell ?: return
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val shift = (startX - e.x).coerceIn(0f, maxShift)
+                    target.setSwipe(shift, threshold)
+                    val nowArmed = shift >= threshold
+                    if (nowArmed && !armed) {
+                        try {
+                            target.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                        } catch (ignored: Throwable) {
+                        }
+                    }
+                    armed = nowArmed
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    target.releaseSwipe()
+                    val replyTo = message
+                    if (armed && e.actionMasked == android.view.MotionEvent.ACTION_UP && replyTo != null) startReply(replyTo)
+                    cell = null
+                    message = null
+                    swiping = false
+                    armed = false
+                }
+            }
+        }
+
+        override fun onRequestDisallowInterceptTouchEvent(disallowIntercept: Boolean) {}
+    }
+
+    /** Отвечать можно на настоящее сообщение и только там, где есть поле ввода. */
+    private fun canSwipeReply(message: MaxMessage): Boolean =
+        message.id != 0L && !message.isService && !message.pending && joinBar?.visibility != View.VISIBLE &&
+            searchBar.visibility != View.VISIBLE
 
     // ---- меню действий ----
 
@@ -1647,6 +1762,13 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private val meta = MaxBubbles.Meta(context)
         private val reactionsRow = LinearLayout(context)
         private val pollBox = LinearLayout(context)
+        private val contactBox = LinearLayout(context)
+        private val contactAvatar = BackupImageView(context)
+        private val contactName = TextView(context)
+        private val contactPhone = TextView(context)
+        private val contactButtons = LinearLayout(context)
+        private val swipeIcon = ImageView(context)
+        private var swipeAnimator: android.animation.ValueAnimator? = null
         private val inBubble = MaxBubbles.Bubble(false, false)
         private val outBubble = MaxBubbles.Bubble(true, false)
         private val inMediaBubble = MaxBubbles.Bubble(false, true)
@@ -1706,6 +1828,29 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             fileRow.addView(fileTexts, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 10f, 0f, 4f, 0f))
             bubble.addView(fileRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 2f))
 
+            // Контакт как в Telegram: аватарка, имя, номер; ниже кнопки «Написать» / «Добавить».
+            contactBox.orientation = LinearLayout.VERTICAL
+            val contactRow = LinearLayout(context)
+            contactRow.orientation = LinearLayout.HORIZONTAL
+            contactRow.gravity = Gravity.CENTER_VERTICAL
+            contactAvatar.setRoundRadius(AndroidUtilities.dp(22f))
+            contactRow.addView(contactAvatar, LayoutHelper.createLinear(44, 44))
+            val contactTexts = LinearLayout(context)
+            contactTexts.orientation = LinearLayout.VERTICAL
+            contactName.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
+            contactName.typeface = AndroidUtilities.bold()
+            contactName.isSingleLine = true
+            contactName.ellipsize = TextUtils.TruncateAt.END
+            contactTexts.addView(contactName, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
+            contactPhone.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
+            contactPhone.isSingleLine = true
+            contactTexts.addView(contactPhone, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 1f, 0f, 0f))
+            contactRow.addView(contactTexts, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 10f, 0f, 8f, 0f))
+            contactBox.addView(contactRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 0f))
+            contactButtons.orientation = LinearLayout.HORIZONTAL
+            contactBox.addView(contactButtons, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 36, 0f, 6f, 0f, 0f))
+            bubble.addView(contactBox, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 2f))
+
             body.setLineSpacing(0f, 1.05f)
             textBox.addView(body, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat()))
             textBox.addView(meta, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.BOTTOM or Gravity.END, 0f, 0f, 0f, 0f))
@@ -1718,9 +1863,44 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             bubble.addView(reactionsRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 4f, 0f, 2f))
 
             addView(bubble, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.START, 0f, 0f, 0f, 0f))
+
+            // Кнопка «ответить» при свайпе — как в Telegram: круг цвета служебных плашек.
+            swipeIcon.setImageResource(org.telegram.messenger.R.drawable.filled_button_reply)
+            swipeIcon.scaleType = ImageView.ScaleType.CENTER
+            swipeIcon.colorFilter = android.graphics.PorterDuffColorFilter(Theme.getColor(Theme.key_chat_serviceIcon), android.graphics.PorterDuff.Mode.SRC_IN)
+            swipeIcon.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(16f), Theme.getColor(Theme.key_chat_serviceBackground))
+            swipeIcon.alpha = 0f
+            addView(swipeIcon, LayoutHelper.createFrame(32, 32f, Gravity.END or Gravity.CENTER_VERTICAL, 0f, 0f, 12f, 0f))
+        }
+
+        fun setSwipe(shift: Float, threshold: Float) {
+            swipeAnimator?.cancel()
+            applySwipe(shift, threshold)
+        }
+
+        private fun applySwipe(shift: Float, threshold: Float) {
+            bubble.translationX = -shift
+            val progress = (shift / threshold).coerceIn(0f, 1f)
+            swipeIcon.alpha = progress
+            swipeIcon.scaleX = 0.5f + 0.5f * progress
+            swipeIcon.scaleY = 0.5f + 0.5f * progress
+            swipeIcon.translationX = (1f - progress) * AndroidUtilities.dp(24f)
+        }
+
+        fun releaseSwipe() {
+            val from = -bubble.translationX
+            if (from <= 0f) return
+            val threshold = AndroidUtilities.dp(64f).toFloat()
+            val animator = android.animation.ValueAnimator.ofFloat(from, 0f)
+            animator.duration = 180
+            animator.addUpdateListener { applySwipe(it.animatedValue as Float, threshold) }
+            swipeAnimator = animator
+            animator.start()
         }
 
         fun bind(message: MaxMessage, showName: Boolean, topNear: Boolean, bottomNear: Boolean) {
+            swipeAnimator?.cancel()
+            applySwipe(0f, 1f)
             val out = message.isOutgoing
             val textColor = Theme.getColor(if (out) Theme.key_chat_messageTextOut else Theme.key_chat_messageTextIn)
             val accent = Theme.getColor(if (out) Theme.key_chat_outReplyNameText else Theme.key_chat_inReplyNameText)
@@ -1779,9 +1959,11 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             // Медиа и файлы
             media.visibility = GONE
             fileRow.visibility = GONE
+            contactBox.visibility = GONE
             mediaMeta.visibility = GONE
             var bodyText = message.text
             when {
+                attach != null && attach.type == "CONTACT" -> bindContact(attach, textColor, accent, secondary, maxWidth)
                 visual && attach != null -> {
                     media.visibility = VISIBLE
                     val (w, h) = mediaSize(attach, maxWidth - AndroidUtilities.dp(if (mediaOnly) 14f else 28f))
@@ -1816,7 +1998,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 }
                 attach != null && bodyText.isEmpty() -> bodyText = message.attachLabel ?: ""
                 attach != null && attach.type == "POLL" -> bodyText = message.text
-                attach != null && attach.type in setOf("LOCATION", "CONTACT", "CALL", "SHARE") ->
+                attach != null && attach.type in setOf("LOCATION", "CALL", "SHARE") ->
                     bodyText = (message.attachLabel ?: "") + "\n" + bodyText
             }
             if (attach == null && message.pending && message.attachLabel != null) {
@@ -1873,6 +2055,45 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             params.topMargin = AndroidUtilities.dp(if (topNear) 1f else 4f)
             params.bottomMargin = AndroidUtilities.dp(if (bottomNear) 1f else 4f)
             bubble.layoutParams = params
+        }
+
+        private fun bindContact(attach: MaxAttach, textColor: Int, accent: Int, secondary: Int, maxWidth: Int) {
+            val shared = MaxSharedContact.parse(attach.raw)
+            if (shared.id != 0L && !MaxContacts.has(shared.id)) MaxClient.resolveMissing(listOf(shared.id))
+            contactBox.visibility = VISIBLE
+            contactName.text = MaxBubbles.emojify(shared.name, contactName)
+            contactName.setTextColor(accent)
+            contactName.maxWidth = maxWidth - AndroidUtilities.dp(90f)
+            contactPhone.text = shared.phone.ifEmpty { if (shared.id != 0L) "в MAX" else "" }
+            contactPhone.setTextColor(textColor)
+            MaxImages.bindAvatar(contactAvatar, if (shared.id != 0L) shared.id else shared.name.hashCode().toLong(), shared.name, shared.photoUrl, 44)
+            contactButtons.removeAllViews()
+            val me = MaxStore.accountId
+            val buttons = ArrayList<Pair<String, () -> Unit>>()
+            when {
+                shared.id != 0L && shared.id != me -> {
+                    buttons.add("Написать" to { presentFragment(MaxChatFragment(MaxClient.chatForContact(shared.id).id, shared.id)) })
+                    if (MaxClient.contacts.none { it.id == shared.id }) buttons.add("Добавить" to { addSharedContact(shared) })
+                }
+                shared.id == 0L && shared.phone.isNotEmpty() -> buttons.add("Найти в MAX" to { findShared(shared) })
+            }
+            contactButtons.visibility = if (buttons.isEmpty()) GONE else VISIBLE
+            buttons.forEachIndexed { i, (title, action) ->
+                val button = TextView(context)
+                button.text = title
+                button.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
+                button.typeface = AndroidUtilities.bold()
+                button.gravity = Gravity.CENTER
+                button.setTextColor(accent)
+                button.isSingleLine = true
+                button.background = Theme.createSimpleSelectorRoundRectDrawable(AndroidUtilities.dp(8f), (accent and 0x00ffffff) or 0x1a000000, (accent and 0x00ffffff) or 0x33000000)
+                button.setPadding(AndroidUtilities.dp(12f), 0, AndroidUtilities.dp(12f), 0)
+                button.setOnClickListener { action() }
+                contactButtons.addView(button, LayoutHelper.createLinear(0, LayoutHelper.MATCH_PARENT, 1f, if (i == 0) 0 else 6, 0, 0, 0))
+            }
+            // Кнопки делят ширину поровну; чтобы им было где уместиться — минимальная ширина карточки.
+            contactBox.minimumWidth = AndroidUtilities.dp(if (buttons.size > 1) 240f else 200f)
+            contactPhone.setTextColor(if (shared.phone.isEmpty()) secondary else textColor)
         }
 
         /**
