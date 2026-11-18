@@ -54,6 +54,7 @@ object MaxCache {
     fun clear() {
         try {
             dir?.listFiles()?.forEach { it.delete() }
+            MaxImages.clearDisk()
         } catch (ignored: Throwable) {
         }
     }

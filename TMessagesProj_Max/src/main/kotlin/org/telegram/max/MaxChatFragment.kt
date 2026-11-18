@@ -931,6 +931,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
     override fun onFragmentDestroy() {
         MaxClient.removeListener(this)
+        MaxClient.subscribeChat(chatId, false)
         if (MaxClient.openChatId == chatId) MaxClient.openChatId = null
         AndroidUtilities.cancelRunOnUIThread(headerTicker)
         MaxAudio.stop()
@@ -947,6 +948,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             return
         }
         MaxClient.openChatId = chatId
+        MaxClient.subscribeChat(chatId, true)
         MaxNotifier.clear(chatId)
         markRead()
         updateHeader()
@@ -1761,6 +1763,8 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private val body = TextView(context)
         private val meta = MaxBubbles.Meta(context)
         private val reactionsRow = LinearLayout(context)
+        private val reactionsBox = FrameLayout(context)
+        private val reactionsMeta = MaxBubbles.Meta(context)
         private val pollBox = LinearLayout(context)
         private val contactBox = LinearLayout(context)
         private val contactAvatar = BackupImageView(context)
@@ -1789,16 +1793,17 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             bubble.addView(author, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 0f, 0f, 1f))
 
             quote.orientation = LinearLayout.VERTICAL
-            quote.setPadding(AndroidUtilities.dp(8f), AndroidUtilities.dp(3f), AndroidUtilities.dp(8f), AndroidUtilities.dp(3f))
-            quoteName.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
+            quote.setPadding(AndroidUtilities.dp(11f), AndroidUtilities.dp(5f), AndroidUtilities.dp(10f), AndroidUtilities.dp(6f))
+            quoteName.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
             quoteName.typeface = AndroidUtilities.bold()
             quoteName.isSingleLine = true
             quote.addView(quoteName, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
-            quoteText.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
+            quoteText.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
             quoteText.isSingleLine = true
             quoteText.ellipsize = TextUtils.TruncateAt.END
-            quote.addView(quoteText, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
-            bubble.addView(quote, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 4f))
+            quote.addView(quoteText, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 1f, 0f, 0f))
+            // Цитата во всю ширину пузыря, как в Telegram.
+            bubble.addView(quote, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 3f, 0f, 5f))
 
             image.setRoundRadius(AndroidUtilities.dp(12f))
             media.addView(image, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT.toFloat()))
@@ -1859,8 +1864,12 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             pollBox.orientation = LinearLayout.VERTICAL
             bubble.addView(pollBox, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 4f))
 
+            // Реакции как в Telegram: под текстом, время — справа в той же строке.
             reactionsRow.orientation = LinearLayout.HORIZONTAL
-            bubble.addView(reactionsRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 4f, 0f, 2f))
+            reactionsRow.gravity = Gravity.CENTER_VERTICAL
+            reactionsBox.addView(reactionsRow, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.START or Gravity.CENTER_VERTICAL, 0f, 0f, 0f, 0f))
+            reactionsBox.addView(reactionsMeta, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.END or Gravity.BOTTOM, 0f, 0f, 0f, 0f))
+            bubble.addView(reactionsBox, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 6f, 0f, 0f))
 
             addView(bubble, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.START, 0f, 0f, 0f, 0f))
 
@@ -1946,7 +1955,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             val reply = message.reply
             if (reply != null) {
                 quote.visibility = VISIBLE
-                quote.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(6f), (accent and 0x00ffffff) or 0x22000000)
+                quote.background = QuoteDrawable(Theme.getColor(if (out) Theme.key_chat_outReplyLine else Theme.key_chat_inReplyLine))
                 quoteName.text = MaxContacts.get(reply.senderId)?.name ?: "Сообщение"
                 quoteName.setTextColor(accent)
                 quoteText.text = MaxBubbles.emojify(reply.text, quoteText)
@@ -2012,8 +2021,12 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 bodyText = ""
             }
 
-            // Текст и время. У фото без подписи время уже стоит поверх картинки.
-            textBox.visibility = if (mediaOnly) GONE else VISIBLE
+            // Текст и время. У фото без подписи время уже стоит поверх картинки. Если есть
+            // реакции — время переезжает в их строку справа, как в Telegram.
+            val hasReactions = message.id != 0L && message.reactions?.isEmpty == false && bigEmoji == 0 && !sticker
+            val metaInReactions = hasReactions && !mediaOnly
+            textBox.visibility = if (mediaOnly || (metaInReactions && bodyText.isEmpty())) GONE else VISIBLE
+            meta.visibility = if (metaInReactions) GONE else VISIBLE
             meta.bind(message.time, message.edited, status, if (bigEmoji > 0) MaxBubbles.Mode.MEDIA else if (out) MaxBubbles.Mode.OUT else MaxBubbles.Mode.IN)
             body.setTextColor(textColor)
             body.maxWidth = maxWidth
@@ -2028,8 +2041,8 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 body.visibility = VISIBLE
                 body.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, SharedConfig.fontSize.toFloat())
                 body.setPadding(0, 0, 0, 0)
-                val room = meta.measureWidth() + AndroidUtilities.dp(6f)
-                body.text = MaxBubbles.withTimeRoom(MaxBubbles.emojify(bodyText, body), room)
+                body.text = if (metaInReactions) MaxBubbles.emojify(bodyText, body)
+                else MaxBubbles.withTimeRoom(MaxBubbles.emojify(bodyText, body), meta.measureWidth() + AndroidUtilities.dp(6f))
             }
 
             // Пузырь Telegram; у крупных эмодзи и стикеров пузыря нет.
@@ -2045,7 +2058,15 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 MaxBubbles.applyPadding(bubble, out, mediaOnly)
             }
             bindPoll(message, out, maxWidth)
-            bindReactions(message, out)
+            bindReactions(message, out, hasReactions)
+            if (metaInReactions) {
+                reactionsMeta.visibility = VISIBLE
+                reactionsMeta.bind(message.time, message.edited, status, if (out) MaxBubbles.Mode.OUT else MaxBubbles.Mode.IN)
+                (reactionsRow.layoutParams as LayoutParams).rightMargin = reactionsMeta.measureWidth() + AndroidUtilities.dp(10f)
+            } else {
+                reactionsMeta.visibility = GONE
+                (reactionsRow.layoutParams as LayoutParams).rightMargin = 0
+            }
             setBackgroundColor(if (message.id != 0L && message.id == highlightId) Theme.getColor(Theme.key_chat_selectedBackground) else 0)
 
             val params = bubble.layoutParams as LayoutParams
@@ -2186,22 +2207,22 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         }
 
         /** Реакции под текстом — «пилюли» с эмодзи и числом, моя закрашена, как в Telegram. */
-        private fun bindReactions(message: MaxMessage, out: Boolean) {
+        private fun bindReactions(message: MaxMessage, out: Boolean, show: Boolean) {
             val r = message.reactions
             reactionsRow.removeAllViews()
-            if (r == null || r.isEmpty || message.id == 0L) {
-                reactionsRow.visibility = GONE
+            if (!show || r == null) {
+                reactionsBox.visibility = GONE
                 return
             }
-            reactionsRow.visibility = VISIBLE
+            reactionsBox.visibility = VISIBLE
             val base = Theme.getColor(if (out) Theme.key_chat_outReactionButtonBackground else Theme.key_chat_inReactionButtonBackground)
             for ((emoji, count) in r.counters.take(6)) {
                 val mine = r.mine == emoji
                 val chip = TextView(context)
-                chip.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
+                chip.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
                 chip.typeface = AndroidUtilities.bold()
                 chip.gravity = Gravity.CENTER_VERTICAL
-                chip.setPadding(AndroidUtilities.dp(8f), AndroidUtilities.dp(3f), AndroidUtilities.dp(10f), AndroidUtilities.dp(3f))
+                chip.setPadding(AndroidUtilities.dp(8f), 0, AndroidUtilities.dp(10f), 0)
                 chip.text = MaxBubbles.emojify("$emoji ${if (count > 0) count else 1}", chip)
                 chip.setTextColor(Theme.getColor(
                     if (mine) (if (out) Theme.key_chat_outReactionButtonTextSelected else Theme.key_chat_inReactionButtonTextSelected)
@@ -2209,7 +2230,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                 ))
                 chip.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(14f), if (mine) base else (base and 0x00ffffff) or 0x26000000)
                 chip.setOnClickListener { toggleReaction(message, emoji) }
-                reactionsRow.addView(chip, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, 28, 0f, 0f, 6f, 0f))
+                reactionsRow.addView(chip, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, 26, 0f, 0f, 6f, 0f))
             }
         }
 
@@ -2226,6 +2247,39 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             }
             return w.coerceAtLeast(AndroidUtilities.dp(120f)) to h.coerceAtLeast(AndroidUtilities.dp(80f))
         }
+    }
+
+    /**
+     * Фон цитаты ответа как в Telegram: скруглённая плашка цвета линии с прозрачностью
+     * и сплошная полоса 3dp слева.
+     */
+    private class QuoteDrawable(private val color: Int) : android.graphics.drawable.Drawable() {
+        private val fill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        private val line = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        private val path = android.graphics.Path()
+        private val rect = android.graphics.RectF()
+
+        init {
+            fill.color = (color and 0x00ffffff) or 0x1f000000
+            line.color = color
+        }
+
+        override fun draw(canvas: android.graphics.Canvas) {
+            val r = AndroidUtilities.dp(5f).toFloat()
+            rect.set(bounds)
+            path.reset()
+            path.addRoundRect(rect, r, r, android.graphics.Path.Direction.CW)
+            canvas.save()
+            canvas.clipPath(path)
+            canvas.drawRect(rect, fill)
+            canvas.drawRect(rect.left, rect.top, rect.left + AndroidUtilities.dp(3f), rect.bottom, line)
+            canvas.restore()
+        }
+
+        override fun setAlpha(alpha: Int) {}
+        override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {}
+        @Deprecated("Deprecated in Java")
+        override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
     }
 
     companion object {

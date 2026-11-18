@@ -16,8 +16,82 @@ import java.util.concurrent.Executors
  */
 object MaxImages {
 
-    private val cache = object : LruCache<String, Bitmap>(12 * 1024 * 1024) {
+    /** Восьмая часть памяти процесса: 12 МБ хватало на сотню аватарок, фото их вытесняли. */
+    private val cache = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 8).toInt().coerceAtLeast(16 * 1024 * 1024)) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+
+    /**
+     * Кеш файлов на диске: после перезапуска аватарки и превью берутся отсюда, а не
+     * качаются заново (на вкладке MAX было видно, как они прогружаются). Система сама
+     * чистит cacheDir при нехватке места; свыше [DISK_LIMIT] удаляем самые старые.
+     */
+    private val diskDir: java.io.File? by lazy {
+        try {
+            java.io.File(org.telegram.messenger.ApplicationLoader.applicationContext.cacheDir, "max_images").apply { mkdirs() }
+        } catch (e: Throwable) {
+            null
+        }
+    }
+    private const val DISK_LIMIT = 150L * 1024 * 1024
+
+    private fun diskFile(url: String): java.io.File? {
+        val dir = diskDir ?: return null
+        val digest = java.security.MessageDigest.getInstance("SHA-1").digest(url.toByteArray())
+        return java.io.File(dir, digest.joinToString("") { "%02x".format(it) })
+    }
+
+    private fun fetchBytes(url: String): ByteArray {
+        val file = diskFile(url)
+        if (file != null && file.length() > 0) {
+            try {
+                val bytes = file.readBytes()
+                file.setLastModified(System.currentTimeMillis())
+                return bytes
+            } catch (ignored: Throwable) {
+            }
+        }
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.connectTimeout = 10000
+        conn.readTimeout = 15000
+        val bytes = try {
+            conn.inputStream.use { it.readBytes() }
+        } finally {
+            conn.disconnect()
+        }
+        if (file != null && bytes.isNotEmpty()) {
+            try {
+                val tmp = java.io.File(file.path + ".tmp")
+                tmp.writeBytes(bytes)
+                tmp.renameTo(file)
+                trimDisk()
+            } catch (ignored: Throwable) {
+            }
+        }
+        return bytes
+    }
+
+    @Volatile
+    private var lastTrim = 0L
+
+    private fun trimDisk() {
+        val now = System.currentTimeMillis()
+        if (now - lastTrim < 60_000) return
+        lastTrim = now
+        val files = diskDir?.listFiles() ?: return
+        var total = files.sumOf { it.length() }
+        if (total <= DISK_LIMIT) return
+        for (f in files.sortedBy { it.lastModified() }) {
+            total -= f.length()
+            f.delete()
+            if (total <= DISK_LIMIT * 3 / 4) break
+        }
+    }
+
+    /** Выход из аккаунта: картинки с диска тоже стираем. */
+    fun clearDisk() {
+        synchronized(cache) { cache.evictAll() }
+        diskDir?.listFiles()?.forEach { it.delete() }
     }
     private val failed = HashSet<String>()
     private val pool = Executors.newFixedThreadPool(3)
@@ -86,6 +160,10 @@ object MaxImages {
             cache.snapshot().keys.filter { it.startsWith(url) }.forEach { cache.remove(it) }
         }
         synchronized(failed) { failed.remove(url) }
+        try {
+            diskFile(url)?.delete()
+        } catch (ignored: Throwable) {
+        }
     }
 
     /** Картинка целиком для просмотра на весь экран; колбэк на главном потоке. */
@@ -97,14 +175,7 @@ object MaxImages {
     }
 
     private fun download(url: String, sizePx: Int): Bitmap? = try {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.connectTimeout = 10000
-        conn.readTimeout = 15000
-        val bytes = try {
-            conn.inputStream.use { it.readBytes() }
-        } finally {
-            conn.disconnect()
-        }
+        val bytes = fetchBytes(url)
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         var sample = 1

@@ -92,6 +92,7 @@ object MaxClient {
     private const val OP_CHAT_LEAVE = 58
     private const val OP_MSG_SEARCH = 73
     private const val OP_CHAT_MEMBERS_UPDATE = 77
+    private const val OP_CHAT_SUBSCRIBE = 75
     private const val OP_MSG_REACTION = 178
     private const val OP_STORIES_LIST = 208
     private const val OP_FOLDERS_GET = 272
@@ -719,6 +720,30 @@ object MaxClient {
         io { fetchContacts() }
         loadStories()
         loadFolders()
+        // Новая сессия ничего не знает о подписке — повторяем для открытой переписки.
+        subscribedChat?.let { id -> io { sendSubscribe(id, true) } }
+    }
+
+    /** Переписка, на обновления которой подписаны (опкод 75). */
+    @Volatile
+    private var subscribedChat: Long? = null
+
+    /**
+     * Подписка на обновления открытого чата — опкод 75 `{chatId, subscribe}`, как у Komet
+     * (ChatController при открытии, отписка при закрытии). Без неё сервер не шлёт пуши
+     * реакций (155) — они появлялись только после повторного входа в чат.
+     */
+    fun subscribeChat(chatId: Long, subscribe: Boolean) {
+        if (subscribe) subscribedChat = chatId else if (subscribedChat == chatId) subscribedChat = null
+        io { sendSubscribe(chatId, subscribe) }
+    }
+
+    private fun sendSubscribe(chatId: Long, subscribe: Boolean) {
+        try {
+            request(OP_CHAT_SUBSCRIBE, JSONObject().put("chatId", chatId).put("subscribe", subscribe))
+        } catch (e: Throwable) {
+            MaxLog.e("подписка на чат не прошла", e)
+        }
     }
 
     // ---- люди ----
