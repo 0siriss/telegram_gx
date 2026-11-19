@@ -292,6 +292,15 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             more.addSubItem(MENU_INFO, org.telegram.messenger.R.drawable.msg_info, if (chat.isDialog) "Профиль" else "Информация")
             if (!chat.isDialog) more.addSubItem(MENU_LEAVE, org.telegram.messenger.R.drawable.msg_leave, if (chat.isChannel) "Покинуть канал" else "Покинуть группу")
         }
+        val wallpaper = Theme.getCachedWallpaper()
+        val root = ChatBackground(context)
+        root.setBackgroundImage(wallpaper, Theme.isWallpaperMotion())
+        // Стекло шапки рисует размытые обои, поэтому источник подключаем до создания плашек.
+        MaxGlass.attach(root, wallpaper)
+        root.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+            MaxGlass.updateWallpaper(wallpaper, v.width, v.height)
+        }
+
         // Шапка ставится в зону самой панели, ниже строки состояния: иначе имя рисуется
         // под часами и значками и кажется пропавшим.
         val headerParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ActionBar.getCurrentActionBarHeight(), Gravity.TOP or Gravity.START)
@@ -303,9 +312,6 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         actionBar.addView(header, headerParams)
         MaxGlass.setupChatHeader(actionBar)
         actionBar.setAddToContainer(false)
-
-        val root = ChatBackground(context)
-        root.setBackgroundImage(Theme.getCachedWallpaper(), Theme.isWallpaperMotion())
 
         // Как в Telegram 13: лента на весь экран, шапка, закреп и поле ввода плавают над ней.
         val listHolder = FrameLayout(context)
@@ -930,6 +936,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     }
 
     override fun onFragmentDestroy() {
+        MaxGlass.detach()
         MaxClient.removeListener(this)
         MaxClient.subscribeChat(chatId, false)
         if (MaxClient.openChatId == chatId) MaxClient.openChatId = null
@@ -1006,6 +1013,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     /** Добавляет сообщения без дублей и держит порядок по времени. */
     private fun merge(list: List<MaxMessage>) {
         for (m in list) {
+            if (m.isOutgoing && m.id < 0) MaxBubbles.rotateOutGradient()
             val index = messages.indexOfFirst { it.sameAs(m) }
             if (index >= 0) messages[index] = m else messages.add(m)
         }

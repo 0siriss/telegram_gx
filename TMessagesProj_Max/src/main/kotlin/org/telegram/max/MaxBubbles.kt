@@ -36,7 +36,7 @@ object MaxBubbles {
      * от того же автора ([bottomNear] = false); место под него — 8dp сбоку, поэтому у
      * содержимого со стороны хвостика отступ больше.
      */
-    class Bubble(out: Boolean, media: Boolean) :
+    class Bubble(private val out: Boolean, media: Boolean) :
         MessageDrawable(if (media) MessageDrawable.TYPE_MEDIA else MessageDrawable.TYPE_TEXT, out, false) {
         var topNear = false
         var bottomNear = false
@@ -45,7 +45,25 @@ object MaxBubbles {
             val b = bounds
             setTop(0, b.width(), b.height(), topNear, bottomNear)
             super.draw(canvas)
+            // Пока градиент переезжает на следующую позицию (после отправки сообщения),
+            // кадры обновляет MotionBackgroundDrawable, но перерисовать сам вид должен он же:
+            // в чате Telegram это делает ChatActivity, слушая invalidateMotionBackground.
+            if (out && posAnimationProgress < 1f) invalidateSelf()
         }
+
+        private val posAnimationProgress: Float
+            get() = motionBackgroundDrawable?.posAnimationProgress ?: 1f
+    }
+
+    /**
+     * Анимированные цвета сообщений Telegram: при каждом новом исходящем сообщении общий
+     * `MotionBackgroundDrawable` (в `MessageDrawable` он статический, один на все пузыри)
+     * переезжает на следующую позицию градиента, и пузыри плавно перекрашиваются.
+     * В чате Telegram это делает `ChatActivity.rotateMotionBackgroundDrawable`.
+     */
+    fun rotateOutGradient() {
+        if (Theme.getColor(Theme.key_chat_outBubbleGradientAnimated) == 0) return
+        Theme.chat_msgOutDrawable?.motionBackgroundDrawable?.switchToNextPosition()
     }
 
     /** Отступы содержимого внутри пузыря: со стороны хвостика 17dp, с другой 11dp. */

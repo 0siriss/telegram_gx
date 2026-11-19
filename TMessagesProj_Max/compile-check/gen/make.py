@@ -66,7 +66,7 @@ th = keep(methods("org/telegram/ui/ActionBar/Theme.java", ["getColor","createRou
 keys = int_fields("org/telegram/ui/ActionBar/Theme.java", r'key_\w+')
 # Вложенные вручную: сверено с Theme.java (ResourcesProvider — интерфейс, AdaptiveRipple.filledRectByKey(int, float...)).
 theme_nested = "    public interface ResourcesProvider {}\n    public static class AdaptiveRipple {\n        public static Drawable filledRectByKey(int backgroundColorKey, float... radii) { return null; }\n    }\n"
-write("org.telegram.ui.ActionBar","Theme","public class Theme {\n"+theme_nested+"\n".join(keys)+"\n"+"\n".join(th)+"\n}", ANDROID+["org.telegram.ui.Components.CombinedDrawable"])
+write("org.telegram.ui.ActionBar","Theme","public class Theme {\n    public static MessageDrawable chat_msgOutDrawable;\n"+theme_nested+"\n".join(keys)+"\n"+"\n".join(th)+"\n}", ANDROID+["org.telegram.ui.Components.CombinedDrawable"])
 write("org.telegram.ui.Components","CombinedDrawable","public class CombinedDrawable extends Drawable {\n    public void draw(Canvas c) {}\n    public void setAlpha(int a) {}\n    public void setColorFilter(ColorFilter f) {}\n    public int getOpacity() { return 0; }\n}", ANDROID)
 
 # --- LayoutHelper ---

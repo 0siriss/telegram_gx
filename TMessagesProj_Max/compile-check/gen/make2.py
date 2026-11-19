@@ -145,6 +145,7 @@ write("org.telegram.ui.Components","RecyclerListView",
     public void setOnItemLongClickListener(OnItemLongClickListenerExtended listener) {}
     public void setOnItemLongClickListener(OnItemLongClickListenerExtended listener, long duration) {}
     public void cancelClickRunnables(boolean uncheck) {}
+    public void invalidateViews() {}
 }""", UI)
 
 write("org.telegram.ui.Components","BackupImageView",
@@ -176,7 +177,20 @@ write("org.telegram.ui.ActionBar","MessageDrawable",
     public void setAlpha(int a) {}
     public void setColorFilter(ColorFilter f) {}
     public int getOpacity() { return 0; }
+    public org.telegram.ui.Components.MotionBackgroundDrawable getMotionBackgroundDrawable() { return null; }
 """ + M("org/telegram/ui/ActionBar/MessageDrawable.java", ["setTop","draw"]) + "\n}", UI)
+
+write("org.telegram.ui.Components","MotionBackgroundDrawable",
+"""public class MotionBackgroundDrawable extends Drawable {
+    public float getPosAnimationProgress() { return 1f; }
+    public void switchToNextPosition() {}
+    public void draw(Canvas c) {}
+    public void setAlpha(int a) {}
+    public void setColorFilter(ColorFilter f) {}
+    public int getOpacity() { return 0; }
+}""", UI)
+
+
 
 write("org.telegram.ui.Components","MsgClockDrawable",
 """public class MsgClockDrawable extends Drawable {
@@ -240,6 +254,26 @@ write("org.telegram.ui.Components","ItemOptions",
 B3 = "org.telegram.ui.Components.blur3"
 write(B3 + ".source","BlurredBackgroundSource","public interface BlurredBackgroundSource {}", UI)
 write(B3 + ".source","BlurredBackgroundSourceColor","public class BlurredBackgroundSourceColor implements BlurredBackgroundSource {\n    public void setColor(int color) { }\n}", UI)
+write(B3 + ".source","BlurredBackgroundSourceBitmap",
+"""public class BlurredBackgroundSourceBitmap implements BlurredBackgroundSource {
+    public void setBitmap(Bitmap bitmap) { }
+    public Bitmap getBitmap() { return null; }
+    public void setParentSize(int width, int height, int actionBarHeight) { }
+}""", UI)
+write(B3 + ".source","BlurredBackgroundSourceWrapped",
+"""public class BlurredBackgroundSourceWrapped implements BlurredBackgroundSource {
+    public BlurredBackgroundSource getSource() { return null; }
+    public void setSource(BlurredBackgroundSource source) { }
+}""", UI)
+write("org.telegram.ui.Components.chat","ViewPositionWatcher",
+"""public class ViewPositionWatcher {
+    public ViewPositionWatcher(View anchorView) { }
+    public void shutdown() { }
+}""", UI)
+write("org.telegram.ui.Components.chat","WallpaperBitmapProvider",
+"""public class WallpaperBitmapProvider {
+    public org.telegram.ui.Components.blur3.source.BlurredBackgroundSource updateSourceFromBackgroundViewDrawable(Drawable drawable) { return null; }
+}""", UI)
 write(B3 + ".drawable.color","BlurredBackgroundColorProvider","public interface BlurredBackgroundColorProvider {}", UI)
 write(B3 + ".drawable.color","BlurredBackgroundProvider","public interface BlurredBackgroundProvider extends BlurredBackgroundColorProvider {}", UI)
 write(B3 + ".drawable","BlurredBackgroundDrawable",
@@ -257,6 +291,7 @@ write(B3 + ".drawable.color.impl","BlurredBackgroundProviderImpl",
 write(B3,"BlurredBackgroundDrawableViewFactory",
 """public class BlurredBackgroundDrawableViewFactory {
     public BlurredBackgroundDrawableViewFactory(org.telegram.ui.Components.blur3.source.BlurredBackgroundSource source) { }
+    public void setSourceRootView(org.telegram.ui.Components.chat.ViewPositionWatcher watcher, ViewGroup parent) { }
     public org.telegram.ui.Components.blur3.drawable.BlurredBackgroundDrawable create(View view, org.telegram.ui.Components.blur3.drawable.color.BlurredBackgroundColorProvider provider) { return null; }
 }""", UI)
 
