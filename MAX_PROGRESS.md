@@ -37,7 +37,9 @@
   `getMotionBackgroundDrawable`, `getPosAnimationProgress`, `chat_msgOutDrawable`,
   `invalidateViews`); `gradle -p TMessagesProj_Max/compile-check compileKotlin`
   — BUILD SUCCESSFUL.
-- Сборка APK `v2.4.20` запущена через `build.yml` (workflow_dispatch).
+- Сборка APK `v2.4.20` собрана через `build.yml` (workflow_dispatch, run
+  44533728217, success): prerelease
+  https://github.com/0siriss/telegram_gx/releases/tag/v2.4.20, APK 68.7 МБ.
 
 ### Осталось
 
