@@ -36,12 +36,14 @@ object MaxGlass {
     }
 
     private var positionWatcher: ViewPositionWatcher? = null
+    private var headerActionBar: java.lang.ref.WeakReference<ActionBar>? = null
     private var lastWallpaper: Drawable? = null
     private var lastWidth = 0
     private var lastHeight = 0
 
     /** Шапка переписки: круг «назад», плашка заголовка, круг меню — как в ChatActivity. */
     fun setupChatHeader(actionBar: ActionBar) {
+        headerActionBar = java.lang.ref.WeakReference(actionBar)
         actionBar.setupGlass(chatFactory, BlurredBackgroundProviderImpl.topPanelChatActivity(null))
     }
 
@@ -83,11 +85,13 @@ object MaxGlass {
             source.setParentSize(width, height, 0)
         }
         wallpaperSource.setSource(source)
+        headerActionBar?.get()?.invalidate()
     }
 
     fun detach() {
         positionWatcher?.shutdown()
         positionWatcher = null
+        headerActionBar = null
         lastWallpaper = null
         lastWidth = 0
         lastHeight = 0

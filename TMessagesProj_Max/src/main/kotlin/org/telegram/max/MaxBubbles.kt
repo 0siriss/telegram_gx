@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
+import android.graphics.drawable.Drawable
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ReplacementSpan
@@ -21,6 +22,7 @@ import org.telegram.messenger.SharedConfig
 import org.telegram.ui.ActionBar.MessageDrawable
 import org.telegram.ui.ActionBar.Theme
 import org.telegram.ui.Components.LayoutHelper
+import org.telegram.ui.Components.MotionBackgroundDrawable
 import org.telegram.ui.Components.MsgClockDrawable
 
 /**
@@ -61,8 +63,8 @@ object MaxBubbles {
      * переезжает на следующую позицию градиента, и пузыри плавно перекрашиваются.
      * В чате Telegram это делает `ChatActivity.rotateMotionBackgroundDrawable`.
      */
-    fun rotateOutGradient() {
-        if (Theme.getColor(Theme.key_chat_outBubbleGradientAnimated) == 0) return
+    fun rotateOutGradient(wallpaper: Drawable? = null) {
+        if (wallpaper is MotionBackgroundDrawable) wallpaper.switchToNextPosition()
         Theme.chat_msgOutDrawable?.motionBackgroundDrawable?.switchToNextPosition()
     }
 

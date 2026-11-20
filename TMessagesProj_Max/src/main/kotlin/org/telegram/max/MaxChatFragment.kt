@@ -220,6 +220,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         return super.onBackPressed(invoked)
     }
     private var sendGlass: android.graphics.drawable.Drawable? = null
+    private var wallpaperDrawable: android.graphics.drawable.Drawable? = null
     private lateinit var bottomStack: LinearLayout
 
     /** Высота зоны шапки: строка состояния + панель. */
@@ -294,6 +295,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         }
         val wallpaper = Theme.getCachedWallpaper()
         val root = ChatBackground(context)
+        wallpaperDrawable = wallpaper
         root.setBackgroundImage(wallpaper, Theme.isWallpaperMotion())
         // Стекло шапки рисует размытые обои, поэтому источник подключаем до создания плашек.
         MaxGlass.attach(root, wallpaper)
@@ -1013,7 +1015,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     /** Добавляет сообщения без дублей и держит порядок по времени. */
     private fun merge(list: List<MaxMessage>) {
         for (m in list) {
-            if (m.isOutgoing && m.id < 0) MaxBubbles.rotateOutGradient()
+            if (m.isOutgoing && m.id < 0) MaxBubbles.rotateOutGradient(wallpaperDrawable)
             val index = messages.indexOfFirst { it.sameAs(m) }
             if (index >= 0) messages[index] = m else messages.add(m)
         }
