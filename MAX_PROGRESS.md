@@ -37,6 +37,12 @@
    автоматически: `MaxVoice.toggle` (развернуть/свернуть, повтор при ошибке),
    кнопка в строке голосового, текст показывается только в развёрнутом виде.
 
+4. **Причина «градиента нет» в MAX.** `MessageDrawable.setTop` читает градиент
+   через `getCurrentColor`, а без `ResourcesProvider` это `Theme.getCurrentColor`
+   без дефолтов темы: у темы по умолчанию градиент живёт только в `defaultColors`.
+   В чате Telegram это закрывает `themeDelegate`. `MaxBubbles.Bubble` переопределяет
+   `getCurrentColor` на `Theme.getColor`.
+
 ### Проверено
 
 - Заглушки `compile-check/gen` дополнены (`MotionBackgroundDrawable`,
