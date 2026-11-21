@@ -177,6 +177,7 @@ write("org.telegram.ui.ActionBar","MessageDrawable",
     public void setAlpha(int a) {}
     public void setColorFilter(ColorFilter f) {}
     public int getOpacity() { return 0; }
+    protected int getCurrentColor(int key) { return 0; }
     public org.telegram.ui.Components.MotionBackgroundDrawable getMotionBackgroundDrawable() { return null; }
 """ + M("org/telegram/ui/ActionBar/MessageDrawable.java", ["setTop","draw"]) + "\n}", UI)
 
