@@ -7,7 +7,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Расшифровки голосовых MAX (аналог Komet TranscriptionCache/TranscriptionPushHandler):
- * текст запрашивается лениво при показе пузыря, кэшируется по messageId и встраивается в пузырь.
+ * текст запрашивается по нажатию кнопки «Т», кэшируется по messageId и встраивается в пузырь.
  */
 object MaxVoice {
 
@@ -16,17 +16,37 @@ object MaxVoice {
     private const val MAX_POLLS = 8
 
     private val texts = ConcurrentHashMap<Long, String>()
+    private val expanded = Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
     private val pending = Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
     private val handler = Handler(Looper.getMainLooper())
 
-    /** Вызывается на UI-потоке после появления новой расшифровки. */
+    /** Вызывается на UI-потоке после изменения состояния расшифровки. */
     var onChanged: (() -> Unit)? = null
 
     fun transcript(messageId: Long): String? = texts[messageId]
 
-    fun request(chatId: Long, messageId: Long, audioId: Long) {
+    fun isExpanded(messageId: Long): Boolean = expanded.contains(messageId)
+
+    fun isPending(messageId: Long): Boolean = pending.contains(messageId)
+
+    /**
+     * Кнопка «Т»: свернуть показанный текст или запросить и показать его.
+     * Повторный запрос из кэша не нужен, ошибку можно запросить заново.
+     */
+    fun toggle(chatId: Long, messageId: Long, audioId: Long) {
+        if (messageId == 0L) return
+        if (expanded.remove(messageId)) {
+            notifyChange()
+            return
+        }
+        expanded.add(messageId)
+        if (texts[messageId] == FAILED) texts.remove(messageId)
+        if (!texts.containsKey(messageId) && !pending.contains(messageId)) request(chatId, messageId, audioId)
+        notifyChange()
+    }
+
+    private fun request(chatId: Long, messageId: Long, audioId: Long) {
         if (chatId == 0L || messageId == 0L || audioId == 0L) return
-        if (texts.containsKey(messageId)) return
         if (!pending.add(messageId)) return
         attempt(chatId, messageId, audioId, 0)
     }
@@ -47,13 +67,20 @@ object MaxVoice {
                 }
                 status == 0 && tries < MAX_POLLS ->
                     handler.postDelayed({ attempt(chatId, messageId, audioId, tries + 1) }, RETRY_DELAY_MS)
-                else -> pending.remove(messageId)
+                else -> {
+                    pending.remove(messageId)
+                    store(messageId, FAILED)
+                }
             }
         }
     }
 
     private fun store(messageId: Long, text: String?) {
         texts[messageId] = text?.ifEmpty { FAILED } ?: FAILED
+        notifyChange()
+    }
+
+    private fun notifyChange() {
         handler.post { onChanged?.invoke() }
     }
 }

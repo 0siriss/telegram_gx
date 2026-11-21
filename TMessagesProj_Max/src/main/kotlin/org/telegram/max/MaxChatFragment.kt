@@ -1775,6 +1775,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private val voicePlay = TextView(context)
         private val voiceWave = VoiceWaveView(context)
         private val voiceTime = TextView(context)
+        private val voiceTranscribe = TextView(context)
         private val transcript = TextView(context)
         private val textBox = FrameLayout(context)
         private val body = TextView(context)
@@ -1861,6 +1862,10 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             voiceTime.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 12f)
             voiceTime.gravity = Gravity.CENTER_VERTICAL
             voiceRow.addView(voiceTime, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
+            voiceTranscribe.text = "Т"
+            voiceTranscribe.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
+            voiceTranscribe.gravity = Gravity.CENTER
+            voiceRow.addView(voiceTranscribe, LayoutHelper.createLinear(24, 32))
             bubble.addView(voiceRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 2f))
 
             transcript.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
@@ -2041,16 +2046,18 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                     voiceWave.bindTrack(message.id, attach.duration)
                     voiceTime.text = MaxMedia.durationText(attach.duration)
                     voiceTime.setTextColor(secondary)
+                    voiceTranscribe.setTextColor(secondary)
+                    voiceTranscribe.text = if (message.id != 0L && MaxVoice.isPending(message.id)) "…" else "Т"
+                    voiceTranscribe.visibility = if (attach.audioId != 0L) View.VISIBLE else View.INVISIBLE
+                    voiceTranscribe.setOnClickListener { MaxVoice.toggle(chatId, message.id, attach.audioId) }
                     val voiceWidth = minOf(maxWidth, AndroidUtilities.dp(300f))
                     (voiceRow.layoutParams as LinearLayout.LayoutParams).width = voiceWidth
                     transcript.maxWidth = voiceWidth
-                    val text = if (message.id != 0L && attach.audioId != 0L) MaxVoice.transcript(message.id) else null
+                    val text = if (message.id != 0L && MaxVoice.isExpanded(message.id)) MaxVoice.transcript(message.id) else null
                     if (text != null) {
                         transcript.visibility = VISIBLE
                         transcript.text = text
                         transcript.setTextColor(textColor)
-                    } else if (message.id != 0L && attach.audioId != 0L) {
-                        MaxVoice.request(chatId, message.id, attach.audioId)
                     }
                 }
                 attach != null && attach.isFile -> {
