@@ -132,6 +132,10 @@ class MaxAttach(
     val duration: Long,
     val videoId: Long,
     val token: String?,
+    /** id голосового для запроса расшифровки (202), только AUDIO. */
+    val audioId: Long,
+    /** осциллограмма MAX: 80 байт 0..120, как в Komet `wave`. */
+    val wave: IntArray,
     val raw: JSONObject,
 ) {
     val isPhoto get() = type == "PHOTO"
@@ -162,8 +166,32 @@ class MaxAttach(
                 duration = a.optLong("duration", 0L),
                 videoId = a.optLong("videoId", 0L),
                 token = a.optString("token", "").ifEmpty { a.optString("videoToken", "") }.ifEmpty { null },
+                audioId = a.optLong("audioId", 0L),
+                wave = parseWave(a.opt("wave")),
                 raw = a,
             )
+        }
+
+        /**
+         * MAX присылает `wave` массивом байтов 0..120 (как в Komet attachment.dart),
+         * иногда строкой тех же кодов или обёрткой `{"$bin": base64}`.
+         */
+        private fun parseWave(raw: Any?): IntArray = when (raw) {
+            is JSONArray -> IntArray(raw.length()) { i ->
+                val v = raw.optInt(i, 0)
+                (if (v < 0) v + 256 else v).coerceIn(0, 255)
+            }
+            is String -> if (raw.isEmpty()) IntArray(0) else IntArray(raw.length) { raw[it].code.coerceIn(0, 255) }
+            is JSONObject -> {
+                val b64 = raw.optString("\$bin", "")
+                if (b64.isEmpty()) IntArray(0) else try {
+                    val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                    IntArray(bytes.size) { bytes[it].toInt() and 0xFF }
+                } catch (e: Throwable) {
+                    IntArray(0)
+                }
+            }
+            else -> IntArray(0)
         }
     }
 }

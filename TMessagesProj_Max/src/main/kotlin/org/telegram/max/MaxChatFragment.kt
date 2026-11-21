@@ -389,6 +389,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         loadHistory()
         if (chat.isDialog && !chat.isSaved) MaxClient.refreshPresence(listOf(chat.peerId))
         MaxAudio.onChanged = { AndroidUtilities.runOnUIThread { adapter.notifyDataSetChanged() } }
+        MaxVoice.onChanged = { adapter.notifyDataSetChanged() }
         return root
     }
 
@@ -945,6 +946,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         AndroidUtilities.cancelRunOnUIThread(headerTicker)
         MaxAudio.stop()
         MaxAudio.onChanged = null
+        MaxVoice.onChanged = null
         AndroidUtilities.cancelRunOnUIThread(recordTicker)
         if (MaxRecorder.isRecording) MaxRecorder.stop(false) {}
         super.onFragmentDestroy()
@@ -1769,6 +1771,11 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private val fileIcon = TextView(context)
         private val fileName = TextView(context)
         private val fileSize = TextView(context)
+        private val voiceRow = LinearLayout(context)
+        private val voicePlay = TextView(context)
+        private val voiceWave = VoiceWaveView(context)
+        private val voiceTime = TextView(context)
+        private val transcript = TextView(context)
         private val textBox = FrameLayout(context)
         private val body = TextView(context)
         private val meta = MaxBubbles.Meta(context)
@@ -1842,6 +1849,24 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             fileTexts.addView(fileSize, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
             fileRow.addView(fileTexts, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 10f, 0f, 4f, 0f))
             bubble.addView(fileRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 2f))
+
+            // Голосовое как в Komet: кнопка, осциллограмма, длительность и встроенная расшифровка.
+            voiceRow.orientation = LinearLayout.HORIZONTAL
+            voiceRow.gravity = Gravity.CENTER_VERTICAL
+            voicePlay.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 16f)
+            voicePlay.gravity = Gravity.CENTER
+            voicePlay.setTextColor(0xffffffff.toInt())
+            voiceRow.addView(voicePlay, LayoutHelper.createLinear(40, 40))
+            voiceRow.addView(voiceWave, LayoutHelper.createLinear(0, 34, 1f, 8, 0, 6, 0))
+            voiceTime.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 12f)
+            voiceTime.gravity = Gravity.CENTER_VERTICAL
+            voiceRow.addView(voiceTime, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT))
+            bubble.addView(voiceRow, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 2f, 0f, 2f))
+
+            transcript.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 14f)
+            transcript.maxLines = 10
+            transcript.ellipsize = TextUtils.TruncateAt.END
+            bubble.addView(transcript, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0f, 3f, 0f, 1f))
 
             // Контакт как в Telegram: аватарка, имя, номер; ниже кнопки «Написать» / «Добавить».
             contactBox.orientation = LinearLayout.VERTICAL
@@ -1978,6 +2003,8 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             // Медиа и файлы
             media.visibility = GONE
             fileRow.visibility = GONE
+            voiceRow.visibility = GONE
+            transcript.visibility = GONE
             contactBox.visibility = GONE
             mediaMeta.visibility = GONE
             var bodyText = message.text
@@ -2004,15 +2031,36 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
                         mediaMeta.bind(message.time, message.edited, status, MaxBubbles.Mode.MEDIA)
                     }
                 }
-                attach != null && (attach.isFile || attach.isAudio) -> {
+                attach != null && attach.isAudio -> {
+                    voiceRow.visibility = VISIBLE
+                    val playing = MaxAudio.playingId == message.id && message.id != 0L
+                    voicePlay.text = if (playing) "❚❚" else "▶"
+                    voicePlay.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(20f), accent)
+                    voiceWave.colors(accent, (secondary and 0x00FFFFFF) or 0x66000000)
+                    voiceWave.setWave(attach.wave)
+                    voiceWave.bindTrack(message.id, attach.duration)
+                    voiceTime.text = MaxMedia.durationText(attach.duration)
+                    voiceTime.setTextColor(secondary)
+                    val voiceWidth = minOf(maxWidth, AndroidUtilities.dp(300f))
+                    (voiceRow.layoutParams as LinearLayout.LayoutParams).width = voiceWidth
+                    transcript.maxWidth = voiceWidth
+                    val text = if (message.id != 0L && attach.audioId != 0L) MaxVoice.transcript(message.id) else null
+                    if (text != null) {
+                        transcript.visibility = VISIBLE
+                        transcript.text = text
+                        transcript.setTextColor(textColor)
+                    } else if (message.id != 0L && attach.audioId != 0L) {
+                        MaxVoice.request(chatId, message.id, attach.audioId)
+                    }
+                }
+                attach != null && attach.isFile -> {
                     fileRow.visibility = VISIBLE
-                    val playing = attach.isAudio && MaxAudio.playingId == message.id && message.id != 0L
-                    fileIcon.text = if (attach.isAudio) (if (playing) "❚❚" else "▶") else "⬇"
+                    fileIcon.text = "⬇"
                     fileIcon.background = Theme.createRoundRectDrawable(AndroidUtilities.dp(22f), accent)
-                    fileName.text = if (attach.isAudio) "Голосовое сообщение" else (attach.name ?: "Файл")
+                    fileName.text = attach.name ?: "Файл"
                     fileName.setTextColor(textColor)
                     fileName.maxWidth = maxWidth - AndroidUtilities.dp(90f)
-                    fileSize.text = if (attach.isAudio) MaxMedia.durationText(attach.duration) else MaxMedia.sizeText(attach.size)
+                    fileSize.text = MaxMedia.sizeText(attach.size)
                     fileSize.setTextColor(secondary)
                 }
                 attach != null && bodyText.isEmpty() -> bodyText = message.attachLabel ?: ""

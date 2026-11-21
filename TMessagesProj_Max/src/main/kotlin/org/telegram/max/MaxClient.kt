@@ -94,6 +94,7 @@ object MaxClient {
     private const val OP_CHAT_MEMBERS_UPDATE = 77
     private const val OP_CHAT_SUBSCRIBE = 75
     private const val OP_MSG_REACTION = 178
+private const val OP_AUDIO_TRANSCRIPTION = 202
     private const val OP_STORIES_LIST = 208
     private const val OP_FOLDERS_GET = 272
     private const val OP_SEND_VOTE = 304
@@ -109,6 +110,7 @@ object MaxClient {
     private const val PUSH_PRESENCE = 132
     private const val PUSH_MSG_DELETE = 142
     private const val PUSH_REACTIONS = 155
+private const val PUSH_TRANSCRIPTION_RESULT = 293
     private const val PUSH_STORIES = 216
 
     @Volatile
@@ -1838,6 +1840,28 @@ object MaxClient {
     }
 
     /** Ссылка на скачивание файла (опкод 88 с fileId), как у Komet getFileUrl. */
+    /**
+     * Расшифровка голосового (202, как в Komet requestTranscription): `{chatId, messageId, mediaId}`,
+     * ответ `{transcriptionStatus, transcription}`. Статус 1 — готово, 0 — ещё идёт (придёт push 293).
+     */
+    fun requestTranscription(chatId: Long, messageId: Long, audioId: Long, onResult: (Int, String?) -> Unit) {
+        io {
+            try {
+                val payload = JSONObject()
+                    .put("chatId", chatId)
+                    .put("messageId", messageId)
+                    .put("mediaId", audioId)
+                val data = JSONObject(request(OP_AUDIO_TRANSCRIPTION, payload))
+                val status = data.optInt("transcriptionStatus", -1)
+                val text = data.optString("transcription", "").ifEmpty { null }
+                onResult(status, text)
+            } catch (e: Throwable) {
+                MaxLog.e("requestTranscription failed", e)
+                onResult(-1, null)
+            }
+        }
+    }
+
     fun fileUrl(chatId: Long, messageId: Long, fileId: Long, onResult: (String?, Throwable?) -> Unit) {
         io {
             try {
@@ -1950,6 +1974,15 @@ object MaxClient {
                     val messageId = body.optString("messageId", "").toLongOrNull() ?: return
                     val info = if ((body.optJSONArray("counters")?.length() ?: 0) == 0) null else MaxReactions.parse(body)
                     forEachListener { it.onReactionsChanged(chatId, messageId, info) }
+                }
+                PUSH_TRANSCRIPTION_RESULT -> {
+                    val src = body.optJSONObject("message") ?: body
+                    val messageId = src.optString("messageId", "").toLongOrNull()
+                        ?: src.optLong("messageId", 0L).takeIf { it != 0L }
+                        ?: src.optString("msgId", "").toLongOrNull()
+                        ?: return
+                    if (src.optInt("transcriptionStatus", 1) != 1) return
+                    MaxVoice.acceptPush(messageId, src.optString("transcription", "").ifEmpty { null })
                 }
                 PUSH_STORIES -> {
                     MaxStoryPreview.parse(body.optJSONObject("storiesPreview"))?.let {

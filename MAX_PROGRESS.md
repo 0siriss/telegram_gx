@@ -48,6 +48,41 @@
 - Закоммитить в `patches/fork-changes.patch` ничего не нужно — правки только
   в MAX-модуле.
 
+
+## 2026-11-21
+
+### Голосовые как в Komet
+
+1. **Осциллограмма и встроенная расшифровка.**
+   - `MaxModels.kt`: у `MaxAttach` появились `audioId` и `wave` (80 байт 0..120);
+     `parseWave` понимает массив, строку кодов и обёртку `{"$bin": base64}`.
+   - `MaxClient.kt`: опкод 202 `requestTranscription` (`mediaId` = `audioId`) и
+     push 293 `PUSH_TRANSCRIPTION_RESULT`.
+   - `MaxVoice.kt`: кэш расшифровок по `messageId`, ленивый запрос при показе
+     пузыря, повтор при статусе 0, `acceptPush` для push 293.
+   - `MaxVoiceWaveView.kt`: столбики из `wave`, прогресс по позиции
+     `MediaPlayer`, тап по волне — перемотка.
+   - `MaxChatFragment.kt`: отдельная строка голосового (кнопка, волна,
+     длительность) и `transcript` под ней; `MaxVoice.onChanged` перерисовывает
+     список.
+
+2. **v2.4.21 (шапка/градиент).**
+   - Установленный APK совпал по SHA-256 с релизным — проблема не в доставке
+     сборки. Зафиксировано, что ротация вызывается при отправке.
+   - Гипотезы: `SharedConfig.chatBlurEnabled()` = false (непрозрачная шапка)
+     и/или `Theme.getColor(key_chat_outBubbleGradientAnimated) == 0` в теме
+     пользователя.
+
+### Проверено
+
+- `compile-check/gen` + `gradle -p TMessagesProj_Max/compile-check compileKotlin`
+  — BUILD SUCCESSFUL.
+
+### Осталось
+
+- Проверить на устройстве волну и расшифровку, затем собрать очередной APK
+  через workflow_dispatch.
+
 ## Запреты
 
 - Скриншоты с телефона не пушить в репозиторий (см. `CLAUDE.md`).

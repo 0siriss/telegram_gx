@@ -50,6 +50,24 @@ object MaxAudio {
         }
     }
 
+    /** Позиция воспроизведения в мс; 0, если ничего не играет или плеер ещё не готов. */
+    fun positionMs(): Int {
+        val p = player ?: return 0
+        return try {
+            p.currentPosition.coerceAtLeast(0)
+        } catch (e: Throwable) {
+            0
+        }
+    }
+
+    fun seekTo(ms: Int) {
+        val p = player ?: return
+        try {
+            p.seekTo(ms.coerceAtLeast(0))
+        } catch (ignored: Throwable) {
+        }
+    }
+
     fun stop() {
         try {
             player?.release()
