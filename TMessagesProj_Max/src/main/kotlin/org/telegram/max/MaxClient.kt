@@ -1275,14 +1275,18 @@ private const val PUSH_TRANSCRIPTION_RESULT = 293
         if (result.status != 200) throw IllegalStateException("фото не загрузилось: ${result.status}")
         val token = photoToken(String(result.body, Charsets.UTF_8)) ?: throw IllegalStateException("сервер не вернул токен фото")
         val answer = JSONObject(request(OP_PROFILE, JSONObject().put("photoToken", token).put("avatarType", "USER_AVATAR")))
-        applyProfile(answer)
+        // Invalidate old avatar URL before applying new profile
+        val oldAvatarUrl = MaxContacts.get(MaxStore.accountId)?.avatarUrl
+        applyProfile(answer, oldAvatarUrl)
     }
 
-    private fun applyProfile(answer: JSONObject) {
+    private fun applyProfile(answer: JSONObject, oldAvatarUrl: String? = null) {
         val profile = answer.optJSONObject("profile") ?: return
         MaxContact.parse(profile.optJSONObject("contact") ?: profile)?.let {
             MaxContacts.put(it)
-            MaxImages.forget(it.avatarUrl)
+            // Invalidate both old and new avatar URLs from cache
+            oldAvatarUrl?.let { MaxImages.forget(it) }
+            it.avatarUrl?.let { MaxImages.forget(it) }
         }
         forEachListener { it.onContactsChanged() }
     }

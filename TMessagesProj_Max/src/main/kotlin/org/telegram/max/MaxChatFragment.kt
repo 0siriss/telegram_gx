@@ -770,6 +770,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         input.setOnClickListener { if (emojiShown) showEmoji(false, openKeyboard = true) }
 
         // Полоса записи голосового: занимает место поля ввода, пока идёт запись.
+        // Как в Telegram: время записи, кнопка «Отправить», кнопка «Отмена».
         recordBar = LinearLayout(context)
         recordBar.orientation = LinearLayout.HORIZONTAL
         recordBar.gravity = Gravity.CENTER_VERTICAL
@@ -778,6 +779,16 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         recordTime.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 16f)
         recordTime.setTextColor(Theme.getColor(Theme.key_chat_messagePanelText))
         recordBar.addView(recordTime, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.CENTER_VERTICAL, 16, 0, 0, 0))
+        val sendVoiceBtn = ImageView(context)
+        sendVoiceBtn.setImageResource(org.telegram.messenger.R.drawable.attach_send)
+        sendVoiceBtn.scaleType = ImageView.ScaleType.CENTER
+        sendVoiceBtn.setColorFilter(android.graphics.PorterDuffColorFilter(
+            0xffffffff.toInt(), android.graphics.PorterDuff.Mode.SRC_IN))
+        sendVoiceBtn.setBackgroundDrawable(Theme.createCircleDrawable(AndroidUtilities.dp(36f), Theme.getColor(Theme.key_chat_messagePanelSend)))
+        sendVoiceBtn.setPadding(AndroidUtilities.dp(8f), AndroidUtilities.dp(8f), AndroidUtilities.dp(8f), AndroidUtilities.dp(8f))
+        sendVoiceBtn.setOnClickListener { stopVoice(send = true) }
+        sendVoiceBtn.contentDescription = "Отправить"
+        recordBar.addView(sendVoiceBtn, LayoutHelper.createLinear(36, 36, Gravity.CENTER_VERTICAL))
         val cancel = TextView(context)
         cancel.text = "Отмена"
         cancel.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
@@ -802,11 +813,12 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         return panel
     }
 
-    /** Пустое поле — кнопка микрофона, как в Telegram; с текстом или во время записи — «отправить». */
+    /** Пустое поле — кнопка микрофона, как в Telegram; с текстом — «отправить»; во время записи — скрыта (в recordBar своя кнопка). */
     private fun updateSendButton() {
         if (!::sendButton.isInitialized) return
+        val recording = MaxRecorder.isRecording
         val has = input.text.toString().isNotBlank()
-        val voice = !has && editing == null && !MaxRecorder.isRecording
+        val voice = !has && editing == null && !recording
         sendButton.setImageResource(if (voice) org.telegram.messenger.R.drawable.input_mic else org.telegram.messenger.R.drawable.attach_send)
         // Микрофон — на стеклянном круге, «отправить» — белая стрелка на круге цвета темы.
         sendButton.background = if (voice) sendGlass else Theme.createCircleDrawable(AndroidUtilities.dp(46f), Theme.getColor(Theme.key_chat_messagePanelSend))
@@ -816,6 +828,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         )
         sendButton.alpha = 1f
         sendButton.isEnabled = true
+        sendButton.visibility = if (recording) View.GONE else View.VISIBLE
     }
 
     private val recordTicker = object : Runnable {
@@ -1909,7 +1922,8 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             reactionsRow.gravity = Gravity.CENTER_VERTICAL
             reactionsBox.addView(reactionsRow, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.START or Gravity.CENTER_VERTICAL, 0f, 0f, 0f, 0f))
             reactionsBox.addView(reactionsMeta, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.END or Gravity.BOTTOM, 0f, 0f, 0f, 0f))
-            bubble.addView(reactionsBox, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 6f, 0f, 0f))
+            // bottomMargin=4dp — отступ под реакциями внутри пузыря, как в Telegram
+            bubble.addView(reactionsBox, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0f, 6f, 0f, 4f))
 
             addView(bubble, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT.toFloat(), Gravity.START, 0f, 0f, 0f, 0f))
 
