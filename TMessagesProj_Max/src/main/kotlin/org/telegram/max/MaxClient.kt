@@ -1835,9 +1835,13 @@ private const val PUSH_TRANSCRIPTION_RESULT = 293
                     .put("elements", JSONArray())
                     .put("cid", -System.currentTimeMillis())
                     .put("attaches", JSONArray().put(attach))
+                
+                // Добавляем логирование для отладки
+                MaxLog.i("Отправка голосового сообщения: chatId=$chatId, token=$token, duration=$durationMs")
+                
                 onResult(send(chatId, message), null)
             } catch (e: Throwable) {
-                MaxLog.e("sendVoice failed", e)
+                MaxLog.e("sendVoice failed: ${e.message}", e)
                 onResult(null, e)
             }
         }
