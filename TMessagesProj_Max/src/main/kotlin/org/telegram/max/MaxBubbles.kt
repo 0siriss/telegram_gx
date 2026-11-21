@@ -54,15 +54,9 @@ object MaxBubbles {
         }
 
         private val posAnimationProgress: Float
-            get() = motionBackgroundDrawable?.posAnimationProgress ?: 1f
+            get() = Theme.chat_msgOutDrawable?.motionBackgroundDrawable?.posAnimationProgress ?: 1f
 
-        /**
-         * `MessageDrawable` без `ResourcesProvider` читает цвета через
-         * `Theme.getCurrentColor`, а тот не подставляет дефолты темы: у темы по умолчанию
-         * градиент исходящих лежит только в `defaultColors`, и пузырь оставался сплошным.
-         * В чате Telegram это закрывает `themeDelegate` (его `getCurrentColor` = `getColor`).
-         */
-        override fun getCurrentColor(key: Int): Int = Theme.getColor(key)
+        override fun getCurrentColor(key: Int): Int = Theme.getColor(key, null)
     }
 
     /**
