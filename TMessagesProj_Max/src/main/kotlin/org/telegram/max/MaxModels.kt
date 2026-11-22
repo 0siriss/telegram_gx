@@ -360,7 +360,7 @@ class MaxReactions(val counters: List<Pair<String, Int>>, val mine: String?) {
     }
 
     companion object {
-        val QUICK = listOf("👍", "❤️", "🔥", "🤣", "😭", "😍", "👎", "🙏")
+        val QUICK = listOf("👍", "❤️", "🔥", "🤣", "😭", "😍", "👎", "🙏", "🎉", "🤯", "🤬", "😱")
 
         fun parse(json: JSONObject?, keepMine: String? = null): MaxReactions? {
             if (json == null) return null

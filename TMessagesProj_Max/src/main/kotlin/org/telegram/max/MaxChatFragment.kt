@@ -6,7 +6,8 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.provider.OpenableColumns
+import android.os.Environment
+import android.provider.MediaStore
 import android.text.Editable
 import android.text.TextUtils
 import android.text.TextWatcher
@@ -19,6 +20,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.FileProvider
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import org.telegram.messenger.AndroidUtilities
@@ -34,7 +36,10 @@ import org.telegram.ui.Components.ItemOptions
 import org.telegram.ui.Components.LayoutHelper
 import org.telegram.ui.Components.RecyclerListView
 import org.telegram.ui.Components.SizeNotifierFrameLayout
-import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.io.OutputStream
 import java.util.Calendar
 
 /**
@@ -1186,11 +1191,61 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         ItemOptions.makeOptions(this, attachButton)
             .add(org.telegram.messenger.R.drawable.msg_photos, "Фото или видео") { pick(REQ_PHOTO) }
             .add(org.telegram.messenger.R.drawable.msg_video, "Видео") { pick(REQ_VIDEO) }
+            .add(org.telegram.messenger.R.drawable.msg_photos, "Камера") { pickCamera() }
             .add(org.telegram.messenger.R.drawable.msg_view_file, "Файл") { pick(REQ_FILE) }
             .add(org.telegram.messenger.R.drawable.filled_poll_add_24, "Опрос") { askPoll() }
             .add(org.telegram.messenger.R.drawable.msg_location, "Геопозиция") { sendMyLocation() }
             .add(org.telegram.messenger.R.drawable.msg_contact, "Контакт") { pickContactToSend() }
             .show()
+    }
+
+    private fun pickCamera() {
+        ItemOptions.makeOptions(this, attachButton)
+            .add(org.telegram.messenger.R.drawable.msg_photos, "Фото") { cameraPhoto() }
+            .add(org.telegram.messenger.R.drawable.msg_video, "Видео") { cameraVideo() }
+            .show()
+    }
+
+    private fun cameraPhoto() {
+        val activity = parentActivity ?: return
+        val file = createCameraFile("jpg")
+        val uri = FileProvider.getUriForFile(activity, activity.packageName + ".provider", file)
+        val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+        intent.putExtra(MediaStore.EXTRA_OUTPUT, uri)
+        intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        try {
+            startActivityForResult(intent, REQ_CAMERA_PHOTO)
+        } catch (e: Throwable) {
+            toast("Камера недоступна")
+        }
+        cameraOutputFile = file
+        cameraOutputUri = uri
+    }
+
+    private fun cameraVideo() {
+        val activity = parentActivity ?: return
+        val file = createCameraFile("mp4")
+        val uri = FileProvider.getUriForFile(activity, activity.packageName + ".provider", file)
+        val intent = Intent(MediaStore.ACTION_VIDEO_CAPTURE)
+        intent.putExtra(MediaStore.EXTRA_OUTPUT, uri)
+        intent.putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 1)
+        intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        try {
+            startActivityForResult(intent, REQ_CAMERA_VIDEO)
+        } catch (e: Throwable) {
+            toast("Камера недоступна")
+        }
+        cameraOutputFile = file
+        cameraOutputUri = uri
+    }
+
+    private var cameraOutputFile: File? = null
+    private var cameraOutputUri: Uri? = null
+
+    private fun createCameraFile(ext: String): File {
+        val dir = File(parentActivity?.externalCacheDir ?: parentActivity?.cacheDir, "max_camera")
+        dir.mkdirs()
+        return File(dir, "max_camera_${System.currentTimeMillis()}.$ext")
     }
 
     /** Новый опрос — как «Опрос» в скрепке Telegram: вопрос, варианты, флажки. */
@@ -1303,12 +1358,54 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
 
     override fun onActivityResultFragment(requestCode: Int, resultCode: Int, data: Intent?) {
         if (resultCode != Activity.RESULT_OK) return
-        val uri = data?.data ?: return
-        val mime = try { parentActivity?.contentResolver?.getType(uri) } catch (e: Throwable) { null } ?: ""
-        when {
-            requestCode == REQ_VIDEO || (requestCode == REQ_PHOTO && mime.startsWith("video/")) -> sendPickedVideo(uri)
-            requestCode == REQ_PHOTO -> sendPickedPhoto(uri)
-            requestCode == REQ_FILE -> sendPickedFile(uri)
+        when (requestCode) {
+            REQ_CAMERA_PHOTO -> {
+                cameraOutputUri?.let { uri ->
+                    val local = MaxMessage(0L, -System.currentTimeMillis(), MaxStore.accountId, "", System.currentTimeMillis(), "Фото", false)
+                    local.pending = true
+                    merge(listOf(local))
+                    rebuild(scrollToEnd = true)
+                    Thread {
+                        val bytes = try {
+                            readPhoto(parentActivity ?: return@Thread, uri)
+                        } catch (e: Throwable) {
+                            replaceLocal(local, null, e)
+                            return@Thread
+                        }
+                        MaxClient.sendPhoto(chatId, bytes, "") { sent, error -> replaceLocal(local, sent, error) }
+                    }.start()
+                }
+                cameraOutputFile = null
+                cameraOutputUri = null
+            }
+            REQ_CAMERA_VIDEO -> {
+                cameraOutputUri?.let { uri ->
+                    val local = MaxMessage(0L, -System.currentTimeMillis(), MaxStore.accountId, "", System.currentTimeMillis(), "Видео", false)
+                    local.pending = true
+                    merge(listOf(local))
+                    rebuild(scrollToEnd = true)
+                    Thread {
+                        val bytes = try {
+                            (parentActivity ?: return@Thread).contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw IllegalStateException("видео не открылось")
+                        } catch (e: Throwable) {
+                            replaceLocal(local, null, e)
+                            return@Thread
+                        }
+                        MaxClient.sendVideo(chatId, bytes, "") { sent, error -> replaceLocal(local, sent, error) }
+                    }.start()
+                }
+                cameraOutputFile = null
+                cameraOutputUri = null
+            }
+            else -> {
+                val uri = data?.data ?: return
+                val mime = try { parentActivity?.contentResolver?.getType(uri) } catch (e: Throwable) { null } ?: ""
+                when {
+                    requestCode == REQ_VIDEO || (requestCode == REQ_PHOTO && mime.startsWith("video/")) -> sendPickedVideo(uri)
+                    requestCode == REQ_PHOTO -> sendPickedPhoto(uri)
+                    requestCode == REQ_FILE -> sendPickedFile(uri)
+                }
+            }
         }
     }
 
@@ -2370,6 +2467,8 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         private const val REQ_MIC = 7103
         private const val REQ_VIDEO = 7104
         private const val REQ_LOCATION = 7105
+        private const val REQ_CAMERA_PHOTO = 7106
+        private const val REQ_CAMERA_VIDEO = 7107
         private const val MAX_VIDEO = 200L * 1024 * 1024
         private const val MENU_SEARCH = 1
         private const val MENU_MORE = 2
