@@ -56,7 +56,7 @@ object MaxBubbles {
         private val posAnimationProgress: Float
             get() = MessageDrawable.motionBackground[0]?.posAnimationProgress ?: 1f
 
-        override fun getCurrentColor(key: Int): Int = Theme.getColor(key, null)
+        override fun getCurrentColor(key: Int): Int = Theme.getColor(key, null as Theme.ResourcesProvider?)
     }
 
     /**
