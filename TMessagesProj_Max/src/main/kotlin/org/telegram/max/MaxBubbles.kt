@@ -54,7 +54,7 @@ object MaxBubbles {
         }
 
         private val posAnimationProgress: Float
-            get() = Theme.chat_msgOutDrawable?.motionBackgroundDrawable?.posAnimationProgress ?: 1f
+            get() = MessageDrawable.motionBackground[0]?.posAnimationProgress ?: 1f
 
         override fun getCurrentColor(key: Int): Int = Theme.getColor(key, null)
     }
@@ -67,7 +67,7 @@ object MaxBubbles {
      */
     fun rotateOutGradient(wallpaper: Drawable? = null) {
         if (wallpaper is MotionBackgroundDrawable) wallpaper.switchToNextPosition()
-        Theme.chat_msgOutDrawable?.motionBackgroundDrawable?.switchToNextPosition()
+        MessageDrawable.motionBackground[0]?.switchToNextPosition()
     }
 
     /** Отступы содержимого внутри пузыря: со стороны хвостика 17dp, с другой 11dp. */
