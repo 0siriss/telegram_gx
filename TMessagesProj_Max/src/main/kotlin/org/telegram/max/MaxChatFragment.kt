@@ -1193,18 +1193,11 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         ItemOptions.makeOptions(this, attachButton)
             .add(org.telegram.messenger.R.drawable.msg_photos, "Фото или видео") { pick(REQ_PHOTO) }
             .add(org.telegram.messenger.R.drawable.msg_video, "Видео") { pick(REQ_VIDEO) }
-            .add(org.telegram.messenger.R.drawable.msg_photos, "Камера") { pickCamera() }
+            .add(org.telegram.messenger.R.drawable.msg_photos, "Камера") { cameraPhoto() }
             .add(org.telegram.messenger.R.drawable.msg_view_file, "Файл") { pick(REQ_FILE) }
             .add(org.telegram.messenger.R.drawable.filled_poll_add_24, "Опрос") { askPoll() }
             .add(org.telegram.messenger.R.drawable.msg_location, "Геопозиция") { sendMyLocation() }
             .add(org.telegram.messenger.R.drawable.msg_contact, "Контакт") { pickContactToSend() }
-            .show()
-    }
-
-    private fun pickCamera() {
-        ItemOptions.makeOptions(this, attachButton)
-            .add(org.telegram.messenger.R.drawable.msg_photos, "Фото") { cameraPhoto() }
-            .add(org.telegram.messenger.R.drawable.msg_video, "Видео") { cameraVideo() }
             .show()
     }
 
@@ -1217,23 +1210,6 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         try {
             startActivityForResult(intent, REQ_CAMERA_PHOTO)
-        } catch (e: Throwable) {
-            toast("Камера недоступна")
-        }
-        cameraOutputFile = file
-        cameraOutputUri = uri
-    }
-
-    private fun cameraVideo() {
-        val activity = parentActivity ?: return
-        val file = createCameraFile("mp4")
-        val uri = FileProvider.getUriForFile(activity, activity.packageName + ".provider", file)
-        val intent = Intent(MediaStore.ACTION_VIDEO_CAPTURE)
-        intent.putExtra(MediaStore.EXTRA_OUTPUT, uri)
-        intent.putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 1)
-        intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        try {
-            startActivityForResult(intent, REQ_CAMERA_VIDEO)
         } catch (e: Throwable) {
             toast("Камера недоступна")
         }
