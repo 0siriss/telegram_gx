@@ -164,8 +164,68 @@ object MaxRecorder {
                 onDone(null)
                 return@Thread
             }
+            finishOgg(target)
             onDone(Result(target, duration, wave()))
         }.start()
+    }
+
+    /**
+     * Кодировщик Telegram при остановке сбрасывает страницы, но не ставит на последнюю
+     * флаг конца потока. Сервер MAX такой файл не дообрабатывает (attachment.not.ready),
+     * поэтому дописываем EOS сами и пересчитываем CRC страницы.
+     */
+    private fun finishOgg(file: File) {
+        val bytes = try {
+            file.readBytes()
+        } catch (e: Throwable) {
+            MaxLog.e("не прочитать запись для завершения Ogg", e)
+            return
+        }
+        var offset = 0
+        var last = -1
+        while (offset + 27 <= bytes.size) {
+            if (bytes[offset] != 'O'.code.toByte() || bytes[offset + 1] != 'g'.code.toByte() ||
+                bytes[offset + 2] != 'g'.code.toByte() || bytes[offset + 3] != 'S'.code.toByte()
+            ) return
+            val segments = bytes[offset + 26].toInt() and 0xFF
+            if (offset + 27 + segments > bytes.size) return
+            var body = 0
+            for (i in 0 until segments) body += bytes[offset + 27 + i].toInt() and 0xFF
+            val end = offset + 27 + segments + body
+            if (end > bytes.size) return
+            last = offset
+            offset = end
+        }
+        if (last < 0 || offset != bytes.size) return
+        if (bytes[last + 5].toInt() and 0x04 != 0) return
+        bytes[last + 5] = (bytes[last + 5].toInt() or 0x04).toByte()
+        for (i in 22..25) bytes[last + i] = 0
+        var crc = 0
+        for (i in last until bytes.size) {
+            crc = (crc shl 8) xor OGG_CRC[((crc ushr 24) xor (bytes[i].toInt() and 0xFF)) and 0xFF]
+        }
+        bytes[last + 22] = (crc and 0xFF).toByte()
+        bytes[last + 23] = ((crc ushr 8) and 0xFF).toByte()
+        bytes[last + 24] = ((crc ushr 16) and 0xFF).toByte()
+        bytes[last + 25] = ((crc ushr 24) and 0xFF).toByte()
+        try {
+            file.writeBytes(bytes)
+        } catch (e: Throwable) {
+            MaxLog.e("не записать завершённый Ogg", e)
+        }
+    }
+
+    /** CRC Ogg: полином 0x04C11DB7, старший бит вперёд, без отражения. */
+    private val OGG_CRC = IntArray(256) { index ->
+        var value = index shl 24
+        repeat(8) {
+            value = if (value and 0x80000000.toInt() != 0) {
+                (value shl 1) xor 0x04C11DB7
+            } else {
+                value shl 1
+            }
+        }
+        value
     }
 
     /** Волна для MAX, как у Komet: 80 столбиков, пики 0..120. */

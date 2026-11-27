@@ -63,6 +63,11 @@ write("org.telegram.ui.ActionBar","BaseFragment",
 """ + M("org/telegram/ui/ActionBar/BaseFragment.java", ["onFragmentCreate","onFragmentDestroy","onResume","onPause","isPaused","presentFragment","finishFragment","getParentActivity","showDialog","getActionBar","getContext","startActivityForResult","onActivityResultFragment","onRequestPermissionsResultFragment","isLightStatusBar","onBackPressed"]) + "\n}", UI)
 
 # --- vendored RecyclerView: только то, что реально используется, с настоящими дженериками ---
+write("androidx.core.content","FileProvider",
+"""public class FileProvider {
+    public static android.net.Uri getUriForFile(Context context, String authority, java.io.File file) { return null; }
+}""", ANDROID)
+
 write("androidx.recyclerview.widget","RecyclerView",
 """public class RecyclerView extends ViewGroup {
     public RecyclerView(Context context) { super(context); }
@@ -178,6 +183,7 @@ write("org.telegram.ui.ActionBar","MessageDrawable",
     public void setColorFilter(ColorFilter f) {}
     public int getOpacity() { return 0; }
     protected int getCurrentColor(int key) { return 0; }
+    public static org.telegram.ui.Components.MotionBackgroundDrawable[] motionBackground = new org.telegram.ui.Components.MotionBackgroundDrawable[3];
     public org.telegram.ui.Components.MotionBackgroundDrawable getMotionBackgroundDrawable() { return null; }
 """ + M("org/telegram/ui/ActionBar/MessageDrawable.java", ["setTop","draw"]) + "\n}", UI)
 

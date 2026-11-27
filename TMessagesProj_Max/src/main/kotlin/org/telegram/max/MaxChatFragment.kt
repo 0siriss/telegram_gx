@@ -13,6 +13,7 @@ import android.text.Editable
 import android.text.TextUtils
 import android.text.TextWatcher
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
@@ -73,6 +74,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     private lateinit var replyText: TextView
     private lateinit var recordBar: LinearLayout
     private lateinit var recordTime: TextView
+    private lateinit var recordHint: TextView
     private lateinit var attachButton: ImageView
     private lateinit var header: View
     private lateinit var pinBar: FrameLayout
@@ -96,6 +98,13 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
     /** На что отвечаем (или что правим) — показывается плашкой над полем ввода. */
     private var replyTo: MaxMessage? = null
     private var editing: MaxMessage? = null
+
+    /** Пустое поле — на кнопке микрофон: её держат для записи, отпускают для отправки. */
+    private var voiceMode = false
+    private var voiceGesture = false
+    private var recordCancelled = false
+    private var recordStartY = 0f
+    private var recordStartX = 0f
 
     private val chat: MaxChat
         get() = MaxClient.chatById(chatId)
@@ -777,7 +786,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         input.setOnClickListener { if (emojiShown) showEmoji(false, openKeyboard = true) }
 
         // Полоса записи голосового: занимает место поля ввода, пока идёт запись.
-        // Как в Telegram: время записи, кнопка «Отправить», кнопка «Отмена».
+        // Кнопку держат — идёт запись, отпускают — отправка, движение вверх или влево — отмена.
         recordBar = LinearLayout(context)
         recordBar.orientation = LinearLayout.HORIZONTAL
         recordBar.gravity = Gravity.CENTER_VERTICAL
@@ -785,25 +794,14 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         recordTime = TextView(context)
         recordTime.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 16f)
         recordTime.setTextColor(Theme.getColor(Theme.key_chat_messagePanelText))
-        recordBar.addView(recordTime, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.CENTER_VERTICAL, 16, 0, 0, 0))
-        val sendVoiceBtn = ImageView(context)
-        sendVoiceBtn.setImageResource(org.telegram.messenger.R.drawable.attach_send)
-        sendVoiceBtn.scaleType = ImageView.ScaleType.CENTER
-        sendVoiceBtn.setColorFilter(android.graphics.PorterDuffColorFilter(
-            0xffffffff.toInt(), android.graphics.PorterDuff.Mode.SRC_IN))
-        sendVoiceBtn.setBackgroundDrawable(Theme.createCircleDrawable(AndroidUtilities.dp(36f), Theme.getColor(Theme.key_chat_messagePanelSend)))
-        sendVoiceBtn.setPadding(AndroidUtilities.dp(8f), AndroidUtilities.dp(8f), AndroidUtilities.dp(8f), AndroidUtilities.dp(8f))
-        sendVoiceBtn.setOnClickListener { stopVoice(send = true) }
-        sendVoiceBtn.contentDescription = "Отправить"
-        recordBar.addView(sendVoiceBtn, LayoutHelper.createLinear(36, 36, Gravity.CENTER_VERTICAL))
-        val cancel = TextView(context)
-        cancel.text = "Отмена"
-        cancel.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15f)
-        cancel.typeface = AndroidUtilities.bold()
-        cancel.setTextColor(Theme.getColor(Theme.key_text_RedRegular))
-        cancel.setPadding(AndroidUtilities.dp(12f), AndroidUtilities.dp(12f), AndroidUtilities.dp(12f), AndroidUtilities.dp(12f))
-        cancel.setOnClickListener { stopVoice(send = false) }
-        recordBar.addView(cancel, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL))
+        recordBar.addView(recordTime, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL, 16, 0, 0, 0))
+        recordHint = TextView(context)
+        recordHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 13f)
+        recordHint.setTextColor(Theme.getColor(Theme.key_chat_messagePanelHint))
+        recordHint.text = "Отпустите — отправить"
+        recordHint.isSingleLine = true
+        recordHint.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        recordBar.addView(recordHint, LayoutHelper.createLinear(0, LayoutHelper.WRAP_CONTENT, 1f, Gravity.CENTER_VERTICAL, 8, 0, 16, 0))
         pill.addView(recordBar, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 46f, Gravity.CENTER_VERTICAL, 0f, 0f, 0f, 0f))
 
         sendButton = ImageView(context)
@@ -815,33 +813,70 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         sendGlass = MaxGlass.chatBottom(sendButton, 23f)
         sendButton.background = sendGlass
         sendButton.setOnClickListener { onSendButton() }
+        sendButton.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    if (!voiceMode) return@setOnTouchListener false
+                    voiceGesture = true
+                    recordCancelled = false
+                    recordStartY = event.rawY
+                    recordStartX = event.rawX
+                    startVoice()
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!voiceGesture || !MaxRecorder.isRecording) return@setOnTouchListener false
+                    val far = recordStartY - event.rawY > AndroidUtilities.dp(72f) ||
+                        recordStartX - event.rawX > AndroidUtilities.dp(72f)
+                    if (far != recordCancelled) {
+                        recordCancelled = far
+                        recordHint.text = if (far) "Отпустите — отмена" else "Отпустите — отправить"
+                        recordHint.setTextColor(Theme.getColor(if (far) Theme.key_text_RedRegular else Theme.key_chat_messagePanelHint))
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!voiceGesture) return@setOnTouchListener false
+                    voiceGesture = false
+                    if (MaxRecorder.isRecording) stopVoice(send = !recordCancelled, cancelled = recordCancelled)
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    val started = voiceGesture
+                    voiceGesture = false
+                    if (started && MaxRecorder.isRecording) stopVoice(send = false, cancelled = true)
+                    started
+                }
+                else -> false
+            }
+        }
         panel.addView(sendButton, LayoutHelper.createLinear(46, 46, Gravity.BOTTOM))
         updateSendButton()
         return panel
     }
 
-    /** Пустое поле — кнопка микрофона, как в Telegram; с текстом — «отправить»; во время записи — скрыта (в recordBar своя кнопка). */
+    /** Пустое поле — кнопка микрофона, как в Telegram; с текстом — «отправить». */
     private fun updateSendButton() {
         if (!::sendButton.isInitialized) return
         val recording = MaxRecorder.isRecording
         val has = input.text.toString().isNotBlank()
-        val voice = !has && editing == null && !recording
-        sendButton.setImageResource(if (voice) org.telegram.messenger.R.drawable.input_mic else org.telegram.messenger.R.drawable.attach_send)
+        voiceMode = !has && editing == null && !recording
+        val mic = voiceMode || recording
+        sendButton.setImageResource(if (mic) org.telegram.messenger.R.drawable.input_mic else org.telegram.messenger.R.drawable.attach_send)
         // Микрофон — на стеклянном круге, «отправить» — белая стрелка на круге цвета темы.
-        sendButton.background = if (voice) sendGlass else Theme.createCircleDrawable(AndroidUtilities.dp(46f), Theme.getColor(Theme.key_chat_messagePanelSend))
+        sendButton.background = if (mic) sendGlass else Theme.createCircleDrawable(AndroidUtilities.dp(46f), Theme.getColor(Theme.key_chat_messagePanelSend))
         sendButton.colorFilter = android.graphics.PorterDuffColorFilter(
-            if (voice) Theme.getColor(Theme.key_chat_messagePanelIcons) else 0xffffffff.toInt(),
+            if (mic) Theme.getColor(Theme.key_chat_messagePanelIcons) else 0xffffffff.toInt(),
             android.graphics.PorterDuff.Mode.SRC_IN
         )
         sendButton.alpha = 1f
         sendButton.isEnabled = true
-        sendButton.visibility = if (recording) View.GONE else View.VISIBLE
     }
 
     private val recordTicker = object : Runnable {
         override fun run() {
             if (!MaxRecorder.isRecording) return
-            recordTime.text = "● Запись  " + MaxMedia.durationText(MaxRecorder.elapsedMs)
+            recordTime.text = "● " + MaxMedia.durationText(MaxRecorder.elapsedMs)
             AndroidUtilities.runOnUIThread(this, 250L)
         }
     }
@@ -850,29 +885,33 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         when {
             MaxRecorder.isRecording -> stopVoice(send = true)
             input.text.toString().isNotBlank() || editing != null -> onSend()
-            else -> startVoice()
         }
     }
 
-    private fun startVoice() {
-        val activity = parentActivity ?: return
+    private fun startVoice(): Boolean {
+        val activity = parentActivity ?: return false
         if (android.os.Build.VERSION.SDK_INT >= 23 &&
             activity.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
             activity.requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQ_MIC)
-            return
+            return false
         }
         if (!MaxRecorder.start(activity)) {
             toast("Не удалось начать запись")
-            return
+            return false
         }
+        recordCancelled = false
         input.visibility = View.GONE
         recordBar.visibility = View.VISIBLE
+        recordTime.text = "● " + MaxMedia.durationText(0L)
+        recordHint.text = "Влево — отмена"
+        recordHint.setTextColor(Theme.getColor(Theme.key_chat_messagePanelHint))
         updateSendButton()
         AndroidUtilities.runOnUIThread(recordTicker)
+        return true
     }
 
-    private fun stopVoice(send: Boolean) {
+    private fun stopVoice(send: Boolean, cancelled: Boolean = false) {
         AndroidUtilities.cancelRunOnUIThread(recordTicker)
         if (::recordBar.isInitialized) {
             recordBar.visibility = View.GONE
@@ -881,7 +920,10 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
         MaxRecorder.stop(send) { result ->
             AndroidUtilities.runOnUIThread { updateSendButton() }
             if (result == null) {
-                if (send) toast("Слишком короткое голосовое")
+                when {
+                    cancelled -> toast("Запись отменена")
+                    send -> toast("Слишком короткое голосовое")
+                }
                 return@stop
             }
             AndroidUtilities.runOnUIThread { sendRecordedVoice(result) }

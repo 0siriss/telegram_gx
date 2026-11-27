@@ -1819,11 +1819,16 @@ private const val PUSH_TRANSCRIPTION_RESULT = 293
                 val info = answer.optJSONArray("info")?.optJSONObject(0)
                     ?: throw IllegalStateException("сервер не выдал адрес загрузки")
                 val url = info.optString("url", "")
+                val audioId = info.optLong("videoId", 0L)
                 val token = info.optString("token", "")
                 if (url.isEmpty() || token.isEmpty()) throw IllegalStateException("сервер не выдал адрес загрузки")
                 val live = session ?: throw IllegalStateException("нет соединения с MAX")
-                val result = live.blocking.uploadFile(url, data, "voice.ogg")
+                val result = live.blocking.uploadFile(url, data, (System.currentTimeMillis() and 0x7FFFFFFF).toString())
                 if (result.status != 200) throw IllegalStateException("голосовое не загрузилось: ${result.status}")
+                val body = String(result.body, Charsets.UTF_8)
+                if (body.contains("error_msg") || body.contains("error_code")) {
+                    throw IllegalStateException("сервер отклонил голосовое: ${body.take(200)}")
+                }
                 val attach = JSONObject()
                     .put("duration", durationMs)
                     .put("_type", "AUDIO")
