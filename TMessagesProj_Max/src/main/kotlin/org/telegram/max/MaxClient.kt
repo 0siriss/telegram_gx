@@ -1059,7 +1059,9 @@ private const val PUSH_TRANSCRIPTION_RESULT = 293
 
     /**
      * Опкод 64. Вложение после загрузки сервер обрабатывает не сразу и отвечает ошибкой
-     * «…not.ready» — как Komet, повторяем раз в секунду.
+     * «…not.ready» — как Komet, повторяем раз в секунду, не больше 30 раз. Текст ошибки
+     * содержит её ключ (`errors.process.attachment.video.not.ready`), поэтому проверяем
+     * по нему: у голосового и видео ключ один и тот же.
      */
     private fun send(chatId: Long, message: JSONObject): MaxMessage? {
         val payload = JSONObject().put("chatId", chatId).put("message", message).put("notify", true)
@@ -1071,8 +1073,7 @@ private const val PUSH_TRANSCRIPTION_RESULT = 293
                 if (sent != null) onSent(chatId, sent)
                 return sent
             } catch (e: Throwable) {
-                val notReady = (e.message ?: "").contains("not.ready")
-                if (!notReady || ++attempt >= 30) throw e
+                if (!(e.message ?: "").contains("not.ready") || ++attempt >= 30) throw e
                 Thread.sleep(1_000L)
             }
         }

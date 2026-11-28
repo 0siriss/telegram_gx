@@ -1730,7 +1730,7 @@ class MaxChatFragment(private val chatId: Long, private val contactId: Long = 0L
             .addIf(sent && !chat.isSaved && chat.pinned?.id != message.id, org.telegram.messenger.R.drawable.msg_pin, "Закрепить") { pin(message) }
             .addIf(sent && chat.pinned?.id == message.id, org.telegram.messenger.R.drawable.msg_unpin, "Открепить") { confirmUnpin() }
             .addIf(sent && canEdit, org.telegram.messenger.R.drawable.msg_edit, "Изменить") { startEdit(message) }
-            .addIf(message.failed, org.telegram.messenger.R.drawable.msg_retry, "Повторить") {
+            .addIf(message.failed && message.attachLabel == null, org.telegram.messenger.R.drawable.msg_retry, "Повторить") {
                 messages.remove(message)
                 input.setText(message.text)
                 onSend()

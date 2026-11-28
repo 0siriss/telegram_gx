@@ -92,20 +92,26 @@ object MaxRecorder {
     }
 
     /**
-     * Блокирующее чтение возвращает целый кадр. В прямой буфер AudioRecord пишет всегда
-     * с начала и на position не смотрит, поэтому кадр читаем целиком и сразу отдаём
-     * кодировщику — как сам Telegram в MediaController.
+     * Читаем микрофон и отдаём кодировщику ровно по 20 мс. Короткий кадр Telegram
+     * принимает за конец записи и ставит конец потока посреди файла, поэтому неполный
+     * кадр сначала добираем, а на остановке дополняем тишиной.
      */
     private fun loop(recorder: AudioRecord, controller: MediaController) {
         val frame = ByteBuffer.allocateDirect(FRAME_BYTES).order(ByteOrder.nativeOrder())
+        val pcm = ByteArray(FRAME_BYTES)
+        var filled = 0
         try {
             while (running) {
-                frame.clear()
-                val read = recorder.read(frame, FRAME_BYTES)
+                val read = recorder.read(pcm, filled, pcm.size - filled)
                 if (read <= 0) continue
-                writeFrame!!.invoke(controller, frame, read)
-                synchronized(peaks) { peaks.add(peak(frame, read)) }
-                bytes += read
+                filled += read
+                if (filled < pcm.size) continue
+                encode(frame, pcm, controller)
+                filled = 0
+            }
+            if (filled > 0) {
+                java.util.Arrays.fill(pcm, filled, pcm.size, 0.toByte())
+                encode(frame, pcm, controller)
             }
         } catch (e: Throwable) {
             MaxLog.e("запись голосового прервалась", e)
@@ -117,6 +123,16 @@ object MaxRecorder {
             recorder.release()
             safeStop(controller)
         }
+    }
+
+    /** Кадр ровно на 20 мс: кодировщик ждёт его целиком, иначе решает, что запись кончилась. */
+    private fun encode(frame: ByteBuffer, pcm: ByteArray, controller: MediaController) {
+        frame.clear()
+        frame.put(pcm, 0, FRAME_BYTES)
+        frame.position(0)
+        writeFrame!!.invoke(controller, frame, FRAME_BYTES)
+        synchronized(peaks) { peaks.add(peak(frame, FRAME_BYTES)) }
+        bytes += FRAME_BYTES
     }
 
     private fun safeStop(controller: MediaController) {
@@ -158,23 +174,25 @@ object MaxRecorder {
                 worker?.join(3_000L)
             } catch (ignored: InterruptedException) {
             }
-            val duration = elapsedMs
+            val total = bytes
+            val duration = total / 96L
             if (!send || target == null || duration < 700L) {
                 target?.delete()
                 onDone(null)
                 return@Thread
             }
-            finishOgg(target)
+            finishOgg(target, total / 2L)
             onDone(Result(target, duration, wave()))
         }.start()
     }
 
     /**
      * Кодировщик Telegram при остановке сбрасывает страницы, но не ставит на последнюю
-     * флаг конца потока. Сервер MAX такой файл не дообрабатывает (attachment.not.ready),
-     * поэтому дописываем EOS сами и пересчитываем CRC страницы.
+     * флаг конца потока и пишет длительность без предварительного пропуска декодера.
+     * Сервер MAX такой файл считает недокачанным и вечно отвечает attachment.not.ready,
+     * поэтому ставим конец потока, точную длительность и пересчитываем CRC страницы.
      */
-    private fun finishOgg(file: File) {
+    private fun finishOgg(file: File, samples: Long) {
         val bytes = try {
             file.readBytes()
         } catch (e: Throwable) {
@@ -183,6 +201,7 @@ object MaxRecorder {
         }
         var offset = 0
         var last = -1
+        var pages = 0
         while (offset + 27 <= bytes.size) {
             if (bytes[offset] != 'O'.code.toByte() || bytes[offset + 1] != 'g'.code.toByte() ||
                 bytes[offset + 2] != 'g'.code.toByte() || bytes[offset + 3] != 'S'.code.toByte()
@@ -194,11 +213,17 @@ object MaxRecorder {
             val end = offset + 27 + segments + body
             if (end > bytes.size) return
             last = offset
+            pages++
             offset = end
         }
-        if (last < 0 || offset != bytes.size) return
-        if (bytes[last + 5].toInt() and 0x04 != 0) return
+        // Нужны хотя бы заголовок, теги и одна страница звука.
+        if (pages < 3 || offset != bytes.size) return
+        val head = 27 + (bytes[26].toInt() and 0xFF)
+        if (head + 12 > bytes.size || String(bytes, head, 8, Charsets.US_ASCII) != "OpusHead") return
+        val preSkip = (bytes[head + 10].toInt() and 0xFF) or ((bytes[head + 11].toInt() and 0xFF) shl 8)
         bytes[last + 5] = (bytes[last + 5].toInt() or 0x04).toByte()
+        val granule = samples + preSkip
+        for (i in 0 until 8) bytes[last + 6 + i] = ((granule ushr (8 * i)) and 0xFF).toByte()
         for (i in 22..25) bytes[last + i] = 0
         var crc = 0
         for (i in last until bytes.size) {
